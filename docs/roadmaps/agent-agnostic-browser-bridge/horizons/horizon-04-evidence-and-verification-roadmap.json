@@ -1,0 +1,589 @@
+{
+  "task": "Plan horizon 4 of the agent-agnostic-browser-bridge project — a VERIFICATION-ONLY horizon that records empirical evidence in a real Chrome session (MAIN-world eval vs page CSP; clickAt/hover vs real framework handlers), measures result sizes against real target clients, and ships one hand-verified MCP config snippet in the README — with the 16 page-action surface untouched and all deferred feature work unimplemented.",
+  "analysis": {
+    "objective": "Close the project's remaining verification success criteria by gathering—in a real Chrome session and against real target clients—empirical evidence for the deferred CDP-vs-DOM event-fidelity and result-size-cap decisions, and hand-verifying a single documented MCP config snippet, with the 16 page-action surface untouched and all deferred feature work unimplemented.",
+    "successDefinition": "Done means: (1) a real-Chrome manual check against at least one real non-trivial site per claim records in discoveries.md/blockers.md whether MAIN-world (0, eval)(code) survives strict page CSPs and whether clickAt/hover produced observable framework-handler effects (a page-side state change, not just the dispatched count), as evidence for the CDP-vs-DOM decision; (2) concrete byte measurements exist for captureTab image blocks and readConsoleMessages/readNetworkRequests results at realistic sizes, exercised through the available target clients (Claude Code only in practice — the Gemini CLI half was descoped by user override during phase 2, per decisions.md 2026-09-03; Codex/Cursor have no binary), plus a measured integer threshold at which an executeScript { value } errors as over-large, all recorded as findings/recommendations only; (3) the README ships one MCP config snippet (command + args) with honest per-client status notes; hand-verification (Claude Code only, per decisions.md 2026-09-03 horizon 4) shows it works unchanged in Claude Code, with Gemini CLI documented via `gemini mcp add` (config-documentation-only, no live call) and Codex CLI / Cursor documentation-only / not installed; (4) npm run verify passes clean, PAGE_ACTIONS and the MCP tool catalog keep exactly their 16 actions, no new page-action or feature code is added, and decisions.md/blockers.md still record CDP-vs-DOM, result-size cap location/threshold, and tabId as OPEN decisions (a measurement may imply a recommendation, never an implemented decision).",
+    "assumptions": [
+      "Claude Code and Gemini CLI are the two hand-verifiable clients on this machine per horizon-2 discovery; Codex CLI and Cursor are not on PATH, so their coverage is per-client documentation, not live verification.",
+      "The horizon-3 roadmap/status files record the outcome of prior real-Chrome checks and the current build/relay/MCP state; horizon 4 re-runs its own check rather than re-deriving prior findings.",
+      "npm run verify in tools/chrome-bridge (tsc --noEmit, eslint --max-warnings 0, vitest unit+int) is the real gate for package code; the repo-root PostToolUse lint hook false-positives on tools/chrome-bridge files and is ignored.",
+      "The existing shipped caps (MAX_EXECUTE_SCRIPT_RESULT_CHARS=1000000, DEFAULT_MAX_CHARS=200000, entry/text/body caps from capture.ts, read limit clamped to 500) remain shipped behavior; measurements suggesting a different cap location/threshold become recommendations, not code changes.",
+      "Existing client-config observations are given external state that the README snippet and per-client docs must accommodate, not modify.",
+      "A reachable real site that actually enforces a strict eval-blocking CSP, and a real framework-heavy page with observable click/hover effects, exist and can be loaded in the machine's Chrome."
+    ],
+    "risks": [
+      "A real strict-CSP site may reject the injected script for a different reason than the page CSP (host_permissions, Trusted Types, script-injection paths), making the eval evidence site-specific; the check must record the exact site, CSP header, and outcome so the CDP-vs-DOM evidence stays honest.",
+      "Whether a real framework handler fired is not directly readable from the dispatched-count result; without an observable page-side effect the check could silently record 'dispatched' as 'handler fired' — the observation method must be explicit.",
+      "Gemini CLI registration via a pasted settings.json mcpServers block was recorded open at horizon 2 and never resolved; hand-verification with Gemini CLI may fail, undercutting acceptance criterion 3 — the failure and the actually-working path must be recorded rather than papered over.",
+      "Scope creep: measuring 'where the cap lives' or 'what integer is over-large' tempts implementing a cap, tabId, or CDP plumbing — explicitly prohibited by criteria 4-5; this horizon may only produce evidence and recommendations.",
+      "Only two clients are hand-verifiable here; reporting the snippet as verified for all four overclaims — Codex and Cursor coverage is documentation-only this horizon.",
+      "A heavy read* call or large captureTab during measurement can truncate or hang a client session; bounded probes are needed so 'truncation observed' is recorded as evidence, not a crashed session."
+    ],
+    "outOfScope": [
+      "tabId-targeting refactor — user scoped it out; this horizon only produces evidence about the tabId model, never plumbing.",
+      "CDP / chrome.debugger / computer-parity family — gated on the CDP-vs-DOM evidence this horizon collects and must stay unimplemented.",
+      "file upload and accessibility-tree read_page — both gated on the computer-parity decision; feature work, not verification work.",
+      "Implementing any result-size cap location or threshold — measurement may recommend, may never change shipped limits.",
+      "Fixing client config files — external observed state; only the README snippet plus per-client notes ship.",
+      "Adding any 17th page action or altering PAGE_ACTIONS / TOOL_CATALOG shape — criterion 4 pins the 16-action surface as unchanged.",
+      "Repairing the repo-root PostToolUse lint hook — a known false-positive to ignore, not a defect this horizon fixes."
+    ],
+    "domainShape": "technical",
+    "domainShapeReason": "The horizon is empirical verification and documentation of developer-tooling machinery (extension behavior under CSP, result-size measurement, MCP client registration) with no business entities or rules a domain expert would recognize.",
+    "ubiquitousLanguage": [
+      {
+        "term": "page action",
+        "meaning": "One of the 16 discrete commands (navigateTo, getPageText, executeScript, clickAt, hover, readConsoleMessages, ...) in PAGE_ACTIONS that the extension runs on the active tab; the surface must stay unchanged."
+      },
+      {
+        "term": "real-Chrome manual check",
+        "meaning": "The hand-run end-to-end verification on a real Chrome tab that is required to close a horizon touching the extension, per the horizon-2 decision."
+      },
+      {
+        "term": "MCP config snippet",
+        "meaning": "The single command+args JSON block in the README that registers the chrome-bridge stdio server in a target client; must work unchanged for the target clients."
+      },
+      {
+        "term": "target client",
+        "meaning": "The terminal AI coding tool driving the tool over MCP — Claude Code, Codex CLI, Gemini CLI, Cursor, with Crush as an adjacent case; hand-verifiable ones here are Claude Code and Gemini CLI."
+      },
+      {
+        "term": "result-size cap",
+        "meaning": "The byte/char threshold beyond which a result is over-large for a client; where it lives (extension-side per-action, MCP-layer, or none) and its integer threshold are the deferred decision this horizon measures."
+      },
+      {
+        "term": "capture buffer read",
+        "meaning": "readConsoleMessages / readNetworkRequests querying per-tab ring buffers with a since/limit cursor and nextSince/dropped/truncated fields; the source of text-result size measurements."
+      },
+      {
+        "term": "captureTab image block",
+        "meaning": "The screenshot returned to the client as an MCP image content block (mimeType image/png, raw base64); the source of image-result size measurements."
+      },
+      {
+        "term": "deferred decision",
+        "meaning": "CDP-vs-DOM event fidelity, result-size cap location/threshold, and the tabId targeting model — recorded open in decisions.md/blockers.md; this horizon only produces evidence/recommendations for them."
+      }
+    ]
+  },
+  "discoveryFindings": [
+    {
+      "area": "page-action surface",
+      "finding": "PAGE_ACTIONS has exactly 16 entries: ping, navigateTo, getPageText, readPage, findElement, clickElement, typeText, captureTab, readConsoleMessages, readNetworkRequests, executeScript, navigateBack, navigateForward, reloadTab, clickAt, hover. All consumers are typed Record<PageAction, ...>, and listTools() derives from PAGE_ACTIONS, so the 16-action surface is tsc-pinned.",
+      "filePath": "tools/chrome-bridge/src/protocol/actions.ts",
+      "implication": "The 16-action pin is compile-time enforced; a PAGE_ACTIONS.length/listTools().length assertion suffices as evidence criterion (4) holds — no new runtime checks needed."
+    },
+    {
+      "area": "result-size limits in types",
+      "finding": "src/protocol/types.ts contains NO size-limit constants itself. Limits live in page-actions.ts (DEFAULT_MAX_CHARS=200_000; MAX_EXECUTE_SCRIPT_RESULT_CHARS=1_000_000), capture.ts (MAX_CONSOLE_TEXT_BYTES=8192; MAX_BODY_PREVIEW_BYTES=4096), capture-buffer.ts (DEFAULT_MAX_ENTRIES=500; DEFAULT_READ_LIMIT=100; MAX_READ_LIMIT=500).",
+      "filePath": "tools/chrome-bridge/src/protocol/types.ts",
+      "implication": "The 'where does the size cap live' measurement must distinguish extension-side per-action caps from the complete absence of an MCP-layer cap — the MCP layer is the only unguarded place."
+    },
+    {
+      "area": "executeScript implementation",
+      "finding": "executeScript handler (page-actions.ts:404-459) validates a non-empty 'code', injects via ports.executeScript(tab.id, fn, [code], { world: 'MAIN' }); the injected fn runs `(0, eval)(code)` (indirect eval, line 416) which is subject to the page's CSP unsafe-eval restriction; a blocked eval throws, is caught, and coerceExecuteScriptOutcome maps it to 'executeScript returned no result — the page may block eval via its Content-Security-Policy'.",
+      "filePath": "tools/chrome-bridge/src/extension/page-actions.ts",
+      "implication": "The real-Chrome CSP check is reproducible: navigate a strict-CSP site, call executeScript with { code }, record whether the reply is { value } or the eval/CSP sentinel. chrome.scripting injection is NOT blocked by page CSP — only the inner eval is, so evidence must record the site's CSP header."
+    },
+    {
+      "area": "executeScript size guard",
+      "finding": "NO size guard on the incoming code string; the result-size guard exists twice: inside the injected MAIN-world fn (JSON.stringify(value) compared against MAX_EXECUTE_SCRIPT_RESULT_CHARS=1_000_000, returns ok:false) and extension-side (coerceExecuteScriptOutcome re-checks json.length > 1_000_000 → 'result is too large'). The over-large boundary is exactly a JSON length of 1_000_001 chars.",
+      "filePath": "tools/chrome-bridge/src/extension/page-actions.ts",
+      "implication": "The 'find the integer at which { value } becomes over-large' is defined by a shipped constant — the check confirms the boundary via binary search around 1,000,000 and records it as confirmation, not a new threshold."
+    },
+    {
+      "area": "clickAt/hover implementation",
+      "finding": "clickAt (page-actions.ts:461-494) validates x/y, injects a closure doing document.elementFromPoint(px,py), dispatches pointerdown/pointerup/click returning {found,dispatched}; hover (496-527) dispatches pointerover/mouseover = dispatched:2. There is NO mechanism that observes framework-handler effects — no page-side state read, no listener dispatch count, no isTrusted distinction.",
+      "filePath": "tools/chrome-bridge/src/extension/page-actions.ts",
+      "implication": "The event-fidelity check cannot use the tool's own result to prove a handler fired; it must pair clickAt/hover with a follow-up executeScript/getPageText probe reading a page-side state change. Bake the follow-up probe into the check."
+    },
+    {
+      "area": "clickAt/hover MCP rendering",
+      "finding": "The MCP layer renders clickAt/hover via the generic text path JSON.stringify(result, null, 2) — { found, dispatched }. ClickAtResult/HoverResult document that synthetic events are untrusted and non-zero dispatched does not guarantee a framework handler reacted.",
+      "filePath": "tools/chrome-bridge/src/mcp/server.ts",
+      "implication": "The write-up must interleave the gesture call and the probe call explicitly; the framework-effect evidence comes from the separate probe, not the gesture echo."
+    },
+    {
+      "area": "existing integer caps (extension-side)",
+      "finding": "Grounded extension-side caps: DEFAULT_MAX_CHARS=200_000; MAX_EXECUTE_SCRIPT_RESULT_CHARS=1_000_000; DEFAULT_MAX_ENTRIES=500; DEFAULT_READ_LIMIT=100/MAX_READ_LIMIT=500; MAX_CONSOLE_TEXT_BYTES=8192; MAX_BODY_PREVIEW_BYTES=4096; OUTBOX_LIMIT=100; WORK_SLICE=MAX_CONSOLE_TEXT_BYTES*4+64. captureTab is explicitly UNCAPPED at the extension (data:image/png;base64).",
+      "filePath": "tools/chrome-bridge/src/protocol/capture.ts",
+      "implication": "Worst-case text is computable: a 500-entry readConsoleMessages ≈ 4MB+ JSON; readNetworkRequests adds 4096B bodyPreview per entry. These define the probe sizes the measurement phase exercises; no value is truncated at the MCP layer."
+    },
+    {
+      "area": "MCP-layer result rendering",
+      "finding": "src/mcp/server.ts handleToolCall: unknown tool → isError; response.error → isError; captureTab → imageResult(stripDataUrlPrefix(readDataUrl(result))) — single content block {type:'image', data:<base64>, mimeType:'image/png'}; every other action → textResult(JSON.stringify(result, null, 2)) — NO truncation or size guard anywhere at the MCP layer.",
+      "filePath": "tools/chrome-bridge/src/mcp/server.ts",
+      "implication": "No generic MCP-layer cap exists to find; the cap-location decision is strictly extension-side per-action caps (exist) vs a hypothetical new MCP-layer cap (does not). Measurement must observe where clients themselves truncate."
+    },
+    {
+      "area": "stale doc comments",
+      "finding": "src/mcp/server.ts header says 'advertises the eight page actions'; src/mcp/tool-catalog.ts header says 'Two of the ten tools' — both are now 16 actions. README (line 48) and manual-check step 3 (line 143) already say sixteen.",
+      "filePath": "tools/chrome-bridge/src/mcp/server.ts",
+      "implication": "Not a code defect (comments only). Horizon 4 is documentation/verification-only; the README phase may cheaply correct the two stale headers but must not otherwise touch source."
+    },
+    {
+      "area": "README MCP config section",
+      "finding": "README 'MCP client config' (lines 46-135) already ships one snippet — type stdio, command 'node', args ['tools/chrome-bridge/bin/mcp.mjs'], env {} — described as 'registered for Claude Code in the repo-root .mcp.json' and claimed to 'work unchanged' for Codex CLI, Gemini CLI, Cursor. It documents relay URL ws://127.0.0.1:8766, CHROME_BRIDGE_URL override, and launcher resolves via import.meta.url. The verified snippet replaces/extends lines 118-135.",
+      "filePath": "tools/chrome-bridge/README.md",
+      "implication": "The README overclaims per-client verification without hand-verification — criterion (3) must replace that claim with one hand-verified snippet plus per-client notes; insertion point is the existing 'MCP client config' section."
+    },
+    {
+      "area": "README action-count locations",
+      "finding": "The 16-action list/count appears in exactly 3 README places: MCP client config prose list (lines 48-53), manual end-to-end check step 3 (line 143), built-extension service-worker.js bullet (lines 179-188). Manual steps already exercise executeScript, clickAt (step 10), hover (step 11), captureTab (step 5).",
+      "filePath": "tools/chrome-bridge/README.md",
+      "implication": "Criterion (3) verification can reuse the existing numbered manual steps; count audit is a 3-site grep plus tests' listTools().length assertions."
+    },
+    {
+      "area": "client registration state",
+      "finding": "~/.gemini/settings.json EXISTS but has NO mcpServers key (only security/general/ui/tools). gemini at ~/.nvm/versions/node/v22.14.0/bin/gemini. ~/.config/crush/crush.json has a top-level 'mcp' key containing ONLY 'extension-bridge' (not chrome-bridge). ~/.cursor/mcp.json does NOT exist.",
+      "filePath": "/Users/dimitrykatz/workspace/boky/.config/crush/crush.json",
+      "implication": "Gemini CLI hand-verification must go through `gemini mcp add` (or writing the file fresh); the failure/working path must be recorded — exactly the open horizon-2 blocker. Crush would need its mcp key extended with a chrome-bridge entry if it is to be a target client."
+    },
+    {
+      "area": "client binaries on PATH",
+      "finding": "claude at ~/.local/bin/claude; gemini at ~/.nvm/versions/node/v22.14.0/bin/gemini. No codex or cursor-agent binary exists in ~/.local/bin, ~/.nvm/versions/node/*/bin, /opt/homebrew/bin, /usr/local/bin, or ~/bin.",
+      "implication": "Only Claude Code and Gemini CLI are hand-verifiable on this machine; Codex and Cursor coverage must remain documentation-only and the README must not claim live verification for them."
+    },
+    {
+      "area": "manual-check harness / prior real-Chrome checks",
+      "finding": "No tools/chrome-bridge/scripts/ dir; package.json has NO tail-controller script. Prior checks were ad-hoc: horizon-2's live capture check (2026-09-02) loaded dist/extension unpacked, ran relay on :8766, drove http://127.0.0.1:38123/ via a throwaway ws controller. horizon-3's clickAt/hover check was completed by the user in a real Chrome session but NO site URL is recorded. README documents a 12-step manual check + 4-step smoke test.",
+      "filePath": "docs/roadmaps/agent-agnostic-browser-bridge/discoveries.md",
+      "implication": "No reusable scripted harness exists — the verification phase must bootstrap one. The ceremony is: (i) `npm run relay`; (ii) `npm run mcp` or client-launched `node tools/chrome-bridge/bin/mcp.mjs`; (iii) `npm run build:extension` then chrome://extensions Load unpacked → dist/extension. Prior checks used boky's extension/devtools/tail-logs.mjs as a throwaway ws controller."
+    },
+    {
+      "area": "recorded real sites",
+      "finding": "No external real site names are recorded anywhere in project memory. The only URL ever exercised is the local fixture http://127.0.0.1:38123/. Horizon-3's executeScript/CSP claim was NOT empirically closed (blockers.md still open).",
+      "filePath": "docs/roadmaps/agent-agnostic-browser-bridge/blockers.md",
+      "implication": "The strict-CSP and framework-heavy sites must be selected fresh and recorded with URL + CSP header + outcome per the stage1 risk; nothing pre-chosen is documented."
+    },
+    {
+      "area": "extension hardening relevant to checks",
+      "finding": "manifest.json permissions [tabs, activeTab, scripting, storage, alarms], host_permissions <all_urls>; content_scripts page-script.js world MAIN + capture-forwarder.js ISOLATED, both document_start, all_frames:false; no debugger permission. SW dials relay at CHROME_BRIDGE_URL default ws://127.0.0.1:8766, reconnect 1s→15s, keepalive alarm 0.5min, OUTBOX_LIMIT=100. Controller per-command timeout DEFAULT_TIMEOUT_MS=30_000.",
+      "filePath": "tools/chrome-bridge/extension/manifest.json",
+      "implication": "host_permissions <all_urls> lifts any cross-origin blocker; the 30s controller timeout bounds heaviest probes — a read* on 500 entries or large captureTab is bounded to 30s before erroring."
+    },
+    {
+      "area": "verify gate",
+      "finding": "package.json scripts: typecheck='tsc --noEmit', lint='eslint . --max-warnings 0', test='vitest run', verify='typecheck && lint && test', build:extension = three chained vite passes. vitest include ['src/**/*.unit.test.ts','src/**/*.int.test.ts'] environment 'node' — NO jsdom. Only .unit.test.ts files exist; zero .int.test.ts.",
+      "filePath": "tools/chrome-bridge/package.json",
+      "implication": "Criterion (4)'s 'npm run verify passes clean' is exactly these three stages; a verification phase adds no .int.test.ts and must not require jsdom. Run verify directly in tools/chrome-bridge; ignore the root PostToolUse lint false-positive."
+    },
+    {
+      "area": "open decisions governing scope",
+      "finding": "blockers.md/decisions.md still record CDP-vs-DOM event fidelity, result-size cap location+threshold, and tabId targeting model as OPEN. decisions.md binds: executeScript runs in world 'MAIN' by decision; clickAt/hover success is defined as events dispatched, never 'a framework handler fired'. next-horizon-brief.md recommends a small evidence-and-verification horizon.",
+      "filePath": "docs/roadmaps/agent-agnostic-browser-bridge/decisions.md",
+      "implication": "The verification-only frame is binding: horizon 4 records measurements/recommendations and must NOT flip any of the three OPEN decisions to implemented — matching stage1's success criteria exactly."
+    }
+  ],
+  "requiredMaterials": [
+    {
+      "name": "A fresh real strict-CSP site plus a real framework-heavy SPA",
+      "kind": "dataset",
+      "whyNeeded": "Phase 1 must test MAIN-world indirect eval against a page whose CSP forbids eval, and whether clickAt/hover synthetic events reach real React/Vue handlers on a framework-heavy page — discovery shows no external site was ever recorded.",
+      "acquisitionNote": "Select and record two public URLs in discoveries.md, each with why: (1) a real site whose response CSP header forbids eval (confirm script-src lacks unsafe-eval); (2) a real React/Vue/Angular/Svelte SPA with observable tooltip/menu/counter state a follow-up probe can read; record URL, exact CSP header, and outcome."
+    },
+    {
+      "name": "The running extension plus relay ceremony",
+      "kind": "tool",
+      "whyNeeded": "Phase 1 exercises page actions against real sites and phase 2 drives read*/captureTab/executeScript probes; both need the built extension loaded unpacked and the relay running.",
+      "acquisitionNote": "Run npm run build:extension, load tools/chrome-bridge/dist/extension unpacked in chrome://extensions, run npm run relay (CHROME_BRIDGE_URL default ws://127.0.0.1:8766), then connect an MCP client using the chrome-bridge stdio entry."
+    },
+    {
+      "name": "Live Claude Code session (plus Gemini CLI for phase 1 measurement)",
+      "kind": "tool",
+      "whyNeeded": "Phase 1 (measure-result-sizes-against-clients) measures result sizes through a real target-client session; phase 2 (ship-hand-verified-mcp-config-snippet) hand-verifies the snippet in Claude Code only. Per decisions.md 2026-09-03 (horizon 4) hand-verification is Claude-Code-only; Gemini CLI coverage is documentation-only (the `gemini mcp add` command form).",
+      "acquisitionNote": "Launch Claude Code via ~/.local/bin/claude using the repo-root .mcp.json chrome-bridge entry. Gemini CLI (~/.nvm/.../bin/gemini) is documented via `gemini mcp add chrome-bridge -- node tools/chrome-bridge/bin/mcp.mjs` but not driven live (no API key/OAuth in the exec env); Codex/Cursor have no binary on PATH."
+    }
+  ],
+  "phases": [
+    {
+      "id": "real-chrome-event-fidelity-check",
+      "order": 0,
+      "name": "Verify eval and synthetic clicks on real pages",
+      "goal": "Run a hand-driven real-Chrome manual check that exercises the extension's page actions against live external sites and records empirical evidence into the project evidence files. Two claims must be settled: (1) does the executeScript page action's MAIN-world indirect eval `(0, eval)(code)` survive on a real page whose Content-Security-Policy (CSP) header forbids eval (`script-src` without `unsafe-eval`), or does the eval throw and return the 'page may block eval' error sentinel; (2) do the clickAt and hover page actions' synthetic pointer/mouse events actually fire real React/Vue framework handlers on a framework-heavy site — proven only by a follow-up executeScript/getPageText probe reading a page-side state change (open menu, visible tooltip), never by the tool's own {found,dispatched} count. Every outcome is recorded with the site URL, the exact CSP header, and the probe evidence.",
+      "rationale": "Two earlier checkpoints (horizon 3) closed without empirical proof: nobody has recorded whether MAIN-world eval survives a real strict-CSP page, or whether the synthetic events dispatched by clickAt/hover trigger real SPA handlers that many frameworks ignore because the events are untrusted. These two facts are the evidence the deferred CDP-vs-DOM decision needs before any computer-parity feature can be built, so this phase gathers them in a real Chrome session and records them as findings only — no code changes.",
+      "filesAffected": [
+        "/Users/dimitrykatz/workspace/boky/docs/roadmaps/agent-agnostic-browser-bridge/discoveries.md",
+        "/Users/dimitrykatz/workspace/boky/docs/roadmaps/agent-agnostic-browser-bridge/blockers.md"
+      ],
+      "changes": [
+        "Start the documented ceremony from the README manual check: run `npm run relay`, run `npm run build:extension`, load `tools/chrome-bridge/dist/extension` unpacked in chrome://extensions, and connect an MCP client that uses the chrome-bridge stdio entry.",
+        "Navigate to one real site that sends a strict Content-Security-Policy header (script-src without 'unsafe-eval'); call the executeScript page action with {code: \"document.title\"} and record in discoveries.md the site URL, the exact CSP header, and whether the reply was a {value} result or the 'page may block eval' error sentinel.",
+        "Navigate to a real React/Vue SPA with observable tooltip or menu state; call clickAt at the trigger element's x/y and hover at the same point, then immediately run a follow-up executeScript or getPageText probe that reads a page-side state change (open class, tooltip visibility, counter) — the gesture's own {found,dispatched} output alone must not count as proof a handler fired.",
+        "Append the per-site evidence records to discoveries.md and annotate the two still-open horizon-3 blocker entries (CSP-eval and synthetic clickAt/hover) with the recorded outcomes; keep the CDP-vs-DOM decision recorded OPEN in decisions.md, recording only evidence and never flipping the decision.",
+        "Run `npm run verify` in tools/chrome-bridge to confirm the evidence-gathering session introduced no code that breaks typecheck, lint, or the unit tests."
+      ],
+      "boundedContext": "page actions — real-Chrome event fidelity",
+      "layer": "infrastructure",
+      "blastRadius": "small",
+      "inputs": [
+        "The running extension plus relay ceremony (npm run relay, npm run build:extension, Load unpacked; connect an MCP client with the chrome-bridge entry) documented in the README manual check and prior discoveries",
+        "A real strict-CSP site and a real framework-heavy SPA, selected fresh — discovery shows no external site has ever been recorded in the project memory files",
+        "The executeScript 'page may block eval' sentinel and the clickAt/hover {found,dispatched} result semantics in src/extension/page-actions.ts",
+        "discoveries.md and blockers.md as the record targets, where the horizon-3 CSP-eval and synthetic-event blockers still sit OPEN"
+      ],
+      "expectedResult": "One evidence record set in the project memory files: for the strict-CSP site a record of site URL, exact CSP header, and executeScript outcome (value versus eval sentinel); for the SPA site a record of each clickAt/hover gesture paired with its follow-up probe showing whether a framework handler visibly reacted — with the two horizon-3 blocker entries annotated by those outcomes and the CDP-vs-DOM decision still OPEN.",
+      "dependsOn": [],
+      "rubric": [
+        {
+          "id": "csp-eval-real-site-record",
+          "label": "Real strict-CSP site evidence for MAIN-world eval",
+          "ruleStatement": "The deliverable must prove what executeScript's MAIN-world indirect eval `(0, eval)(code)` does on a real site whose CSP actually forbids eval, in a form that can be re-run from the record alone. Scale: 10 means the outcome is confirmed on two unrelated strict-CSP sites with the raw header copied verbatim and the result text quoted exactly, so no reviewer could ask for more; 8 is the expected score for a competent, complete record (one real strict-CSP site with URL, exact header, and verbatim outcome); minScore 7 is the bar for ACCEPTABLE evidence for at least one real non-trivial site per the caller's criterion, with URL, header, and outcome all present even if header capture used a helper rather than a raw copy.",
+          "passCriteria": [
+            "In discovery.md of the phase record, confirm it names a public URL of a real external site — not a localhost page, a data: URL, or a page the executor authored.",
+            "Confirm the record states the exact Content-Security-Policy header the site sent in its response (or says it could not be read and names the method used), and that the policy forbids eval, i.e. script-src / script-src-elem lacks 'unsafe-eval'.",
+            "Confirm the record states the executeScript result verbatim: the returned value on success, or the exact 'page may block eval' sentinel text on failure — not a paraphrase like 'it worked'.",
+            "Confirm the site is non-trivial: it runs substantial third-party runtime scripts under its own deployed CSP, so the test exercises a real deployment's policy rather than a controlled fixture.",
+            "Confirm the record states which of the two possible outcomes occurred (value versus eval sentinel) in a way a grader cannot confuse."
+          ],
+          "failureExamples": [
+            "The site's CSP actually allows 'unsafe-eval' — the record asserts strictness from memory and never quotes the header, so a passed eval measures nothing and the recorded claim is void.",
+            "The executor built a local fixture whose CSP header they wrote themselves and recorded it as real-site evidence, capturing their own policy rather than a real deployment's.",
+            "The record quotes a parsed or normalized header from a security analyzer instead of the raw response header, so 'exact header' cannot be re-verified against the live site."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "synthetic-gesture-probe-record",
+          "label": "Framework-handler proof from a page-side probe",
+          "ruleStatement": "The record must show whether clickAt/hover synthetic events actually reached real React/Vue framework handlers, and the only admissible proof is a follow-up executeScript/getPageText probe reading a page-side state change — the tool's own {found,dispatched} count must never be cited as proof. Scale: 10 means every gesture is paired with an unambiguous, timing-controlled, reproducible probe, so no reviewer could ask for more; 8 is the expected score for a competent, complete record (clickAt and hover each paired with a distinct page-side probe on a real framework-heavy site); minScore 7 is the bar for ACCEPTABLE — at least one gesture type on at least one real non-trivial site, with the gesture output AND a distinct page-side probe present, one gesture even if honestly reported as 'not handled'.",
+          "passCriteria": [
+            "In the phase record, confirm it names a real framework-heavy site (React/Vue/Angular/Svelte) with substantial client-side handlers.",
+            "For each recorded gesture, confirm the record gives the target element selector and x/y coordinates plus the gesture's own {found,dispatched} output.",
+            "Confirm each clickAt/hover gesture is followed by a probe result that is observably NOT the gesture echo: an executeScript return value or getPageText excerpt containing a page-side state datum (a class/attribute/text change, a menu or tooltip visibility change) that only a framework handler could set.",
+            "Confirm the record states, per gesture, whether the probe showed the handler fired or did not fire, and that a 'not handled' conclusion was checked after a framework state-commit delay before being recorded.",
+            "Confirm the record nowhere claims proof from {found,dispatched} alone."
+          ],
+          "failureExamples": [
+            "The record defends 'the framework handled the click' by quoting {found: true, dispatched: true} with no page-side probe after it — the dispatcher asserting its own dispatch.",
+            "The probe ran immediately after dispatch and read a false negative because the framework batches or defers state commits (React 18 auto-batching, async effects), and the record concludes 'handlers ignore synthetic events' without re-reading after a settle delay.",
+            "The gesture targeted coordinates over no interactive element (a blank area of the SPA), so a 'not handled' outcome reflects the wrong target rather than untrusted-event policy, and the record never shows which element was aimed at."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "evidence-in-project-memory-files",
+          "label": "Evidence lands in the project memory files",
+          "ruleStatement": "Every claim's evidence must be findable in the documented project memory files (discoveries.md records plus appended blocker annotations), not in chat logs, PR bodies, or scratch notes, so the deferred-decision reader can act without re-running the session. Scale: 10 means every fact used downstream is in the two files and cross-referenced, so no reviewer could ask for more; 8 is the expected score for a competent, complete write-up (all session evidence present in discoveries.md and both relevant blockers annotated); minScore 7 is the bar for ACCEPTABLE — every claim's evidence appears in at least one of the two project files, even if cross-referencing is light.",
+          "passCriteria": [
+            "Grep the repo for a unique string from each recorded site URL; each appears inside docs/roadmaps/agent-agnostic-browser-bridge/discoveries.md.",
+            "In blockers.md, the horizon-3 entry covering CSP-eval and synthetic clickAt/hover has an appended outcome note citing the corresponding discovery record.",
+            "No evidence needed for the CDP-vs-DOM decision exists only outside those two files (PR body, chat transcript, repo-root scratch markdown, /tmp notes)."
+          ],
+          "failureExamples": [
+            "The session was fully run and the conclusions posted in the PR description, but discoveries.md still contains no external-site record, so the next executor must rebuild the evidence from scratch.",
+            "The executor kept the session log in a scratch file at the repo root that is not part of the memory files the decision-maker reads, so graders cannot find the evidence in the documented location."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "deferred-decisions-stay-open",
+          "label": "Deferred decisions remain OPEN, findings are recommendations only",
+          "ruleStatement": "The deferred decisions (CDP-vs-DOM event fidelity, result-size cap location/threshold, tabId targeting model) must remain OPEN after this phase: the relevant blockers are annotated with outcomes but not marked RESOLVED, decisions.md statuses do not flip, and any conclusion phrased as a decision must instead be labeled a recommendation, except where a measurement makes a decision obviously forced and is recorded explicitly as a recommendation rather than an implementation. Scale: 10 means decision statuses are provably unchanged and every finding is framed as evidence with its open question restated, so no reviewer could ask for more; 8 is the expected score for a competent, complete session (blockers stay OPEN with annotations, decisions.md statuses untouched, no code implements a decision); minScore 7 is the bar for ACCEPTABLE — blockers.md and decisions.md show no DECIDED/RESOLVED/IMPLEMENTED status change and the git diff implements no deferred decision.",
+          "passCriteria": [
+            "Open blockers.md: the horizon-3 CSP-eval/synthetic-event entry and the result-size-cap entry are still marked OPEN, with their appended outcomes attached as annotations rather than status changes.",
+            "Open decisions.md: the CDP-vs-DOM entry and any result-size or tabId-model entry still read as open questions; nothing reads as 'decided' or 'implemented' unless clearly labeled a recommendation.",
+            "Git diff against the phase-start commit shows no source change that implements a decision (no eval-mode switch, no result-size cap constant, no new tabId model), and any written recommendation uses the word 'recommendation' and does not claim the decision was made.",
+            "If a measurement made a decision 'obvious', confirm the obviousness is recorded under a clearly labeled recommendation with the decision itself still recorded as open."
+          ],
+          "failureExamples": [
+            "The successful eval convinces the executor that the CSP-eval blocker is rewritten as RESOLVED and 'we will use MAIN-world indirect eval' is recorded as a made decision — closing, before the horizon said it was allowed to, a decision this phase was only to inform.",
+            "A recommendation is phrased in implemented-decision language ('we cap results at 4MB at the MCP layer') even though no code ships it, silently flipping the decision's status for every later reader.",
+            "The executor runs executeScript with a temporary context switch inserted into page-actions.ts to test MAIN-world, and the switch ships, implementing the CDP-vs-DOM decision by accident."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "sixteen-action-surface-untouched",
+          "label": "The 16 page-action surface is unchanged",
+          "ruleStatement": "This session may not change the page-action surface or the shipped artifacts: the diff must be docs-only, PAGE_ACTIONS must still be the same 16 names with unchanged signatures, and the extension bundle if rebuilt must not be committed changed. Scale: 10 means a docs-only diff with no rebuild artifacts and `npm run verify` green, so no reviewer could ask for more; 8 is the expected score for a competent, complete session (src/ untouched, page-actions.ts byte-identical, verify green); minScore 8 is the bar for ACCEPTABLE because the surface is a hard invariant — PAGE_ACTIONS exactly 16 entries with identical names and signatures and no committed src/ or dist/ change is the minimum that passes at all.",
+          "passCriteria": [
+            "Git diff against the phase-start commit touches only files under docs/roadmaps/agent-agnostic-browser-bridge/ — nothing under src/ or tools/chrome-bridge/src/.",
+            "src/extension/page-actions.ts still contains exactly the same 16 PAGE_ACTIONS command names as at phase start, with no added, removed, or signature-changed actions.",
+            "Git status shows no committed dist/extension artifact change; if the extension was rebuilt for testing, the rebuilt artifact is not part of the shipped diff.",
+            "The executor ran `npm run verify` in tools/chrome-bridge and it exited 0 (typecheck, lint, unit tests), with the run recorded in the session notes."
+          ],
+          "failureExamples": [
+            "A temporary debug page action (for example a 'readStateRaw' helper) was added to study the SPA's state and left in place, pushing PAGE_ACTIONS to 17 entries.",
+            "The executor modified executeScript to accept a MAIN/ISOLATED context flag to test the eval claim, and the signature change shipped even though the eval finding itself may be valid.",
+            "The extension bundle was rebuilt during testing and committed, so the shipped extension's action surface is no longer identical to the pre-session artifact even though src/ is unchanged."
+          ],
+          "minScore": 8
+        }
+      ],
+      "healerHint": "The most likely failure is a record that looks complete but proves nothing — the CSP header asserted but never quoted, or the SPA probe read before the framework commits state — so capture the raw header and verbatim result at the moment of the call and re-read the probe after a settle delay before writing any conclusion."
+    },
+    {
+      "id": "measure-result-sizes-against-clients",
+      "order": 1,
+      "name": "Measure result sizes against two clients",
+      "goal": "Produce byte-size measurements — records plus a recommendation, never code changes — for the 'where does the result-size cap live' deferred decision, exercised through real target-client sessions (Claude Code and Gemini CLI). Measure: (a) the captureTab page action's returned image content block (PNG base64) byte size; (b) the readConsoleMessages and readNetworkRequests capture-buffer-read text-result byte sizes at realistic limits (100 vs 500 entries, approaching the ~4MB worst case implied by the 8192-byte per-entry console cap); (c) the executeScript page action's {value} JSON-length boundary at MAX_EXECUTE_SCRIPT_RESULT_CHARS = 1,000,000 chars, finding the exact integer at which the result errors as over-large. All shipped caps stay unchanged; only discoveries.md/blockers.md receive findings and a recommendation.",
+      "rationale": "The bridge's MCP layer renders every text result as pretty-printed JSON with no truncation, and captureTab is deliberately uncapped, so large responses can reach megabytes and different target clients handle that very differently. Before anyone decides whether the size cap belongs at the extension, at the MCP layer, or nowhere, this machine needs real measured numbers from live client sessions rather than guesses — the deferred decision stays open, but it now has data.",
+      "filesAffected": [
+        "/Users/dimitrykatz/workspace/boky/docs/roadmaps/agent-agnostic-browser-bridge/discoveries.md",
+        "/Users/dimitrykatz/workspace/boky/docs/roadmaps/agent-agnostic-browser-bridge/blockers.md"
+      ],
+      "changes": [
+        "With the relay, the built extension, and a busy real tab running, call readConsoleMessages and readNetworkRequests first with limit 100 and then limit 500, and record the byte size of each returned text block (the 500-entry case approaches the ~4MB worst case implied by the 8192-byte per-entry console text cap), keeping each probe inside the 30-second controller timeout.",
+        "Call captureTab on the same tab and record the byte size of the returned image content block (the raw PNG base64, MIME type image/png), which the extension leaves uncapped.",
+        "Call executeScript with expressions whose JSON round-trip lengths sit just below and just above 1,000,000 characters, and record the exact integer at which the 'executeScript result is too large (N chars; limit 1000000)' error starts appearing.",
+        "Drive the read* and executeScript probes through at least two real target clients — Claude Code via the repo-root .mcp.json entry and Gemini CLI via `gemini mcp add` — so client-side truncation or rejection is observed where it actually happens and recorded as evidence.",
+        "Append every measured byte size plus one recommendation for where the result-size cap should live to discoveries.md, annotate the still-open result-size-cap blocker with the numbers, and keep the decision OPEN in decisions.md."
+      ],
+      "boundedContext": "result-size behavior — MCP result rendering and target clients",
+      "layer": "cross-cutting",
+      "blastRadius": "small",
+      "inputs": [
+        "The shipped extension-side caps in src/protocol/capture.ts, src/extension/capture-buffer.ts and src/extension/page-actions.ts (MAX_CONSOLE_TEXT_BYTES=8192, MAX_BODY_PREVIEW_BYTES=4096, DEFAULT_MAX_ENTRIES=500, MAX_READ_LIMIT=500, MAX_EXECUTE_SCRIPT_RESULT_CHARS=1_000_000)",
+        "The MCP result-rendering rules in src/mcp/server.ts: captureTab becomes a single image content block, every other action becomes a pretty-printed JSON text block, and no truncation exists anywhere at the MCP layer",
+        "Real target-client sessions, hand-verifiable only for Claude Code and Gemini CLI — discovery confirms no codex or cursor binary exists on PATH",
+        "discoveries.md and blockers.md as record targets, where the result-size-cap blocker line is still OPEN"
+      ],
+      "expectedResult": "One measurement record in discoveries.md: byte sizes for the captureTab image block, for readConsoleMessages/readNetworkRequests at limit 100 and limit 500, and the confirmed 1,000,000/1,000,001-char executeScript {value} boundary, all recorded from at least two real target-client sessions with client-side truncation observed where it occurred — plus a single recorded recommendation for the result-size cap location, the resolve-result-size blocker annotated, and the decision left OPEN.",
+      "dependsOn": [],
+      "rubric": [
+        {
+          "id": "measured-byte-sizes",
+          "label": "Concrete byte sizes recorded for every probe",
+          "ruleStatement": "The deliverable records each required measurement as an exact integer with a unit and the probe configuration that produced it. 10 means no reviewer could ask for another number; 8 is the expected score for a competent, complete run (all probes present, one probe config implied rather than stated); 7 is the acceptable bar: each of the three probe families (captureTab image block, read* at limit 100 and 500, executeScript boundary) appears with at least one exact number.",
+          "passCriteria": [
+            "The record states a concrete number in bytes for the captureTab image block as the client receives it — the raw PNG base64 payload (mimeType image/png) with the data-URL prefix stripped — as an integer with the unit bytes.",
+            "For readConsoleMessages and readNetworkRequests the record contains four sizes: each action at limit 100 and at limit 500, each an integer plus unit, reflecting the pretty-printed JSON text block the MCP layer renders rather than the compact buffer payload.",
+            "Every recorded size names the probe configuration that produced it (page action, limit value, tab/page state) so an independent executor can rerun the probe and reproduce the number.",
+            "No recorded value is expressed as a range, a tilde approximation, a unit-less integer, or a prose word such as 'large'."
+          ],
+          "failureExamples": [
+            "All probes ran against a nearly empty page, so every recorded size is a handful of KB and the multi-megabyte case implied by 8192-byte console entries times 500 entries never appears — each number is technically real but the cap decision has no data from the high end it was meant to inform.",
+            "The read* sizes were taken from the extension's compact response object instead of the pretty-printed JSON text block the MCP server actually ships, so every number understates what crosses the client boundary."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "two-client-coverage",
+          "label": "Measurements exercised through both target clients",
+          "ruleStatement": "The numbers are attributed to the real client session that produced them — Claude Code via the repo-root .mcp.json chrome-bridge entry and Gemini CLI via 'gemini mcp add'. 10 means every size line names its producing client and both clients contributed across the probe suite; 8 is a competent, complete run where both clients are named but one covered only a single probe family; 7 is the acceptable bar: at least one real measurement is attributed to each of the two clients and no recorded size is unattributed.",
+          "passCriteria": [
+            "At least one recorded size is explicitly attributed to Claude Code and at least one is explicitly attributed to Gemini CLI — the client name appears on the size lines themselves, not only in a summary sentence.",
+            "The record flags any size that did not come from a real client session (e.g. piped straight into the MCP server via a script), and 'measured in client X' is only claimed where a session produced the number.",
+            "For the Gemini CLI measurements the record notes that the server was registered via 'gemini mcp add', since a pasted mcpServers block has never been verified for that client."
+          ],
+          "failureExamples": [
+            "Every byte size is attributed to the Claude Code session and the Gemini CLI numbers were filled in by copying — the developer ran one client and assumed client-side behavior is identical, so a truncation that only Gemini performs is absent from the evidence.",
+            "The sizes were gathered by a Node script talking to the MCP server directly, and lines reading 'verified in Claude Code and Gemini CLI' are backed by no session — the two-client requirement is met by prose, not by evidence."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "executescript-boundary-exact",
+          "label": "executeScript over-large boundary pinned to an exact integer",
+          "ruleStatement": "The record pins the exact JSON-length boundary at which executeScript starts erroring. 10 means a succeeding and a failing integer are both recorded a few chars apart with the server's own error text quoted and the client's handling of the failure noted; 8 is the expected score for a competent, complete run: both integers recorded and the error message matched; 7 is the acceptable bar: a failing probe recorded at an explicit integer with the 'too large' error, plus a succeeding probe at an explicit integer just below it.",
+          "passCriteria": [
+            "A succeeding probe is recorded with an explicit result-JSON length in chars (e.g. '1,000,000 chars OK').",
+            "A failing probe is recorded with its explicit length (e.g. '1,000,001 chars fails') and the recorded error text matches the shipped message 'executeScript result is too large (N chars; limit 1000000)' with the same N the server reported.",
+            "The recorded lengths measure the expression's serialized result value (the JSON round-trip), not the expression source text or a copied constant — the boundary is evidenced by live probes that actually cross it, not extrapolated from MAX_EXECUTE_SCRIPT_RESULT_CHARS."
+          ],
+          "failureExamples": [
+            "The boundary was computed by reading MAX_EXECUTE_SCRIPT_RESULT_CHARS and assuming equality — the record shows no probe that ever ran an actually over-large expression, so a boundary is quoted with no failing observation.",
+            "The developer measured the length of the input expression string instead of the serialized result value, so the recorded boundary is off by the JSON quoting overhead and a later probe near the recorded number errors or succeeds unexpectedly."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "client-behavior-recorded",
+          "label": "Client-side handling of large results recorded as evidence",
+          "ruleStatement": "For every size at the realistic upper end, the record states what the producing client actually did with the result — delivered whole, truncated, or rejected — and treats that as evidence. 10 means every size line carries the client's observed behavior and client-side truncation is captured wherever it happened; 8 is a competent, complete run: behavior recorded per client for the upper-end probes; 7 is the acceptable bar: for every limit-500 read and the captureTab image, the record states the client's behavior or explicitly records that no truncation was observed.",
+          "passCriteria": [
+            "For each client session that produced a limit-500 read or the captureTab image, the record answers: did the client return the block whole, cut it off, or error — and if truncated, which side (client or bridge) did the cutting.",
+            "Where a client truncated or rejected a result, that event appears in discoveries.md with the size at which it occurred; where a client delivered the full block, the record says so explicitly.",
+            "The cap-location recommendation reflects the observed per-client behavior — it is not written as if all clients behave alike when the record shows they do not."
+          ],
+          "failureExamples": [
+            "Gemini CLI truncated the 500-entry read at its own limit, but the developer treated truncation as a botched measurement, shrank the page, and recorded only the small full result — the very evidence the cap-location decision needs silently disappeared.",
+            "A probe timed out inside the 30-second controller window or the client dropped the connection, and the developer recorded the extension-side response size as the delivered size — the record claims a client delivery that never happened."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "records-only-decision-open",
+          "label": "Evidence recorded; decision left OPEN; surface untouched",
+          "ruleStatement": "This horizon ships records, not code: changes touch only docs/roadmaps/agent-agnostic-browser-bridge/discoveries.md and blockers.md, the result-size-cap decision stays OPEN in decisions.md, and the 16-action PAGE_ACTIONS surface is unchanged. 10 means the diff contains exactly the two record files, the blocker is annotated with the measured numbers, and nothing else moved; 8 is a competent, complete run with the same and at most an incidental whitespace-only diff; 7 is the acceptable bar: no shipped code or config changed, the decision file still says OPEN, and all 16 page actions are intact.",
+          "passCriteria": [
+            "git diff --stat shows modifications only under docs/roadmaps/agent-agnostic-browser-bridge/ — nothing under tools/chrome-bridge/src, the build configs, or any .json config, so the shipped caps in capture.ts, capture-buffer.ts and page-actions.ts are byte-identical.",
+            "PAGE_ACTIONS in tools/chrome-bridge/src/protocol/actions.ts still lists exactly the same 16 entries — no action added, renamed, or removed.",
+            "decisions.md still marks the result-size-cap decision OPEN; any new line is phrased as a recommendation, not a decision; and the blockers.md result-size-cap line is annotated with the measured bytes and remains unresolved."
+          ],
+          "failureExamples": [
+            "Seeing a 1.2 MB captureTab block, the developer added a hard cap in src/mcp/server.ts 'just to be safe' — the diff now shows a shipped behavioral change that decides the deferred decision implicitly.",
+            "The measurements were recorded and the decisions.md result-size-cap line was flipped to 'resolved (recommendation: no cap)' — the status changed from OPEN with no decision process, so the decision state the next horizon inherits is wrong."
+          ],
+          "minScore": 7
+        }
+      ],
+      "healerHint": "The most likely failure is that sizes get measured and written up from a single Claude Code session (with Gemini CLI coverage asserted in prose) and from the extension-side responses rather than the rendered MCP blocks the clients actually received — so the fastest fix is, before writing any number, to run each probe once per client and paste each client-visible block size (or the exact truncation/error the client surfaced) next to it."
+    },
+    {
+      "id": "ship-hand-verified-mcp-config-snippet",
+      "order": 2,
+      "name": "Ship hand-verified MCP config snippet",
+      "goal": "Replace the README 'MCP client config' overclaim — that the chrome-bridge snippet 'works for any other MCP client' though it was never checked — with exactly one hand-verified stdio snippet (type stdio, command node, args [\"tools/chrome-bridge/bin/mcp.mjs\"], env {}) plus an honest per-client status note for each of the four target clients. Claude Code is the ONLY client hand-verified here, proven by one live page-action call through the snippet's exact command and args with the relay and built extension running. Gemini CLI is config-documentation-only: the README gives the `gemini mcp add chrome-bridge -- node tools/chrome-bridge/bin/mcp.mjs` command form, but no live Gemini tool call is made, because a binding project decision (decisions.md 2026-09-03, horizon 4) scopes hand-verification to Claude Code only and the environment has no authenticated Gemini session. Codex CLI and Cursor are documentation-only — their binaries are not installed on this machine. No client config files are edited; only the README ships, and the horizon-2 Gemini-registration blocker is annotated (not resolved) from observed-state evidence.",
+      "rationale": "The project's browser-bridge README currently claims a single configuration snippet works for every terminal AI coding tool, but that was never actually tested. A later, binding project decision limited hands-on testing to one tool, Claude Code. This phase verifies the snippet works there with a real call, then rewrites the README so it states plainly which tools were actually tested and which are only documented, and records the Gemini registration question from what can be observed without running Gemini.",
+      "filesAffected": [
+        "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/README.md",
+        "/Users/dimitrykatz/workspace/boky/docs/roadmaps/agent-agnostic-browser-bridge/blockers.md"
+      ],
+      "changes": [
+        "With `npm run relay` running and `tools/chrome-bridge/dist/extension` loaded unpacked, load the chrome-bridge entry in Claude Code from the existing repo-root `.mcp.json` (which already carries exactly this command/args) and call one of the 16 page actions (for example `getPageText`) with a real argument; record the tool name, the argument, and the exact returned result or error.",
+        "In the README 'MCP client config' section, replace the 'works for any other MCP client' paragraph and the snippet block (currently lines ~118-135) with exactly ONE chrome-bridge stdio snippet whose fields match the repo-root `.mcp.json` chrome-bridge entry field-for-field: type `stdio`, command `node`, args `[\"tools/chrome-bridge/bin/mcp.mjs\"]` (repo-root-relative), env `{}`.",
+        "Add a per-client status note for all four target clients: Claude Code — hand-verified on this machine via the repo-root `.mcp.json`, naming the page-action call that returned a result; Gemini CLI — config-documentation-only, giving the literal `gemini mcp add chrome-bridge -- node tools/chrome-bridge/bin/mcp.mjs` command and stating no live tool call was run, per the Claude-Code-only verification decision; Codex CLI and Cursor — documentation-only, binaries not installed on this machine. No sentence may bundle multiple clients under one status word, and no blanket 'works for any MCP client' phrasing may remain.",
+        "Leave the existing `CHROME_BRIDGE_URL` relay-override paragraph and the `import.meta.url` launcher-resolution note unchanged.",
+        "Annotate the horizon-2 blocker line in blockers.md ('Does Gemini CLI register a stdio server from a pasted `mcpServers` block ... or only via `gemini mcp add`?') in place, NOT resolved: record the observed-state evidence (~/.gemini/settings.json has no mcpServers key; `gemini mcp add` is the documented subcommand) and state that the pasted-block path remains empirically untested because live Gemini verification is out of scope.",
+        "Run `cd tools/chrome-bridge && npm run verify` and confirm it exits 0 (typecheck, lint, unit tests) and that the MCP tool catalog still exposes exactly the 16 page actions."
+      ],
+      "boundedContext": "MCP client registration — README config documentation",
+      "layer": "interface",
+      "blastRadius": "small",
+      "inputs": [
+        "The README 'MCP client config' section (lines 46-135) carrying the unverified 'works for any other MCP client' claim and the snippet block at lines ~118-135",
+        "The repo-root .mcp.json chrome-bridge entry (stdio, command node, args tools/chrome-bridge/bin/mcp.mjs, env {}) as the already-present Claude Code registration",
+        "decisions.md 2026-09-03 (horizon 4): hand-verification is done through Claude Code ONLY; Gemini CLI, Codex CLI and Cursor are documentation-only for the life of this project",
+        "Discovery: ~/.gemini/settings.json has no mcpServers key (Gemini registers via `gemini mcp add`), and no codex or cursor binary exists on PATH"
+      ],
+      "expectedResult": "One corrected README 'MCP client config' section that ships exactly one chrome-bridge stdio snippet (command `node`, args [\"tools/chrome-bridge/bin/mcp.mjs\"], env {}) matching the repo-root .mcp.json entry, with a distinct status note for each of the four target clients — Claude Code hand-verified via a named live page-action call, Gemini CLI config-documentation-only with the `gemini mcp add` command, Codex CLI and Cursor documentation-only / not installed — and no 'works for any other MCP client' claim anywhere in the section.",
+      "dependsOn": [],
+      "rubric": [
+        {
+          "id": "snippet-matches-mcp-json-field-for-field",
+          "label": "Single snippet, exact match to repo-root .mcp.json",
+          "ruleStatement": "The README 'MCP client config' section contains exactly ONE chrome-bridge stdio config snippet, and every field in it matches the repo-root .mcp.json chrome-bridge entry character-for-character. 10 = one snippet, all four fields (type/command/args/env) identical to .mcp.json with no extra or renamed keys, and no second competing snippet anywhere in the file; 8 = one snippet, fields semantically identical but with a cosmetic deviation (e.g. args path written as ./tools/... vs tools/...); minScore 7 = one snippet present and the command+args would actually launch the same process as .mcp.json.",
+          "passCriteria": [
+            "Open tools/chrome-bridge/README.md and the repo-root .mcp.json side by side; the chrome-bridge entry shows type \"stdio\", command \"node\", args [\"tools/chrome-bridge/bin/mcp.mjs\"], env {}",
+            "The README snippet reproduces those same four fields with the same values and no additional keys",
+            "Searching the README for a second fenced JSON config block registering chrome-bridge returns nothing — there is only one",
+            "The args path in the README snippet resolves to the same file as .mcp.json (tools/chrome-bridge/bin/mcp.mjs, not dist/, not src/, not mcp-server.mjs)"
+          ],
+          "failureExamples": [
+            "README ships the snippet with command \"npx\" or an absolute /Users/... path because the author normalized it differently from .mcp.json",
+            "The old multi-client snippet block is left in place above the new one, so two snippets now exist",
+            "Snippet points args at tools/chrome-bridge/bin/mcp.mjs but .mcp.json actually uses a different entry filename, and the mismatch is not caught",
+            "Author adds a \"cwd\" or \"description\" key to the README snippet that is not in .mcp.json, so it no longer matches field-for-field"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "four-clients-distinct-status",
+          "label": "Each target client carries its own distinct status",
+          "ruleStatement": "The section gives a separate status statement for each of the four target clients (Claude Code, Gemini CLI, Codex CLI, Cursor), and no single sentence assigns one status word to more than one client. 10 = four clearly separated per-client notes, each naming that client and its exact status (hand-verified / config-documentation-only / documentation-only), with the reason; 8 = four distinct notes present, one slightly terse on the reason; minScore 7 = all four clients named with individually identifiable statuses even if two share phrasing structure.",
+          "passCriteria": [
+            "All four client names — Claude Code, Gemini CLI, Codex CLI, Cursor — appear in the section with a status attached to each",
+            "Claude Code is labeled hand-verified; Gemini CLI is labeled config-documentation-only; Codex CLI and Cursor are labeled documentation-only",
+            "No sentence of the form 'X, Y and Z all work' or 'tested with Claude Code and Gemini' — each status sentence refers to exactly one client",
+            "Codex CLI and Cursor notes state the reason: their binaries are not installed on this machine",
+            "Gemini CLI note states that no live Gemini tool call was made"
+          ],
+          "failureExamples": [
+            "Author writes 'Verified with Claude Code; Gemini CLI, Codex CLI and Cursor are documentation-only' — bundling three clients under one status and hiding that Gemini got a documented command form the others did not",
+            "Cursor is mentioned only in passing ('and similar tools') rather than as its own line item",
+            "Gemini CLI is described as 'supported' without the config-documentation-only qualifier, implying it was tested",
+            "Codex CLI note omits the not-installed reason, leaving a reader unsure whether it failed or was simply not tried"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "no-blanket-any-client-claim",
+          "label": "No surviving 'works for any MCP client' overclaim",
+          "ruleStatement": "No sentence in the section claims or implies the snippet works for MCP clients beyond the ones actually checked. 10 = the old 'works for any other MCP client' text is gone and nothing equivalent ('any terminal AI tool', 'all MCP-compatible clients', 'should work anywhere') replaced it; scope is stated as exactly the four named clients at their stated verification levels; 8 = old claim gone, one mildly loose adjective remains ('broadly compatible') but immediately qualified; minScore 7 = the literal 'any other MCP client' phrasing is removed and no new unqualified universal claim was introduced.",
+          "passCriteria": [
+            "Full-text search of the section for 'any other MCP client', 'any MCP client', 'any terminal', 'works everywhere', 'all MCP' returns no unqualified hit",
+            "The section does not state or imply that untested clients will work — coverage is bounded to the four named clients",
+            "Any general statement about the stdio protocol being standard is explicitly paired with 'only Claude Code was hand-verified'",
+            "The word 'verified' / 'tested' is used only for Claude Code"
+          ],
+          "failureExamples": [
+            "Author replaces 'works for any other MCP client' with 'because it is a standard stdio server, it should work with any MCP-compatible client' — same overclaim, reworded",
+            "Section intro still says 'Register the chrome-bridge server in your MCP client' with a generic tone that reads as a universal guarantee, and no scoping sentence follows",
+            "A summary line at the end says 'compatible with Claude Code, Codex, Gemini, Cursor and more'",
+            "The per-client notes are correct but an earlier paragraph left untouched still carries the original blanket claim"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "claude-code-hand-verification-named",
+          "label": "Claude Code proof is a named live page-action call",
+          "ruleStatement": "The deliverable records a concrete live page-action verification through the snippet's exact command and args: a named page action (one of the 16, e.g. getPageText), the real argument passed, and the exact returned result or error. 10 = names the action, the argument, the returned payload/error verbatim, and states the relay + built extension were running; 8 = names action + argument + outcome but paraphrases the returned value; minScore 7 = a specific non-trivial page action (NOT ping, NOT a tool-catalog listing) is named with its argument and a pass/fail outcome.",
+          "passCriteria": [
+            "The record names a specific action from PAGE_ACTIONS (e.g. getPageText, readPage, findElement) — not ping, not 'listed the tools', not 'server connected'",
+            "A real argument value is shown (e.g. the URL or selector or tab target passed to the action)",
+            "The exact returned result or error string is quoted",
+            "The record states npm run relay (or equivalent) and the unpacked tools/chrome-bridge/dist/extension were both running during the call",
+            "The call is described as going through command node + args tools/chrome-bridge/bin/mcp.mjs (the shipped snippet), not a dev harness or direct import"
+          ],
+          "failureExamples": [
+            "Verification says 'confirmed the chrome-bridge MCP server loads in Claude Code and exposes 16 tools' — a catalog listing, not a live page action",
+            "'Ran ping and got pong' recorded as the hand-verification — ping does not exercise a page action",
+            "Action named (getPageText) but no argument and no returned text shown, so the call cannot be distinguished from a dry run",
+            "Author verified against tools/chrome-bridge/bin/mcp.mjs by importing it in a node REPL rather than loading it as an MCP server in Claude Code"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "blockers-annotation-in-place-not-resolved",
+          "label": "Horizon-2 Gemini blocker annotated, honestly scoped, not resolved",
+          "ruleStatement": "The horizon-2 Gemini-registration blocker line in blockers.md is annotated in place with observed-state evidence and is NOT marked resolved. 10 = annotation cites both observed facts (~/.gemini/settings.json has no mcpServers key; 'gemini mcp add' is the documented subcommand), explicitly states the pasted-mcpServers-block path remains empirically untested because live Gemini verification is out of project scope, and the blocker's status field still reads open/blocked/annotated — not resolved/closed; 8 = same content, one evidence item slightly vague; minScore 7 = blocker still open, annotation present, and it does not claim the pasted-block path works.",
+          "passCriteria": [
+            "The existing horizon-2 Gemini blocker entry is edited in place — no new separate entry, no deletion",
+            "Its status/state is still open (or 'annotated') — the words 'resolved', 'closed', 'fixed' do not appear on that entry",
+            "Annotation names the observed evidence: ~/.gemini/settings.json contains no mcpServers key, and 'gemini mcp add' is the documented registration subcommand",
+            "Annotation states plainly that the pasted mcpServers-block registration path was NOT tested and cannot be, because live Gemini verification is out of scope per the 2026-09-03 decision",
+            "The annotation does not assert that Gemini registration succeeds or that the snippet is Gemini-verified"
+          ],
+          "failureExamples": [
+            "Author marks the blocker resolved on the strength of the README now documenting 'gemini mcp add' — but no Gemini call was made, so it is not resolved",
+            "Annotation says 'Gemini likely works via gemini mcp add' — speculation stated as near-fact, no untested caveat",
+            "A brand-new blockers.md entry is added and the original horizon-2 line is left stale, contradicting the new one",
+            "Annotation records the decision reference but omits the concrete observed-state evidence (settings.json contents, subcommand name), so it is not grounded in what was actually checked"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "docs-only-no-scope-leak",
+          "label": "Change is docs-only; page-action surface and verify untouched",
+          "ruleStatement": "The diff touches only tools/chrome-bridge/README.md and docs/roadmaps/agent-agnostic-browser-bridge/blockers.md; PAGE_ACTIONS still contains exactly 16 actions; cd tools/chrome-bridge && npm run verify exits 0. 10 = git diff --stat shows exactly those two files, PAGE_ACTIONS count is demonstrably 16, verify green, and the CHROME_BRIDGE_URL paragraph and import.meta.url launcher note are byte-for-byte unchanged; 8 = two files touched, verify green, 16 actions, with a trivial unrelated whitespace fix in README; minScore 7 = no source/config/test file changed, action count still 16, verify green.",
+          "passCriteria": [
+            "git diff --name-only for this phase lists only tools/chrome-bridge/README.md and docs/roadmaps/agent-agnostic-browser-bridge/blockers.md",
+            "No file under tools/chrome-bridge/src/, no bin/mcp.mjs, no .mcp.json, no test file appears in the diff",
+            "The PAGE_ACTIONS definition in source still enumerates exactly 16 actions (unchanged from before the phase)",
+            "cd tools/chrome-bridge && npm run verify runs and exits 0",
+            "The MCP tool catalog still exposes exactly those 16 page actions and nothing added or removed",
+            "The existing CHROME_BRIDGE_URL relay-override paragraph and the import.meta.url launcher-resolution note in the README are unchanged"
+          ],
+          "failureExamples": [
+            "Author 'improves' the snippet by also editing .mcp.json or bin/mcp.mjs to add a description field, so the change leaks into config/source",
+            "While in the README, author renumbers or renames a page action for clarity, changing the 16-action surface",
+            "npm run verify goes red because the README edit broke a markdown-lint or link-check step that verify runs",
+            "Author reflows the whole 'MCP client config' section and incidentally rewords the CHROME_BRIDGE_URL paragraph that was supposed to stay untouched"
+          ],
+          "minScore": 7
+        }
+      ],
+      "healerHint": "The most likely failure is the Claude Code proof being a server-loads / tool-listing / ping check rather than a real page action — fix it by running one getPageText (or similar) call through node tools/chrome-bridge/bin/mcp.mjs with the relay and unpacked extension up, and recording the action name, argument, and exact returned result."
+    }
+  ],
+  "successCriteria": [
+    "analysis.successDefinition",
+    "real-chrome-event-fidelity-check: one evidence record set in the project memory files — strict-CSP site (URL + CSP header + executeScript outcome) and SPA site (clickAt/hover gesture + follow-up probe showing whether a framework handler visibly reacted), with the two h03 blockers annotated and the CDP-vs-DOM decision still OPEN.",
+    "measure-result-sizes-against-clients: one measurement record in discoveries.md — captureTab image-block bytes, readConsoleMessages/readNetworkRequests at limit 100 and 500, and the confirmed 1,000,000/1,000,001-char executeScript {value} boundary, from at least two real target-client sessions, plus one cap-location recommendation, with the result-size blocker annotated and the decision left OPEN.",
+    "ship-hand-verified-mcp-config-snippet: one corrected README 'MCP client config' section — a single chrome-bridge stdio snippet (command node, args [\"tools/chrome-bridge/bin/mcp.mjs\"], env {}) matching the repo-root .mcp.json entry, hand-verified in Claude Code via a named live page-action call, with distinct per-client status notes for all four target clients (Gemini CLI config-documentation-only, Codex CLI and Cursor documentation-only), no 'works for any other MCP client' claim remaining, and the horizon-2 Gemini pasted-block blocker annotated (not resolved)."
+  ],
+  "deferred": [
+    "Implementing the result-size cap (extension-side per-action default, generic MCP-layer truncation, or none) — this horizon may only measure and recommend; the decision must wait for the measurement evidence this horizon collects.",
+    "The tabId targeting model (a new listTabs tool, a required tabId param, or an optional override) — explicitly scoped out by the user; it needs its own decision and a later horizon.",
+    "CDP / chrome.debugger / computer-parity family including the gated features (file upload, accessibility-tree read_page) — gated on the CDP-vs-DOM decision that this horizon only evidences, never implements.",
+    "Editing target-client config files (~/.gemini/settings.json, ~/.cursor/mcp.json, ~/.config/crush/crush.json) — they are external observed state; only the README snippet and per-client notes ship this horizon.",
+    "Correcting the two stale source doc headers (src/mcp/server.ts 'advertises the eight page actions' and src/mcp/tool-catalog.ts 'Two of the ten tools') — a docs fix, but this horizon may not touch source and may only produce evidence, measurements, and README.",
+    "Adding a listTools().length === 16 runtime test — new code is prohibited this horizon; the 16-action surface is already pinned compile-time by Record<PageAction, ...> types.",
+    "Committing a reusable scripted real-Chrome verification harness — new code and speculative (one-time manual verification, no second implementation on this horizon); the documented 3-command ceremony plus throwaway controller is sufficient.",
+    "Live tool-call verification against Gemini CLI, Codex CLI and Cursor — per decisions.md 2026-09-03 (horizon 4) hand-verification is Claude-Code-only for the life of the project; Gemini's `gemini mcp add` form is documented, Codex/Cursor binaries are not installed, so all three stay README documentation-only this horizon.",
+    "Repairing the repo-root PostToolUse lint hook false-positives on tools/chrome-bridge files — a known environmental defect the user says to ignore, not a defect this horizon fixes."
+  ],
+  "revision": 1,
+  "revisionReason": "revise-phases: phase 3 ship-hand-verified-mcp-config-snippet required a live Gemini CLI tool call, but decisions.md 2026-09-03 (horizon 4) binds hand-verification to Claude Code ONLY. The phase's changes, expectedResult, and its gemini-registration-evidence rubric dimension were replaced so Claude Code is the sole hand-verified client and Gemini CLI drops to config-documentation-only; horizon objective and phases 1-2 unchanged. Previous content at horizon-04-evidence-and-verification-roadmap.rev0.json."
+}

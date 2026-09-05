@@ -1,0 +1,619 @@
+{
+  "task": "Add a read-only getTabState action to the chrome-bridge MCP that reports the dedicated sandbox tab and the currently-focused active tab of the sandbox tab's window (each with id/url/title plus a sandboxTabActive flag), so an external MCP client can independently verify background-tab capture without trusting the human's word.",
+  "analysis": {
+    "objective": "Add a read-only getTabState action to the chrome-bridge MCP that reports the dedicated sandbox tab and the currently-focused active tab (each with id/url/title) plus a sandboxTabActive flag, so an external MCP client can independently verify background-tab capture without trusting the human's word.",
+    "successDefinition": "The chrome-bridge MCP advertises getTabState in listTools, and one getTabState call returns JSON containing sandboxTab:{id,url,title}, activeTab:{id,url,title} and sandboxTabActive:boolean. It is read-only: no tab is created, navigated, focused, or otherwise mutated, and no new manifest permission is required. When the sandbox tab is focused, sandboxTabActive=true and activeTab and sandboxTab resolve to the same tab (same id); when another tab in the sandbox tab's window is focused, sandboxTabActive=false and activeTab reflects that other tab. tsc --noEmit, eslint --max-warnings 0, and the package's vitest pass, and the action-catalog parity surface (PAGE_ACTIONS, params/results types, raw+guarded handler maps, TOOL_CATALOG, and the hardcoded action-count unit tests) is updated and green. Verified in real Chrome via the chrome-bridge MCP that focusing a different tab flips sandboxTabActive to false while the sandbox tab still captures/screenshots, and that getTabState introduces no path that makes the active tab an action target.",
+    "assumptions": [
+      "The sandbox-tab id is already resolvable from horizon-6's sandbox-tab ports/persistence (created-and-persisted); getTabState reads the stored id, it does not create or validate-create the tab.",
+      "'The currently-focused/active tab of the window' means the active tab of the same window as the sandbox tab (tab.windowId), not the active tab of whichever window holds OS focus.",
+      "The existing 'tabs' manifest permission already present lets the extension read url/title for both the sandbox and active tabs, so no new permission is added.",
+      "getTabState is a chrome.tabs read (get/query) only — not a page-world executeScript and not a CDP call — so CSP, world-selection and the debugger session-lifecycle concerns are out of play.",
+      "The action catalog (PAGE_ACTIONS) remains the single source of truth so listTools and MCP dispatch stay auto-derived from it, consistent with the horizon-1/3/5 discoveries; getTabState is added as a new entry there.",
+      "The report may legitimately show the sandbox tab and the active tab as the same tab (sandboxTabActive=true) — that is a valid state, not an error."
+    ],
+    "risks": [
+      "When the sandbox tab is itself focused, activeTab and sandboxTab are the same tab (sandboxTabActive=true); the contract must allow id equality rather than treat the overlap as a failure.",
+      "Multi-window ambiguity: if 'the currently-focused/active tab' is read as the active tab of the OS-focused window rather than the sandbox tab's own window, the report answers the wrong question — the defensible assumption (sandbox tab's window) must be pinned in the contract.",
+      "If the persisted sandbox-tab id is stale/closed, or no sandbox tab has been created yet, there is nothing to report; the failure shape (return an error, return a null sandbox, or recreate) is currently undefined and must be decided.",
+      "getTabState does not fit the 'page action targets a tab' model that PAGE_ACTIONS handlers assume (it queries identity of two tabs and targets none) — it must be wired as a query command without conflating report with target, or it will drag the dead active-tab resolution back in.",
+      "Adding the action requires touching the full parity surface (PAGE_ACTIONS, PageActionParams/PageActionResults, raw+guarded handler maps, TOOL_CATALOG, tests); a missed spot — e.g. the unit tests that hardcode the action count (actions.unit.test.ts, tool-catalog.unit.test.ts) — fails the gate.",
+      "getTabState must not resurrect the dead active-tab-as-target model from horizon 5: it reads the active tab only for identity reporting, and the action target must stay the sandbox tab per the horizon-6 decision.",
+      "The read handler must use the guarded result shape (no non-null assertion, no any) under the package's strict eslint/tsconfig; a tab chrome.tabs cannot return must surface as a defined error, not a crash."
+    ],
+    "outOfScope": [
+      "In-page/tab marker stamp (stamping a tab to mark it as the sandbox tab) — the agreed scope is report-only, and marking would mutate tab/page state, which the horizon-7 decision explicitly excludes.",
+      "Full tab list (listTabs-style) — the agreement names only the sandbox tab plus the focused tab pair, not every tab in the window.",
+      "Re-introducing the active tab as an action target — the horizon-6 decision binds the sandbox tab as the sole action target; this action reports tab identity but targets nothing.",
+      "Per-tab mutation, focusing, or navigation of either reported tab — read-only query, and mutating would violate the report-only contract.",
+      "CDP / chrome.debugger changes — this is a chrome.tabs-based identity read and is unrelated to the background-screenshot CDP path horizon 6 added.",
+      "Resolving the dead active-tab surface (delete vs keep queryActiveTab/captureVisibleTab/NO_ACTIVE_TAB/activeTab permission) — the next-horizon brief flags that as its own deferred decision, not this horizon's scope.",
+      "Result-size-cap location/threshold — getTabState's result is tiny (a few tab objects), so the still-open cap decision is not forced by this action."
+    ],
+    "domainShape": "technical",
+    "domainShapeReason": "This is developer tooling machinery — extending an MCP action catalog to report Chrome tab identity — with no business entities or rules a domain expert would recognize, and vision.md already classifies the whole project as technical.",
+    "ubiquitousLanguage": [
+      {
+        "term": "getTabState",
+        "meaning": "The new read-only MCP action that reports the sandbox tab and the active tab's identity plus the sandboxTabActive flag."
+      },
+      {
+        "term": "sandbox tab",
+        "meaning": "The dedicated, persisted tab that is the sole action target since horizon 6; its identity is the primary thing getTabState reports."
+      },
+      {
+        "term": "active tab",
+        "meaning": "The currently-focused tab of the window that contains the sandbox tab; the thing that proves whether the sandbox tab is backgrounded."
+      },
+      {
+        "term": "sandboxTabActive",
+        "meaning": "The boolean reporting whether the sandbox tab is itself the active/focused tab of its window."
+      },
+      {
+        "term": "tab identity",
+        "meaning": "The {id, url, title} triple identifying a tab, which is all getTabState returns per tab."
+      },
+      {
+        "term": "action target",
+        "meaning": "The tab a page action executes against; horizon 6 binds this to the sandbox tab only, and getTabState must not change it."
+      },
+      {
+        "term": "PAGE_ACTIONS",
+        "meaning": "The protocol's single source-of-truth action list from which listTools and MCP dispatch are derived."
+      },
+      {
+        "term": "MCP tool catalog",
+        "meaning": "The typed Record<PageAction, ToolCatalogEntry> that drives each tool's description and input schema."
+      }
+    ]
+  },
+  "discoveryFindings": [
+    {
+      "area": "PAGE_ACTIONS tuple",
+      "finding": "PAGE_ACTIONS is a 16-entry `as const` tuple (ping, navigateTo, getPageText, readPage, findElement, clickElement, typeText, captureTab, readConsoleMessages, readNetworkRequests, executeScript, navigateBack, navigateForward, reloadTab, clickAt, hover); `PageAction` is `(typeof PAGE_ACTIONS)[number]` and `isPageAction` narrows against it.",
+      "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/src/protocol/actions.ts",
+      "implication": "getTabState is added as one new string literal to this tuple; because every consumer is typed `Record<PageAction, ...>`, adding the literal alone turns each un-updated consumer into a `tsc` error — that is the intended compile-time parity gate, so the plan should add the tuple entry first and let tsc enumerate the required follow-ups."
+    },
+    {
+      "area": "protocol params/results types",
+      "finding": "PageActionParams and PageActionResults are interfaces keyed by PageAction; each action needs BOTH a params entry and a results entry. No existing shared tab-identity shape exists: CaptureTabResult is only `{dataUrl}`, and ports.ts `ActiveTab` is only `{id, windowId}`. No-arg actions use the `{ readonly _?: never }` pattern.",
+      "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/src/protocol/types.ts",
+      "implication": "Add `GetTabStateParams = { readonly _?: never }` and a `GetTabStateResult` carrying `{ sandboxTab, activeTab, sandboxTabActive }`, plus a new `TabIdentity` `{ id, url, title }` type in types.ts; add both keys to PageActionParams and PageActionResults or tsc fails."
+    },
+    {
+      "area": "handler maps (raw + guarded)",
+      "finding": "pageActionHandlers builds `raw: Record<PageAction, Handler>` and returns a separate guarded `Record<PageAction, Handler>` where every action is listed explicitly (ping is unwrapped; all others are wrapped in `guard()`). Handlers return `{ result }` or `{ error }` (HandlerOutcome), never throw after validation.",
+      "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/src/extension/page-actions.ts",
+      "implication": "getTabState must be added to BOTH the `raw` map and the returned guarded map (wrapped in `guard()`); missing either side is a tsc error. The handler must return `{ result: {...} }` or an `{ error }` sentinel for a missing/unreadable tab."
+    },
+    {
+      "area": "ChromePorts methods",
+      "finding": "ChromePorts currently exposes only: queryActiveTab, executeScript, updateTab, goBack, goForward, reload, captureVisibleTab. There is NO method that reads a tab's url/title by id and NO method that queries the active tab of a specific windowId.",
+      "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/src/extension/ports.ts",
+      "implication": "The plan needs NEW port surface to read tab identity (chrome.tabs.get returning url/title) and to query the active tab of the sandbox tab's window (chrome.tabs.query({active:true, windowId})); this is the main net-new code beyond the catalog/type plumbing."
+    },
+    {
+      "area": "queryActiveTab semantics",
+      "finding": "queryActiveTab uses `chrome.tabs.query({ active: true, currentWindow: true })` and returns only `{ id, windowId }`; it is current-window-scoped and has no url/title, so it cannot answer 'active tab of the sandbox tab's window' and cannot supply url/title.",
+      "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/src/extension/ports.ts",
+      "implication": "getTabState must NOT reuse queryActiveTab; add a distinct active-tab-of-window query. Leave queryActiveTab/captureVisibleTab untouched (their deletion is explicitly out of scope per the analysis). sandboxTabActive is computed by comparing the returned active-tab id to the sandbox tab id."
+    },
+    {
+      "area": "sandbox tab id resolution",
+      "finding": "SandboxTabPorts.resolveTabId() returns only `Promise<number>`; the persisted key is the non-exported constant `sandboxTabId`. It already calls `chrome.tabs.get(tabId)` internally in isLiveTab but discards url/title (only compares `tab.id === tabId`).",
+      "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/src/extension/sandbox-ports.ts",
+      "implication": "getTabState calls `sandboxTab.resolveTabId()` to obtain the id, then reads url/title separately through the new port; resolveTabId itself needs no change and should stay returning a bare id."
+    },
+    {
+      "area": "service worker wiring",
+      "finding": "startServiceWorker builds `pageActionHandlers(deps.ports, deps.sandboxTabPorts, deps.debuggerPorts, captureStore)`; ChromePorts is already threaded in as `deps.ports`.",
+      "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/src/extension/service-worker.ts",
+      "implication": "If the new read methods live on ChromePorts (the natural home), no ServiceWorkerDeps or startServiceWorker change is required; the handler reaches them through the existing `ports` argument."
+    },
+    {
+      "area": "debugger/CDP and capture contract",
+      "finding": "debugger-ports.ts exposes only `captureScreenshot(tabId)` over chrome.debugger CDP; capture.ts is the page→worker capture wire contract (ConsoleEntry/NetworkEntry). Neither is involved in reading tab identity.",
+      "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/src/extension/debugger-ports.ts",
+      "implication": "getTabState is a pure chrome.tabs read; no CDP or capture-store change is needed, confirming the scope note."
+    },
+    {
+      "area": "tool catalog",
+      "finding": "TOOL_CATALOG is `Record<PageAction, ToolCatalogEntry>` and listTools() derives the advertised set from PAGE_ACTIONS (never Object.keys). A shared `NO_ARGS` schema (`{ type:'object', properties:{}, additionalProperties:false }`) already exists.",
+      "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/src/mcp/tool-catalog.ts",
+      "implication": "Add a getTabState entry reusing NO_ARGS with a clear description; no new schema properties are needed and listTools picks it up automatically once PAGE_ACTIONS has it."
+    },
+    {
+      "area": "MCP dispatch path",
+      "finding": "server.handleToolCall gates on `isPageAction(toolName)`, calls `deps.client.sendCommand(toolName, args)`, and JSON.stringifies any non-captureTab result into a text content block. controller-client.ts `sendCommand` is generic `<A extends PageAction>(action: A, params: PageActionParams[A])` with no per-action switch.",
+      "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/src/mcp/server.ts",
+      "implication": "No server.ts or controller-client.ts edit is needed; getTabState flows through automatically once PAGE_ACTIONS/PageActionParams/PageActionResults are updated, and its result is returned as a JSON text block."
+    },
+    {
+      "area": "manifest permissions",
+      "finding": "manifest.json already lists permissions `tabs`, `activeTab`, `scripting`, `storage`, `alarms`, `debugger` and host_permissions `[\"<all_urls>\"]`.",
+      "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/extension/manifest.json",
+      "implication": "No manifest change is expected; the existing `tabs` permission (plus `<all_urls>`) is what makes `chrome.tabs.get(id)` returning url/title and `chrome.tabs.query({active:true, windowId})` legal."
+    },
+    {
+      "area": "tab-read plausibility",
+      "finding": "sandbox-ports.ts already successfully reads `chrome.tabs.get(tabId)` (its isLiveTab uses `tab.id`), and the README contains no explicit statement about tab url/title read capability; the `tabs` permission is present in the manifest.",
+      "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/src/extension/sandbox-ports.ts",
+      "implication": "Reading tab.url/tab.title by id and querying the active tab are grounded in the existing `tabs` permission; the plan can rely on it but should keep the 'no new permission' claim tied to the manifest, not to any doc."
+    },
+    {
+      "area": "actions unit test hardcoded count",
+      "finding": "actions.unit.test.ts asserts the exact 16-entry ordered tuple AND `expect(PAGE_ACTIONS.length).toBe(16)`.",
+      "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/src/protocol/actions.unit.test.ts",
+      "implication": "Insert `getTabState` into the expected array (position matters for the order assertion) and bump 16 → 17."
+    },
+    {
+      "area": "tool-catalog unit test hardcoded count",
+      "finding": "tool-catalog.unit.test.ts asserts `expect(listTools()).toHaveLength(16)` in a test named 'advertises exactly sixteen tools'; its per-action required-args test is not exhaustive, so a NO_ARGS getTabState will not fail it.",
+      "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/src/mcp/tool-catalog.unit.test.ts",
+      "implication": "Bump the length assertion 16 → 17 (and the test name); optionally add a `required.get('getTabState')` → [] assertion for parity."
+    },
+    {
+      "area": "fakePorts() helpers",
+      "finding": "Both service-worker.unit.test.ts fakePorts() and page-actions.unit.test.ts fakePorts() return full object literals listing all seven ChromePorts methods (queryActiveTab, executeScript, updateTab, captureVisibleTab, goBack, goForward, reload); page-actions fakePorts also takes `Partial<ChromePorts>` overrides.",
+      "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/src/extension/page-actions.unit.test.ts",
+      "implication": "Adding a method to ChromePorts makes both fakePorts() literals tsc-fail (missing member); the plan must extend both fakes with the new read method(s) and add getTabState handler tests stubbing them."
+    },
+    {
+      "area": "action-target invariant",
+      "finding": "Every existing page-action handler resolves its target via `sandboxTab.resolveTabId()`; `ports.queryActiveTab()` is asserted `not.toHaveBeenCalled()` throughout page-actions.unit.test.ts, and getTabState is the first handler that reads two identities without acting on either.",
+      "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/src/extension/page-actions.unit.test.ts",
+      "implication": "The new handler must read only (resolve sandbox id + read two tabs), never call updateTab/executeScript/captureVisibleTab/goBack/goForward/reload, and its tests should assert the mutation methods were not called, preserving the 'sandbox tab is sole action target' invariant."
+    }
+  ],
+  "requiredMaterials": [],
+  "phases": [
+    {
+      "id": "chromeports-read-tab-identity",
+      "order": 0,
+      "name": "Add read-only tab-identity reads to ChromePorts",
+      "goal": "Give ChromePorts the read-only ability to fetch one tab's identity (id/url/title) by its id and to fetch the active tab of a specific window, so a handler can report tab url/title without reusing queryActiveTab's current-window scope.",
+      "rationale": "The chrome-bridge MCP currently cannot read a tab's url or title by id, and queryActiveTab returns only {id, windowId} for the current window, so it cannot answer 'what is the active tab of the sandbox tab's window'. These two reads are the raw material getTabState needs, so they are added to the port first.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/extension/ports.ts",
+        "tools/chrome-bridge/src/protocol/types.ts",
+        "tools/chrome-bridge/src/extension/page-actions.unit.test.ts",
+        "tools/chrome-bridge/src/extension/service-worker.unit.test.ts"
+      ],
+      "changes": [
+        "Add a TabIdentity type ({ id: number; url: string; title: string }) to protocol/types.ts; the new port methods return it plus windowId.",
+        "Add readTab(tabId): Promise<TabIdentity & { windowId: number }> to the ChromePorts interface, implemented in chromeCommandPorts() as chrome.tabs.get(tabId) mapped to { id, windowId, url: tab.url ?? '', title: tab.title ?? '' }, so a closed/restricted tab becomes a thrown error the handler's guard() surfaces.",
+        "Add activeTabOfWindow(windowId): Promise<(TabIdentity & { windowId: number }) | undefined> to ChromePorts, implemented as chrome.tabs.query({ active: true, windowId }) returning the first tab's identity or undefined when there is none; it keys off the sandbox tab's windowId, not the current window.",
+        "Leave queryActiveTab unchanged (keep its current-window semantics) and extend both fakePorts() literals in page-actions.unit.test.ts and service-worker.unit.test.ts with readTab and activeTabOfWindow so the ChromePorts interface still typechecks."
+      ],
+      "boundedContext": "chrome-bridge extension — tab-identity read (ChromePorts)",
+      "layer": "infrastructure",
+      "blastRadius": "medium",
+      "inputs": [
+        "ChromePorts interface + chromeCommandPorts() in extension/ports.ts",
+        "protocol/types.ts (new TabIdentity type)",
+        "fakePorts literals in page-actions.unit.test.ts and service-worker.unit.test.ts",
+        "chrome.tabs permission (already present in manifest.json)"
+      ],
+      "expectedResult": "ChromePorts can read a tab's identity by id and read the active tab of a specified window; tsc --noEmit stays green across the package because both fakePorts() helpers were extended with the two new methods.",
+      "dependsOn": [],
+      "compensation": "Remove readTab and activeTabOfWindow from ChromePorts and chromeCommandPorts(), drop the TabIdentity type from protocol/types.ts, and restore both fakePorts() literals to their prior shape. Nothing outside these files consumes the methods yet, so no other code needs reverting.",
+      "rubric": [
+        {
+          "id": "tab-identity-type",
+          "label": "TabIdentity type shape",
+          "ruleStatement": "protocol/types.ts exports a single TabIdentity type with exactly the fields { id: number; url: string; title: string }, and both new port methods reference that type rather than re-declaring an inline shape. 10 means no reviewer could ask for a cleaner contract; 8 is a competent implementation that exports the type and uses it consistently; minScore 6 is the bar for acceptable.",
+          "passCriteria": [
+            "Open tools/chrome-bridge/src/protocol/types.ts and confirm `TabIdentity` is an exported type with exactly three fields: id: number, url: string, title: string — no windowId, no optional flags, no extra fields.",
+            "The ChromePorts interface in extension/ports.ts declares both readTab and activeTabOfWindow using the TabIdentity type in their return (e.g. `TabIdentity & { windowId: number }`), not a hand-written `{ id: number; url: string; title: string }` duplicate.",
+            "The two fakePorts() implementations in page-actions.unit.test.ts and service-worker.unit.test.ts produce objects that resolve to the TabIdentity-shaped return and are accepted by the ChromePorts interface without a cast."
+          ],
+          "failureExamples": [
+            "TabIdentity is declared but not exported, so the two methods each carry a slightly different inline shape and a downstream getTabState cannot reference one canonical type — the honest attempt to keep the type private is what breaks reuse.",
+            "The developer decided the type should carry `windowId` too (or made url/title optional), so the method returns `{ id; windowId; url?; title? }` instead of the specified `TabIdentity & { windowId: number }`, subtly changing the contract the later handler relies on."
+          ],
+          "minScore": 6
+        },
+        {
+          "id": "read-tab-identity-correctness",
+          "label": "readTab identity correctness and error propagation",
+          "ruleStatement": "readTab(tabId) resolves to the real tab's id, windowId, url and title, guarantees non-empty strings via the `tab.url ?? ''` / `tab.title ?? ''` fallback, and does NOT swallow errors — a closed or restricted tab rejects and propagates rather than resolving to a placeholder. 10 is a read that faithfully mirrors chrome.tabs.get including its rejection; 8 is a competent mapping with the string fallback; minScore 6 is the acceptable bar.",
+          "passCriteria": [
+            "readTab returns the id and windowId that chrome.tabs.get actually returned for that tab (no hardcoded id/0, no derived value).",
+            "url and title come from chrome.tabs.Tab as non-optional strings using the `?? ''` fallback, so the result type has url: string and title: string, never `string | undefined`.",
+            "readTab does not wrap chrome.tabs.get in try/catch-and-return-default: a rejection from chrome.tabs.get flows out of readTab so a later guard() can surface it. The fake test path includes a rejecting case for an unknown/closed id, proving the error path is exercised."
+          ],
+          "failureExamples": [
+            "The developer 'hardened' readTab with `try { return map(tab) } catch { return undefined }`, so a closed tab silently resolves undefined instead of throwing — the handler's guard() never fires and a stale id yields a falsy identity rather than a surfaced error. This is the plausible miss: error-handling that looks defensive but hides the failure.",
+            "url/title were copied as optional (`tab.url` without `?? ''`), so a tab still loading produces `{ url: undefined }` and the type degrades to `string | undefined`, breaking the always-string identity triple that getTabState needs."
+          ],
+          "minScore": 6
+        },
+        {
+          "id": "active-tab-of-window-scoping",
+          "label": "activeTabOfWindow scopes to the passed window",
+          "ruleStatement": "activeTabOfWindow(windowId) queries chrome.tabs.query with the caller-supplied windowId — never the current window — and returns undefined (not a throw and not a placeholder object) when that window has no active tab. 10 means the caller-supplied windowId is plumbed straight into the query with zero current-window influence; 8 is a correct plumb-through; minScore 7 is the acceptable bar, which is strict because getting the scope wrong defeats the entire phase.",
+          "passCriteria": [
+            "The method's only parameter is windowId and the chrome.tabs.query call passes it through in the QueryInfo object (`{ active: true, windowId }`), with no call to chrome.windows.getCurrent()/getLastFocused to derive or override it.",
+            "The query does not fall back to the focused/current window when the sandbox tab's windowId is supplied — the result and the method are fully determined by the argument.",
+            "When chrome.tabs.query returns an empty array, the method resolves to undefined rather than a default object; the fake implementation in the tests return undefined for a window with no active tab."
+          ],
+          "failureExamples": [
+            "The developer reused the existing queryActiveTab path or called `chrome.tabs.query({ active: true })` without windowId, so the read returns whichever window happens to be focused instead of the sandbox tab's window — exactly the defect this phase exists to fix. A careful dev might assume queryActiveTab already covers this and only reshape its return, leaving the scope wrong.",
+            "On an empty window the method returns `{ id: 0, url: '', title: '' }` instead of undefined, so a downstream getTabState cannot distinguish 'no active tab' from a real tab and will emit a fabricated active identity."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "query-active-untouched",
+          "label": "queryActiveTab semantics preserved",
+          "ruleStatement": "queryActiveTab keeps its current-window scope and return shape; it is not refactored to take a windowId or redirected through the new window-scoped read, so existing callers' behavior is unchanged. 10 is a zero-diff on queryActiveTab's observable behavior; 8 is a competent no-op; minScore 6 is the acceptable bar.",
+          "passCriteria": [
+            "The queryActiveTab signature in extension/ports.ts is unchanged (no windowId parameter added) and its implementation still resolves from the current window.",
+            "There is exactly one current-window active-tab read and one window-parameterized read — the two are not collapsed into a single `getActiveTab({ windowId? })` helper.",
+            "Existing tests that call queryActiveTab still pass without modification-induced failures."
+          ],
+          "failureExamples": [
+            "The developer 'DRY'd' the two reads into one `getActiveTab({ windowId? })` helper, nudging the default path toward the new window-scoped semantics and quietly changing what existing queryActiveTab callers receive when no windowId is passed."
+          ],
+          "minScore": 6
+        },
+        {
+          "id": "fake-ports-and-typecheck",
+          "label": "Both fakePorts extended and tsc green",
+          "ruleStatement": "Both fakePorts() literals in page-actions.unit.test.ts and service-worker.unit.test.ts implement readTab and activeTabOfWindow so the ChromePorts interface typechecks, and tsc --noEmit exits 0 without a `@ts-ignore`/`@ts-expect-error`/`as unknown as` cast papering over a missing method. 10 means no reviewer could ask for more (both fakes complete, no cast); 8 is a competent double-extension; minScore 6 is the acceptable bar.",
+          "passCriteria": [
+            "Searching each of the two test files finds a readTab and an activeTabOfWindow implementation inside the fakePorts() literal.",
+            "The fake implementations return stable, typed identities (fixed id/url/title and the windowId) rather than rejected/empty stubs, so existing unit tests can call them deterministically.",
+            "Running `tsc --noEmit` in tools/chrome-bridge exits 0, and the diff contains no `@ts-ignore`/`@ts-expect-error` annotation or `as unknown as` cast used to silence a missing-method error."
+          ],
+          "failureExamples": [
+            "Only one test file's fakePorts was extended — the second file (typically service-worker.unit.test.ts) is left untouched because the dev edited it first and forgot the other, so tsc fails when the interface is checked against the stale literal. A cast like `fakePorts() as ChromePorts` hides it."
+          ],
+          "minScore": 6
+        }
+      ],
+      "healerHint": "The rubric most likely fails because activeTabOfWindow silently reuses the current-window scope (or readTab swallows the chrome.tabs.get rejection), so fix both by passing the windowId argument literally into chrome.tabs.query({ active: true, windowId }) and returning the mapped value directly without a try/catch."
+    },
+    {
+      "id": "sandbox-ports-peek-stored-tab-id",
+      "order": 1,
+      "name": "Add a non-creating sandbox tab id peek",
+      "goal": "Give SandboxTabPorts a pure read that returns the persisted sandbox-tab id without creating a tab, so getTabState can report the sandbox tab without mutating any state.",
+      "rationale": "The only existing resolver, resolveTabId, CREATES a tab whenever one is not already stored, and a read-only report must not create, focus, or navigate anything. getTabState therefore needs a side-effect-free read of the already-persisted id plus an explicit 'no sandbox tab yet' answer.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/extension/sandbox-ports.ts",
+        "tools/chrome-bridge/src/extension/page-actions.unit.test.ts",
+        "tools/chrome-bridge/src/extension/service-worker.unit.test.ts"
+      ],
+      "changes": [
+        "Add peekStoredSandboxTabId(): Promise<number | undefined> to the SandboxTabPorts interface; it reads chrome.storage.local under SANDBOX_TAB_ID_KEY and returns the stored id, and must never create or focus a tab.",
+        "Implement it in chromeSandboxTabPorts() by reusing the existing readStoredTabId() helper, and leave resolveTabId() untouched so it alone owns tab creation.",
+        "Add peekStoredSandboxTabId to both the fakeSandbox() (page-actions.unit.test.ts) and fakeSandboxTabPorts() (service-worker.unit.test.ts) fakes so SandboxTabPorts still typechecks."
+      ],
+      "boundedContext": "chrome-bridge extension — sandbox-tab id read (SandboxTabPorts)",
+      "layer": "infrastructure",
+      "blastRadius": "small",
+      "inputs": [
+        "SandboxTabPorts interface + chromeSandboxTabPorts() in extension/sandbox-ports.ts",
+        "existing readStoredTabId() helper (SANDBOX_TAB_ID_KEY)",
+        "fakeSandbox() in page-actions.unit.test.ts",
+        "fakeSandboxTabPorts() in service-worker.unit.test.ts"
+      ],
+      "expectedResult": "SandboxTabPorts exposes peekStoredSandboxTabId, returning the persisted sandbox-tab id (or undefined) without creating a tab; tsc --noEmit stays green because both sandbox fakes were extended with the new method.",
+      "dependsOn": [],
+      "compensation": "Remove peekStoredSandboxTabId from the SandboxTabPorts interface and chromeSandboxTabPorts(), then revert the two sandbox fake helpers. resolveTabId and its creation behavior are untouched.",
+      "rubric": [
+        {
+          "id": "peek-read-only-purity",
+          "label": "Read-only purity (no tab side effects)",
+          "ruleStatement": "peekStoredSandboxTabId is a pure read: its resolution path never creates, focuses, activates, reloads, moves, or navigates a tab or window. On this scale a 10 also documents the guarantee in the interface JSDoc and is provably storage-only; an 8 is a clean implementation whose only chrome.* call is the storage read; the acceptable floor is 8.",
+          "passCriteria": [
+            "grep the body of peekStoredSandboxTabId and every function it calls for chrome.tabs.create, chrome.tabs.update, chrome.tabs.reload, chrome.tabs.activate, chrome.tabs.move, chrome.tabs.focus, chrome.tabs.goBack, chrome.tabs.goForward, chrome.windows.create, chrome.windows.update and confirm none appear.",
+            "The only chrome.* API reachable on the peek path is chrome.storage.local.get (or the helper that wraps it), addressed under SANDBOX_TAB_ID_KEY.",
+            "The function resolves the stored value directly and contains no branch that calls a tab-creating or tab-mutating API."
+          ],
+          "failureExamples": [
+            "A developer implements peek by falling back to resolveTabId() when no id is stored, on the reasoning that a read should still return a usable id — this creates a tab on the empty path, which is precisely the side effect this phase exists to prevent.",
+            "The developer reuses a shared helper that itself calls chrome.tabs.create when SANDBOX_TAB_ID_KEY is absent, so a peek with no sandbox tab yet creates one."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "peek-empty-returns-undefined",
+          "label": "No-tab-yet returns undefined",
+          "ruleStatement": "peekStoredSandboxTabId resolves to undefined exactly when SANDBOX_TAB_ID_KEY holds no valid id, and never throws, never fabricates an id, and never coerces the stored value on that path, so a caller can strictly distinguish no sandbox tab yet from a real id. A 10 also proves the empty path with a test; an 8 is correct undefined semantics and a tight Promise<number | undefined> return type; the acceptable floor is 8.",
+          "passCriteria": [
+            "With SANDBOX_TAB_ID_KEY absent from chrome.storage.local, awaiting peekStoredSandboxTabId() yields the strict value undefined, and no chrome.tabs API is invoked on that path.",
+            "The interface method's return type is Promise<number | undefined> — not Promise<number>, Promise<number | null>, or Promise<number | 0>.",
+            "The implementation passes the stored value through with no coercion: no || 0, no ?? 0, no Number(...), no sentinel fallback."
+          ],
+          "failureExamples": [
+            "The developer returns 0 or -1 from the no-tab branch because callers can just test falsy — but Chrome tab ids are never 0, so down-stream sandboxTabActive logic treats 0 as a real tab id and reports a sandbox tab where none exists.",
+            "The implementation falls back to a persisted-else-create path and returns the id of a freshly created tab when storage is empty, so a read-peek reports tab id 5 and the caller concludes a sandbox tab is already present."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "resolve-tab-id-owns-creation",
+          "label": "resolveTabId unchanged as sole creator",
+          "ruleStatement": "resolveTabId() stays the single place that may create a tab; this phase adds no creation logic to peek and does not refactor resolveTabId's signature or body. A 10 also keeps the resolveTabId diff to zero and confirms by grep that no other symbol can create; an 8 is an un-refactored resolveTabId with peek stateless; the acceptable floor is 8.",
+          "passCriteria": [
+            "git diff against the pre-phase commit shows no edits inside resolveTabId (no change to its signature, parameters, or body) in sandbox-ports.ts.",
+            "A grep for chrome.tabs.create across sandbox-ports.ts finds it only inside resolveTabId or in a helper that only resolveTabId calls — not in peekStoredSandboxTabId.",
+            "peekStoredSandboxTabId does not call resolveTabId and takes no create-if-missing parameter."
+          ],
+          "failureExamples": [
+            "To avoid duplication, the developer extracts a create helper and rewires resolveTabId to call it, then has peek invoke the helper when no id is stored — creation is no longer resolveTabId-only and the resolveTabId diff is non-empty even though visible behavior is unchanged.",
+            "The developer adds a createWhenMissing boolean argument to resolveTabId and calls it from peek, changing resolveTabId's contract and pulling creation back onto the peek path."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "compile-and-fakes-covered",
+          "label": "Typechecks with both sandbox doubles",
+          "ruleStatement": "The project compiles under tsc --noEmit, and every SandboxTabPorts implementation — the real chromeSandboxTabPorts() plus both test doubles (fakeSandbox in page-actions.unit.test.ts and fakeSandboxTabPorts in service-worker.unit.test.ts) — satisfies the expanded port with a conforming signature. A 10 also has the three implementations agree on return semantics; an 8 is a green tsc with both fakes present and correctly typed; the acceptable floor is 7.",
+          "passCriteria": [
+            "Running pnpm typecheck (or tsc --noEmit) from extension/ exits 0 with no errors.",
+            "grep -n peekStoredSandboxTabId tools/chrome-bridge/src/extension/sandbox-ports.ts shows the method declared in the SandboxTabPorts interface AND implemented in chromeSandboxTabPorts().",
+            "Both fakeSandbox (page-actions.unit.test.ts) and fakeSandboxTabPorts (service-worker.unit.test.ts) define a peekStoredSandboxTabId member whose return type matches Promise<number | undefined>."
+          ],
+          "failureExamples": [
+            "The developer adds the method to the real implementation and to fakeSandbox (the file open first from the failing test) but forgets fakeSandboxTabPorts in service-worker.unit.test.ts, leaving tsc --noEmit red on the service-worker suite's import.",
+            "The fakes are added as Promise.resolve(0) or Promise.resolve(undefined as number); the project compiles, but the double diverges from the real undefined-on-empty contract, so a later test that asserts empty-storage behavior passes or fails for the wrong reason."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "single-key-read-path",
+          "label": "Reuses the canonical storage read",
+          "ruleStatement": "peekStoredSandboxTabId obtains the id through the existing readStoredTabId() helper — the same canonical read the creation path uses — so peek and resolveTabId can never disagree about the stored id, and SANDBOX_TAB_ID_KEY is read in only one place. A 10 shows peek delegates to the helper with no added parse or coerce; an 8 is a correct single-path read; the acceptable floor is 7.",
+          "passCriteria": [
+            "The body of peekStoredSandboxTabId calls readStoredTabId() (or a function that delegates to it) and does not open its own chrome.storage.local.get(SANDBOX_TAB_ID_KEY).",
+            "Exactly one place in the file reads SANDBOX_TAB_ID_KEY directly (inside readStoredTabId), and both peek and resolveTabId get the id from it.",
+            "peek adds no new storage-value parsing or coercion (no Number(...), no re-stringify, no ?? default) that could change the reported id relative to resolveTabId."
+          ],
+          "failureExamples": [
+            "The developer writes peek by inlining (await chrome.storage.local.get(SANDBOX_TAB_ID_KEY))[SANDBOX_TAB_ID_KEY], duplicating the read; a future key-rename or stored-format change must now be applied in two spots and peek can silently diverge from resolveTabId.",
+            "peek adds Number(...) or ?? 0 normalization that readStoredTabId does not have, so the same stored id resolves to a different value through peek than through resolveTabId."
+          ],
+          "minScore": 7
+        }
+      ],
+      "healerHint": "The most likely miss is implementing peek by falling back to resolveTabId() (or a creating helper) when no id is stored so the read still returns a usable id — which creates a tab; fix it by having peek call only readStoredTabId() and pass its value straight through with no fallback to any chrome.tabs.create."
+    },
+    {
+      "id": "add-gettabstate-mcp-action",
+      "order": 2,
+      "name": "Add the getTabState action to the MCP catalog",
+      "goal": "Make getTabState a first-class read-only MCP action that is advertised by listTools and returns { sandboxTab, activeTab, sandboxTabActive }, reporting the sandbox tab and the focused tab of its window without acting on either.",
+      "rationale": "This is the actual feature: an external MCP client can now independently verify whether the sandbox tab is the focused tab of its window and confirm background-tab capture. Because PAGE_ACTIONS is the single source of truth and every consumer is typed Record<PageAction, ...>, adding the action forces the catalog, param/result types, handler maps, tool-catalog entry, and hardcoded action-count tests to land together as one atomic change.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/protocol/actions.ts",
+        "tools/chrome-bridge/src/protocol/types.ts",
+        "tools/chrome-bridge/src/extension/page-actions.ts",
+        "tools/chrome-bridge/src/mcp/tool-catalog.ts",
+        "tools/chrome-bridge/src/protocol/actions.unit.test.ts",
+        "tools/chrome-bridge/src/mcp/tool-catalog.unit.test.ts",
+        "tools/chrome-bridge/src/extension/page-actions.unit.test.ts"
+      ],
+      "changes": [
+        "Add getTabState to the PAGE_ACTIONS tuple (16 to 17) and to PageActionParams/PageActionResults in protocol/types.ts, using the { readonly _?: never } no-arg params pattern.",
+        "Add a GetTabStateResult returning { sandboxTab, activeTab, sandboxTabActive } where each tab is a TabIdentity | null; sandboxTab and activeTab are null when no sandbox tab exists.",
+        "Add a getTabState handler to page-actions.ts in BOTH the raw map and the returned guarded map (wrapped in guard()): peek the id via sandboxTab.peekStoredSandboxTabId(); when absent return { sandboxTab: null, activeTab: null, sandboxTabActive: false }; when present read the sandbox tab with ports.readTab(sandboxId), query ports.activeTabOfWindow(sandboxTab.windowId), and set sandboxTabActive = activeTab !== null && activeTab.id === sandboxTab.id. Pin the empty/stale behavior explicitly: NO saved id -> null sandbox + null activeTab + false; a saved id that points at a closed/unreadable tab -> ports.readTab rejects and guard() surfaces it as an { error } sentinel; the handler NEVER creates a tab.",
+        "Assert the handler only reads: it never calls updateTab/executeScript/captureVisibleTab/goBack/goForward/reload, keeping the sandbox tab the sole action target and never reintroducing the active tab as a target.",
+        "Add a getTabState entry to TOOL_CATALOG reusing the shared NO_ARGS schema, with a description stating it reports the sandbox tab and the active tab of that tab's window.",
+        "Update the hardcoded-count unit tests: the actions.unit.test.ts ordered tuple plus its length assertion (16 to 17), the tool-catalog.unit.test.ts listTools length (16 to 17) and its 'exactly sixteen tools' test name, and add a page-actions.unit.test.ts getTabState block covering the no-sandbox null shape, the id-equality sandboxTabActive=true case, and no-mutation-method assertions."
+      ],
+      "boundedContext": "chrome-bridge MCP — action catalog (getTabState)",
+      "layer": "interface",
+      "blastRadius": "medium",
+      "inputs": [
+        "protocol/actions.ts (PAGE_ACTIONS tuple)",
+        "protocol/types.ts (PageActionParams / PageActionResults + TabIdentity)",
+        "extension/page-actions.ts (raw + guarded handler maps)",
+        "mcp/tool-catalog.ts and the three catalog/count/handler unit tests"
+      ],
+      "expectedResult": "The chrome-bridge MCP advertises getTabState in listTools and one call returns the { sandboxTab, activeTab, sandboxTabActive } shape: { sandboxTab: null, activeTab: null, sandboxTabActive: false } when no sandbox tab is saved, an { error } when a saved id points at a closed tab, and both identities plus the correct sandboxTabActive when a live sandbox tab exists — never creating a tab. tsc --noEmit, eslint --max-warnings 0, and the package vitest suite pass with the hardcoded action counts updated to 17.",
+      "dependsOn": [
+        "chromeports-read-tab-identity",
+        "sandbox-ports-peek-stored-tab-id"
+      ],
+      "compensation": "Remove getTabState from PAGE_ACTIONS (which forces removing it from PageActionParams/PageActionResults, the raw and guarded handler maps, and TOOL_CATALOG), delete its GetTabStateParams/Result and TabIdentity usage, and revert the hardcoded count assertions in actions.unit.test.ts and tool-catalog.unit.test.ts back to 16.",
+      "rubric": [
+        {
+          "id": "result-shape-empty-stale-live",
+          "label": "Result shape in every tab state",
+          "ruleStatement": "getTabState returns the exact { sandboxTab, activeTab, sandboxTabActive } shape in each of the empty, stale, and live states. A 10 means the code AND its tests positively cover all three states; an 8 covers all three correctly in code with one state's explicit test optional; any case that returns the wrong shape for a real browser state is below the bar.",
+          "passCriteria": [
+            "With no sandbox tab id saved in storage, an MCP call returns exactly { sandboxTab: null, activeTab: null, sandboxTabActive: false } — no extra keys, no undefined, no { error }.",
+            "With a saved sandbox id pointing at a live tab, sandboxTab is a non-null { id, url, title }, activeTab is the focused tab of sandboxTab.windowId, and sandboxTabActive is strictly equal to (activeTab.id === sandboxTab.id).",
+            "With a saved sandbox id pointing at a closed/unreadable tab, the result is an { error } sentinel surfaced through guard(), not the null shape and not a raw thrown rejection.",
+            "activeTab is read from sandboxTab.windowId only — never from a different window or the browser's own active-tab default."
+          ],
+          "failureExamples": [
+            "When a saved id points at a closed tab, the handler returns the null shape { sandboxTab: null, activeTab: null, sandboxTabActive: false } instead of an { error } sentinel, so a stale id is indistinguishable from 'no sandbox tab configured'.",
+            "sandboxTabActive is computed as a truthiness check on activeTab (or against a stale captured id), so it returns true even when the focused tab is a different tab in the sandbox tab's window."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "read-only-never-targets-active-tab",
+          "label": "Read-only; sandbox tab stays sole action target",
+          "ruleStatement": "getTabState is a pure read: it never creates, focuses, mutates, or navigates a tab, and never treats the active tab as an action target. A 10 additionally proves this with an automated no-mutation assertion; an 8 keeps the handler read-only but relies on review to confirm it; any call that mutates a tab or routes through the active tab fails.",
+          "passCriteria": [
+            "The getTabState handler path contains no call to updateTab, executeScript, captureVisibleTab, goBack, goForward, reload, or any create/focus/activate tab method.",
+            "With a valid sandbox id the handler only calls read-style ports (readTab, activeTabOfWindow) and a storage peek — no write or navigation side effects.",
+            "A unit test asserts the no-mutation property, i.e. that invoking getTabState returns a value without running any mutating method.",
+            "When no sandbox id is saved, getTabState returns the null shape immediately rather than falling through to a 'current/active tab' target and acting on it."
+          ],
+          "failureExamples": [
+            "The handler reuses a shared tab-resolution helper whose default target is the browser's active tab, so when a sandbox id is absent the code acts on the focused tab instead of returning the null shape.",
+            "getTabState shares a case branch with a mutating action (or dispatches through a path that calls executeScript on the target), so invoking it still performs a page action on the active tab."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "parity-surface-single-source-of-truth",
+          "label": "PAGE_ACTIONS leads all catalog and dispatch surfaces",
+          "ruleStatement": "getTabState is woven into every consumer derived from PAGE_ACTIONS so the advertised tool, the tool-catalog entry, the handler maps, and the hardcoded length assertions all agree. A 10 means every surface and every count is 17 with no straggler; an 8 advertises and dispatches the feature correctly with one benign count or description discrepancy; any stale or inconsistent surface fails.",
+          "passCriteria": [
+            "listTools advertises getTabState and its length (plus each hardcoded count in the unit tests) is 17, with no consumer still asserting 16 or 'sixteen tools'.",
+            "TOOL_CATALOG contains a getTabState entry that reuses the shared NO_ARGS input schema, not a copy of another action's param schema.",
+            "The tool-catalog description names the sandbox tab AND the active tab of that tab's window, not a generic placeholder.",
+            "Typed Record<PageAction,...> consumers (dispatch, raw and guarded handler maps, catalog) are fully satisfied by getTabState — none left as a partial or optional mapping."
+          ],
+          "failureExamples": [
+            "The action-count test in actions.unit.test.ts is bumped to 17 while tool-catalog.unit.test.ts still asserts 'exactly sixteen tools' (or the tuple length is 16 while the docs say 17), leaving one parity surface stale.",
+            "getTabState is added to PAGE_ACTIONS and the handler maps but the TOOL_CATALOG entry reuses another action's input schema instead of NO_ARGS, so MCP dispatch passes params the action must ignore."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "type-shape-no-any-nullable-identity",
+          "label": "Typed shape: nullable TabIdentity and no-arg params",
+          "ruleStatement": "The action's types are exactly the project's strict shape: params use the { readonly _?: never } no-arg pattern, results are GetTabStateResult with sandboxTab/activeTab as explicit TabIdentity | null (never optional), and the code compiles under strict tsc with no any or non-null assertions. A 10 means the type forbids an undefined tab and a non-null default; an 8 compiles cleanly with the nullable shape; any type that admits undefined or the wrong tab in some state fails.",
+          "passCriteria": [
+            "GetTabStateResult declares sandboxTab and activeTab as explicit `TabIdentity | null`, never `TabIdentity | undefined` or optional, so the empty shape can only be represented as null.",
+            "getTabState params use the project's no-arg pattern ({ readonly _?: never }) in PageActionParams, not Record<string, never>, not `{}`, not an arbitrary pass-through object.",
+            "tsc --noEmit passes under the repo's strict tsconfig for the new code, with no any, no non-null assertion (!), and no JSON.parse-as-T escape.",
+            "TabIdentity is the existing identity type or a destructured { id, url, title } literal with no field widened (e.g. id as string | undefined)."
+          ],
+          "failureExamples": [
+            "GetTabStateResult uses optional `sandboxTab?: TabIdentity`, so the type admits undefined and the empty shape is expressed as missing keys instead of null, letting a no-sandbox call type-check as anything.",
+            "The handler declares the return as non-null TabIdentity for sandboxTab and falls back to a placeholder instead of threading null, so an absent sandbox tab cannot actually be null."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "tests-cover-shape-and-no-mutation",
+          "label": "Unit tests pin shape and read-only correctness",
+          "ruleStatement": "The new page-actions unit test block exercises all tab states and the no-mutation property, and the hardcoded counts are updated to 17. A 10 means the tests positively assert the empty shape, the id-equality true case, a different-active-tab false case, and no-mutation; an 8 covers the null shape and true case; a suite that misses the false case or the mutation guard is below the bar.",
+          "passCriteria": [
+            "A getTabState test asserts the no-sandbox result is exactly { sandboxTab: null, activeTab: null, sandboxTabActive: false }.",
+            "A getTabState test asserts sandboxTabActive is true when the live sandbox tab is the focused tab of its window (activeTab.id === sandboxTab.id).",
+            "A getTabState test asserts sandboxTabActive is false when a different tab in the same window is focused, so the flag cannot be a hardcoded true.",
+            "The test module asserts the handler makes no mutating calls (updateTab, executeScript, captureVisibleTab, goBack, goForward, reload) during a getTabState run.",
+            "Hardcoded action counts across the suite are 17, and the old 16/length and 'sixteen tools' assertions are gone."
+          ],
+          "failureExamples": [
+            "The tests cover only the null shape and the id-equality true case but never a different-tab-same-window case, so a wrong sandboxTabActive=false-for-different-tab computation slips through.",
+            "The no-mutation test only inspects the getTabState branch and misses that a shared helper the handler calls performs executeScript, so a real mutation path is asserted away."
+          ],
+          "minScore": 7
+        }
+      ],
+      "healerHint": "If a saved sandbox id pointing at a closed tab throws or returns the null shape, the getTabState branch was added to the raw map but not wrapped in guard() in the guarded map — add it there and assert that stale case in the unit test so it surfaces { error } instead of leaking a rejection."
+    },
+    {
+      "id": "verify-gettabstate-live-chrome",
+      "order": 3,
+      "name": "Verify getTabState in a live Chrome session",
+      "goal": "Verify getTabState against a real running Chrome via the chrome-bridge MCP and record the result, ending the horizon MANUAL_CHROME_CHECK_PENDING until sandboxTabActive demonstrably flips false when another tab is focused while the sandbox tab still screenshots.",
+      "rationale": "The whole point is to let a client verify background-tab capture for itself: unit tests prove the result shape but not the live tab-focus behavior. This final phase is the acceptance gate against a real Chrome session, and the horizon is left flagged pending until it passes.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/mcp/server.ts (runtime inspection only — no code change expected)",
+        "tools/chrome-bridge/src/extension/service-worker.ts (runtime inspection only — no code change expected)"
+      ],
+      "changes": [
+        "Load the built chrome-bridge extension in Chrome and start the nest-host relay (npm start) so the chrome-bridge MCP is reachable.",
+        "Call the getTabState MCP tool and confirm it is advertised by listTools and that a call returns the { sandboxTab, activeTab, sandboxTabActive } shape.",
+        "Focus a different tab in the sandbox tab's window and re-call getTabState: confirm sandboxTabActive flips to false while captureTab still screenshots the background sandbox tab.",
+        "Record the outcome as MANUAL_CHROME_CHECK_PENDING until the live check passes; the horizon does not close as verified-without-it."
+      ],
+      "boundedContext": "chrome-bridge MCP — live-Chrome verification",
+      "layer": "cross-cutting",
+      "blastRadius": "small",
+      "inputs": [
+        "built chrome-bridge extension loaded in Chrome",
+        "chrome-bridge MCP server (getTabState advertised)",
+        "nest-host bridge relay running (ws://localhost:8765)",
+        "the sandbox tab plus a second focused tab in its window"
+      ],
+      "expectedResult": "A live chrome-bridge MCP session runs and records a VERIFIED verdict: focusing a different tab flips sandboxTabActive to false while captureTab still screenshots the background sandbox tab. The phase is done only once that verified verdict is recorded; until the check runs, the horizon stands MANUAL_CHROME_CHECK_PENDING.",
+      "dependsOn": [
+        "add-gettabstate-mcp-action"
+      ],
+      "rubric": [
+        {
+          "id": "verdict-recorded-truthfully",
+          "label": "Recorded verdict is real and truthfully closes the horizon",
+          "ruleStatement": "The phase's deliverable is a recorded VERIFIED verdict from the live run, and the horizon is closed only on that record. On this axis 10 means the verdict is airtight (it names the observed behavior, is timestamped, and the MANUAL_CHROME_CHECK_PENDING marker is cleared by the evidence rather than by intent); 8 is a competent run that clearly states 'verified' and correctly clears the marker; minScore 7 is the bar where the verdict is unambiguously obtained (not a pending placeholder) and the horizon status matches reality.",
+          "passCriteria": [
+            "The recorded outcome states a VERIFIED verdict (or equivalent conclusive wording) that a real getTabState call returned a usable response — not a pending/planned/assumed note.",
+            "The horizon's MANUAL_CHROME_CHECK_PENDING marker is shown cleared only after the verdict is recorded; if the live check never ran, the horizon is still shown as MANUAL_CHROME_CHECK_PENDING rather than silently flipped to verified.",
+            "The verdict text names the specific behaviors it actually observed (focus-flip to false, captureTab still screenshotting the background sandbox tab), so a reader can tell the verdict reflects the run, not the intent."
+          ],
+          "failureExamples": [
+            "The horizon reads 'verified' and the pending marker is gone, but the only recorded evidence is a line like 'sandboxTabActive should flip false' or a unit-test pass — an assumption or a shape-check dressed up as the live gate.",
+            "The verdict is written in future/procedural tense ('we will verify...') yet the horizon is already marked done and the pending marker cleared."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "live-chrome-fidelity",
+          "label": "Verdict produced by a real chrome-bridge MCP session",
+          "ruleStatement": "The verdict comes from a real running Chrome session reached through the chrome-bridge MCP (built extension loaded in Chrome, nest-host relay on ws://localhost:8765, getTabState invoked as an MCP tool) — not a mock, a unit test, or the Playwright standalone REPL. On this axis 10 means the deliverable pins the exact running session (relay URL, MCP invocation, extension instance) and states that no harness substituted for it; 8 means it is clearly a live chrome-bridge MCP call though supplementary harnesses aren't enumerated; minScore 6 is the bar where the verdict is attributable to the live MCP rather than to a shape-only harness.",
+          "passCriteria": [
+            "The verdict records a getTabState invocation/response produced through the chrome-bridge MCP tool and confirms the tool appears in the MCP listTools output.",
+            "The verdict identifies the live environment the run happened in (the built extension loaded in Chrome, the bridge relay reachable), so it is distinguishable from a mock server or direct-invocation path.",
+            "If the Playwright standalone REPL (http://localhost:5175/standalone.html) or a unit test was used, it is presented as supporting evidence only, never as the verdict itself."
+          ],
+          "failureExamples": [
+            "The verdict claims 'verified live' but the evidence is a dump from the Playwright standalone REPL against http://localhost:5175/standalone.html, which never touches an MV3 service worker and cannot show genuine tab-focus behavior.",
+            "The verdict was recorded off `pnpm test` (a unit test asserting the response shape) and presented as the live acceptance gate, with no real Chrome session involved."
+          ],
+          "minScore": 6
+        },
+        {
+          "id": "focus-flip-demonstrated",
+          "label": "sandboxTabActive demonstrably flips while the sandbox tab still screenshots",
+          "ruleStatement": "The verdict proves the load-bearing behavior, not just the shape: with the sandbox tab focused, sandboxTabActive is true; after focusing a different tab in the SAME window, sandboxTabActive flips to false, activeTab reports that other tab's identity, and captureTab still returns a screenshot of the now-background sandbox tab. On this axis 10 means the verdict records the full round trip (true -> false -> back to true) with activeTab's {id, url, title} changing to the focused tab and a post-flip captureTab image; 8 means the one-way flip plus background-screenshot evidence and activeTab change are all recorded; minScore 8 is the bar where the flip itself is genuinely demonstrated — a shape-returned result that never flips is a fail.",
+          "passCriteria": [
+            "The verdict records a focused-true baseline: sandboxTabActive is true and sandboxTab identity matches the sandbox tab.",
+            "The verdict records a focus-false state reached by focusing a different tab within the sandbox tab's own window, where sandboxTabActive is false and activeTab equals that other tab's {id, url, title} — not merely a returned shape.",
+            "The verdict records a captureTab result obtained AFTER the focus flip, confirming it still returns a screenshot of the (now background) sandbox tab.",
+            "(top of scale) The verdict records the return to the sandbox tab with sandboxTabActive back to true, proving the flag reflects focus rather than being a constant."
+          ],
+          "failureExamples": [
+            "The verdict shows the {sandboxTab, activeTab, sandboxTabActive} shape but sandboxTabActive stayed true throughout, because the 'other tab focused' was in a different window so the sandbox window's active tab never changed — this proves shape, not the focus-flip, and is not a pass.",
+            "The verdict flips sandboxTabActive to false but includes no captureTab evidence, leaving unproven that the sandbox tab still screenshots while backgrounded.",
+            "The verdict records only the false state with no true baseline, so there is no evidence the flag changed on focus rather than being hardcoded false."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "independently-reproducible",
+          "label": "Verdict is re-runnable by an external MCP client",
+          "ruleStatement": "The verdict is recorded so an external MCP client can independently re-run it: it names the tabs (sandbox tab and the focused other tab with id/url/title), the window the focus was moved in, and the sequence of MCP calls (getTabState before/after, captureTab after). On this axis 10 means a verbatim, step-by-step call log with params and tab ids an external client can execute; 8 means the tabs and window are named and the sequence is described but params are loose; minScore 6 is the bar where a reviewer can reconstruct the exact scenario from the record.",
+          "passCriteria": [
+            "The verdict names the sandbox tab's {id, url, title} and the focused other tab's identity, plus the window in which the focus moved.",
+            "The verdict records the ordered MCP calls that produced it (getTabState while focused, focus another tab, getTabState, captureTab), so an external client can re-run them.",
+            "The verdict states how the focus change was made (via the chrome-bridge MCP itself, or by a manual browser action, which is labeled)."
+          ],
+          "failureExamples": [
+            "The verdict says 'the flag flipped' but never names the other tab or its window, so a reviewer cannot tell whether the flip happened in the sandbox window or a different one — the very ambiguity that yields a false pass.",
+            "The record is a hand-driven browser action (human clicking) with no tab ids or window named, leaving an external client unable to reproduce the scenario."
+          ],
+          "minScore": 6
+        }
+      ],
+      "healerHint": "If the verdict got stamped from a shape-only run (a unit test or the Playwright standalone REPL) — or you focused a tab in a different window so sandboxTabActive never actually flipped — fix it by focusing a sibling tab in the sandbox tab's own window, confirming sandboxTabActive flips to false while captureTab still screenshots the background sandbox tab, then recording both snapshots in the verdict."
+    }
+  ],
+  "successCriteria": [
+    "The chrome-bridge MCP advertises getTabState in listTools, and one getTabState call returns JSON containing sandboxTab:{id,url,title}, activeTab:{id,url,title} and sandboxTabActive:boolean. It is read-only: no tab is created, navigated, focused, or otherwise mutated, and no new manifest permission is required. When the sandbox tab is focused, sandboxTabActive=true and activeTab and sandboxTab resolve to the same tab (same id); when another tab in the sandbox tab's window is focused, sandboxTabActive=false and activeTab reflects that other tab. tsc --noEmit, eslint --max-warnings 0, and the package's vitest pass, and the action-catalog parity surface (PAGE_ACTIONS, params/results types, raw+guarded handler maps, TOOL_CATALOG, and the hardcoded action-count unit tests) is updated and green. Verified in real Chrome via the chrome-bridge MCP that focusing a different tab flips sandboxTabActive to false while the sandbox tab still captures/screenshots, and that getTabState introduces no path that makes the active tab an action target.",
+    "Add read-only tab-identity reads to ChromePorts: ChromePorts can read a tab's identity by id and read the active tab of a specified window; tsc --noEmit stays green across the package because both fakePorts() helpers were extended with the two new methods.",
+    "Add a non-creating sandbox tab id peek: SandboxTabPorts exposes peekStoredSandboxTabId, returning the persisted sandbox-tab id (or undefined) without creating a tab; tsc --noEmit stays green because both sandbox fakes were extended with the new method.",
+    "Add the getTabState action to the MCP catalog: The chrome-bridge MCP advertises getTabState in listTools and one call returns the { sandboxTab, activeTab, sandboxTabActive } shape: { sandboxTab: null, activeTab: null, sandboxTabActive: false } when no sandbox tab is saved, an { error } when a saved id points at a closed tab, and both identities plus the correct sandboxTabActive when a live sandbox tab exists — never creating a tab. tsc --noEmit, eslint --max-warnings 0, and the package vitest suite pass with the hardcoded action counts updated to 17.",
+    "Verify getTabState in a live Chrome session: A live chrome-bridge MCP session runs and records a VERIFIED verdict: focusing a different tab flips sandboxTabActive to false while captureTab still screenshots the background sandbox tab. The phase is done only once that verified verdict is recorded; until the check runs, the horizon stands MANUAL_CHROME_CHECK_PENDING."
+  ],
+  "deferred": [
+    "In-page/tab marker stamp (stamping a tab to mark it as the sandbox tab) — the agreed scope is report-only, and marking would mutate tab/page state, which the horizon-7 decision explicitly excludes.",
+    "Full tab list (listTabs-style) — the agreement names only the sandbox tab plus the focused tab pair, not every tab in the window.",
+    "Re-introducing the active tab as an action target — the horizon-6 decision binds the sandbox tab as the sole action target; this action reports tab identity but targets nothing.",
+    "Per-tab mutation, focusing, or navigation of either reported tab — read-only query, and mutating would violate the report-only contract.",
+    "CDP / chrome.debugger changes — this is a chrome.tabs-based identity read and is unrelated to the background-screenshot CDP path horizon 6 added.",
+    "Resolving the dead active-tab surface (delete vs keep queryActiveTab/captureVisibleTab/NO_ACTIVE_TAB/activeTab permission) — the next-horizon brief flags that as its own deferred decision, not this horizon's scope.",
+    "Result-size-cap location/threshold — getTabState's result is tiny (a few tab objects), so the still-open cap decision is not forced by this action."
+  ],
+  "revision": 0
+}

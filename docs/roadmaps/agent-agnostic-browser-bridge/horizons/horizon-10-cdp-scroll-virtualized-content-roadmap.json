@@ -1,0 +1,675 @@
+{
+  "task": "Plan horizon 10 of the agent-agnostic-browser-bridge project. Add a CDP-based scroll page action (scrollPage) to the tools/chrome-bridge package that materializes virtualized / lazy-rendered list rows the ISOLATED-world DOM-read path (readPage / getPageText / findElement) misses, shipped as one atomic page action end to end and reusing horizon 9's per-command chrome.debugger attach helper, verified by a live-Chrome head-to-head on a real virtualized list. Keep per-command attach/detach; do not touch the dead active-tab surface.",
+  "analysis": {
+    "objective": "Ship horizon 10 of agent-agnostic-browser-bridge: one atomic CDP-backed scroll page action in tools/chrome-bridge that materializes virtualized / lazy-rendered rows the ISOLATED-world DOM-read path (readPage/getPageText/findElement) misses, wired end to end and proven in live Chrome.",
+    "successDefinition": "A single new page action (scrollPage, mirroring evaluatePage) lands across exactly the coordinated surface with no drift: PAGE_ACTIONS tuple entry (18->19), its Params + Result interfaces plus both PageActionParams / PageActionResults mapped-type entries in protocol/types.ts, a raw handler AND its guard()-wrapped entry in the Record<PageAction,Handler> maps in page-actions.ts, a TOOL_CATALOG Record<PageAction,ToolCatalogEntry> entry with honest description + inputSchema, both hardcoded action-count unit tests bumped to 19 (actions.unit.test.ts ordered-tuple + length, tool-catalog.unit.test.ts listTools length/label), and the README surface updated (count word 'eighteen'->'nineteen', '18 tools'->'19', both action enumerations, a prose paragraph, a manual e2e step). The handler resolves the sandbox tab via sandboxTab.resolveTabId() and drives it through a new DebuggerPorts method that reuses debugger-ports.ts withDebuggerSession (per-command chrome.debugger attach/detach, onDetach listener registered once at construction) issuing Input.dispatchMouseEvent wheel with a Runtime.evaluate scrollBy fallback - no persistent CDP session introduced. New exported symbols carry co-located unit tests (stubbed chrome global) per testguard; `npm run verify` in tools/chrome-bridge exits 0 (tsc --noEmit, eslint --max-warnings 0, vitest) with no skips/suppressions. The horizon closes only after a live-Chrome transcript, in a fresh post-horizon-10 chrome-bridge MCP session, shows a scrollPage call increased the sandbox tab's window scrollY (with the observed method value); decisions.md records the binding choices (action name, two-field scroll param model, mechanism-that-moved-the-page success fidelity, and the deliberately-narrowed live-verification criterion); and discoveries.md / state.md / both blockers.md files record the verdict plus the finding that the deliberately-unfocused sandbox tab runs no render pass, so proving virtualized-row materialization is infeasible there and is held as a known limitation for a future horizon.",
+    "assumptions": [
+      "Horizon 9 closed green (status.json: all 4 phases done, evaluatePage live-verified on github.com + reddit.com), so horizon 10 is a new capability, not a horizon-9 replan.",
+      "The current PAGE_ACTIONS length is 18 (evaluatePage added in h9); the new action makes 19, and both count tests plus README currently say 'eighteen'/18.",
+      "The action is one discrete MCP tool with a mirror-style name (scrollPage, paralleling evaluatePage), one-tool-per-action per the h1 decision, not an enum sub-mode.",
+      "Scroll targets the dedicated sandbox tab like every other action (resolveTabId), never the active/focused tab.",
+      "Params express a scroll intent narrowed to two optional fields (amountPx, toBottom); Result reports an observable signal (method, scrollY before/after, reachedEnd) rather than only 'dispatched'.",
+      "The new DebuggerPorts method rides the existing withDebuggerSession helper unchanged in shape, adding a required interface method that ripples to the two fake-port implementers in page-actions.unit.test.ts and service-worker.unit.test.ts (same ripple h9 hit).",
+      "A concrete real virtualized-list target is chosen at plan time (TanStack Virtual infinite-scroll example primary; react-window fixed-size-list demo backup).",
+      "Live verification requires a rebuilt dist/extension, an extension reload in chrome://extensions, and a chrome-bridge MCP session started after the rebuild (recurring stale-build signature is a timeout).",
+      "readPage/getPageText/findElement stay on the chrome.scripting ISOLATED-world path; only the scroll motion goes through CDP.",
+      "Verification is via Claude Code only (h4 decision binds hand-verification to Claude Code; Gemini/Codex/Cursor are documentation-only)."
+    ],
+    "risks": [
+      "CDP Input.dispatchMouseEvent wheel may not actually trigger a virtualized list's scroll listener / IntersectionObserver on an unfocused tab (same dispatched!=fired ceiling synthetic clickAt/hover hit on github/reddit); mitigated by the Runtime.evaluate scrollBy fallback, but if neither materializes rows phase 2 blocks and it is a REPLAN.",
+      "Lazy rows need render time after the scroll; no wait/settle action exists this horizon, so the live head-to-head needs manual delays and repeated scrollPage calls - making the proof timing-sensitive.",
+      "Per-command attach/detach means the scroll (CDP) and the confirming readPage (chrome.scripting) are separate sessions; a detach or SW suspension between them, or scroll position not persisting, could muddy the evidence.",
+      "The primary/backup verification targets may host the virtualized list inside an embedded demo iframe, which readPage/scrollPage (top-level document only) would never touch - phase 2 must pre-check for this and swap targets.",
+      "decisions.md h6 recorded 'CDP scroll deferred'; h9 explicitly greenlit CDP scroll without re-asking - keep the h9 decision, do not re-litigate h6.",
+      "Stale '\"eight\"/\"ten\" tools' comments still exist in server.ts/types.ts/tool-catalog.ts headers (noted unfixed 3+ times); touching only the README-required spots may leave them stale a fourth time.",
+      "eslint prefer-as-const on literal-typed constants and testguard's requirement of a co-located test naming every new exported symbol are easy gate failures for new protocol/handler symbols.",
+      "The live-Chrome check is the horizon-closure gate and has ended blocked/MANUAL_CHROME_CHECK_PENDING in h2, h7, h8, and h9 attempt 1 due to stale MCP/extension builds - phase 2 plans the fresh-session + rebuild + reload steps explicitly."
+    ],
+    "outOfScope": [
+      "Trusted keyboard input via CDP Input.dispatchKeyEvent - a separate deferred capability slice; scoping picked scroll over trusted keyboard.",
+      "Trusted click-by-coordinate via CDP Input.dispatchMouseEvent press/release - different slice; bundling it would make the horizon a family, which the brief forbids.",
+      "A wait/settle action - not the chosen slice; even though scroll verification wants a settle, adding it is its own horizon.",
+      "Moving to a persistent multi-command CDP session - scoping explicitly keeps per-command attach/detach and reuses horizon 9's debugger-ports helper.",
+      "Deleting or altering the dead active-tab surface (queryActiveTab / captureVisibleTab / activeTab permission / NO_ACTIVE_TAB) - scoping says leave it untouched this horizon.",
+      "Resurrecting horizon 5's DOM page-model snapshot (ref-addressable rows + bounding boxes) - a separate never-executed roadmap; scroll does not require it.",
+      "Switching readPage / getPageText / findElement to a CDP evaluation path - they stay on chrome.scripting ISOLATED world; only the scroll motion uses CDP.",
+      "A distinct scroll-element-into-view-by-selector action - the horizon ships ONE atomic scroll action; a selector-targeted variant is additional surface.",
+      "Cleaning up stale action-count comments outside files touched by phase 1 (server.ts / types.ts headers) - only the README count/enumeration is a named deliverable, plus touched-in-passing fixes.",
+      "Verifying the MCP config against Gemini CLI / Codex CLI / Cursor - h4 decision binds hand-verification to Claude Code only.",
+      "Wiring tools/chrome-bridge into the repo-root verify.sh pipeline - h1 decision keeps the package self-contained with its own npm run verify.",
+      "A direction param and a repeat/count field on the scroll action - cut by the user redirect; scrollPage is always downward and a caller needing more scrolling calls the tool again."
+    ],
+    "domainShape": "technical",
+    "domainShapeReason": "The task is developer-tooling machinery - a Chrome-control MCP tool's page-action protocol, an MV3 service-worker handler map, and a CDP (chrome.debugger) transport - with no business entities, rules, or workflows a domain expert would recognize.",
+    "ubiquitousLanguage": [
+      {
+        "term": "page action",
+        "meaning": "One generic capability the bridge exposes (an entry in the PAGE_ACTIONS tuple) that the MCP server advertises as a discrete tool and the extension implements as one handler; this horizon adds the scroll one."
+      },
+      {
+        "term": "PAGE_ACTIONS parity surface",
+        "meaning": "The six coordinated places an action must appear (PAGE_ACTIONS tuple, Params + Result interfaces, both mapped types, raw + guarded handler-map entries, TOOL_CATALOG entry) plus the two hardcoded action-count unit tests, kept drift-free by Record<PageAction,...> types making an omission a tsc error."
+      },
+      {
+        "term": "DebuggerPorts / withDebuggerSession",
+        "meaning": "The chrome.debugger (CDP) port and its per-command attach / send / detach helper in debugger-ports.ts, with a construction-time onDetach listener; horizon 10 adds a scroll method to it and keeps per-command attach/detach (no persistent session)."
+      },
+      {
+        "term": "CDP scroll primitive",
+        "meaning": "Input.dispatchMouseEvent with type 'mouseWheel' with a Runtime.evaluate scrollBy fallback, issued over CDP against the sandbox tab - the CSP-exempt, focus-independent motion that the ISOLATED-world executeScript path cannot reliably produce."
+      },
+      {
+        "term": "sandbox tab",
+        "meaning": "The single auto-created, deliberately-unfocused tab (resolved via sandboxTab.resolveTabId()) that every page action - including this scroll action - targets by id."
+      },
+      {
+        "term": "virtualized-list materialization",
+        "meaning": "Causing rows that a framework only renders into the DOM when scrolled near the viewport (virtual scrolling / lazy render / RSC feeds) to become present, so a follow-up readPage returns content it previously missed."
+      },
+      {
+        "term": "live-Chrome head-to-head",
+        "meaning": "The mandatory horizon-closure check in a fresh post-rebuild chrome-bridge MCP session: a recorded transcript comparing readPage output before vs. after the scroll action on a real virtualized list, proving the scroll revealed otherwise-absent rows."
+      }
+    ]
+  },
+  "discoveryFindings": [
+    {
+      "area": "PAGE_ACTIONS tuple",
+      "finding": "PAGE_ACTIONS in actions.ts is an 18-entry as const string-literal array (ping, navigateTo, getPageText, readPage, findElement, clickElement, typeText, captureTab, readConsoleMessages, readNetworkRequests, executeScript, evaluatePage, navigateBack, navigateForward, reloadTab, clickAt, hover, getTabState). type PageAction = (typeof PAGE_ACTIONS)[number]; isPageAction checks PAGE_ACTIONS.some.",
+      "filePath": "tools/chrome-bridge/src/protocol/actions.ts",
+      "implication": "The new scroll action is one appended tuple entry making 19, appended after getTabState (no natural neighbor). No as const re-shaping."
+    },
+    {
+      "area": "protocol/types.ts per-action types",
+      "finding": "Each action has XxxParams / XxxResult interfaces (all readonly). Two mapped types PageActionParams / PageActionResults. h9's evaluatePage template: EvaluatePageParams {code: string}, EvaluatePageResult {value?: unknown; error?: string}, plus one line in each mapped type. STALE COMMENT: types.ts line 10 header says 'the only actions are the ten generic page actions'.",
+      "filePath": "tools/chrome-bridge/src/protocol/types.ts",
+      "implication": "Add ScrollPageParams (amountPx?, toBottom?) + ScrollPageResult (method, scrollYBefore, scrollYAfter, reachedEnd) and one entry each in the mapped types. Stale 'ten' comment is optional touched-in-passing cleanup."
+    },
+    {
+      "area": "debugger-ports.ts",
+      "finding": "interface DebuggerPorts has captureScreenshot(tabId) and evaluate(tabId, expression) (added h9). Factory chromeCaptureDebuggerPorts() registers chrome.debugger.onDetach.addListener ONCE at construction. Private withDebuggerSession<T>(tabId, label, run): attach({tabId},'1.3') -> Promise.race([run(), interrupted]) -> finally detach. label union 'capturing' | 'evaluating'. CDP commands sent: Page.captureScreenshot, Runtime.evaluate {expression, returnByValue:true, awaitPromise:true}. NO Input.* is sent anywhere. CDP_VERSION='1.3'. isRecord is a module-private helper.",
+      "filePath": "tools/chrome-bridge/src/extension/debugger-ports.ts",
+      "implication": "Add scroll(tabId, intent) calling withDebuggerSession(tabId, 'scrolling', run); widen label union with 'scrolling'. run issues Input.dispatchMouseEvent mouseWheel + Runtime.evaluate read-backs / scrollBy fallback. Reuse isRecord. No persistent session."
+    },
+    {
+      "area": "debugger-ports.unit.test.ts",
+      "finding": "Tests stub chrome via vi.stubGlobal + installStubDebugger() returning attach/detach/sendCommand/addListener spies + fireDetach. describe('evaluate') has 8 tests asserting exact command+params, attach {tabId:7},'1.3', detach on every path, re-attach after failure, once-only onDetach listener, mid-command detach rejection carrying the 'evaluating' label.",
+      "filePath": "tools/chrome-bridge/src/extension/debugger-ports.unit.test.ts",
+      "implication": "New describe('scroll') block: assert exact Input.dispatchMouseEvent + Runtime.evaluate params, attach/detach on both paths, re-attach after failure, mid-command detach asserting the 'scrolling' label, and both mechanism paths (wheel-only-success, wheel-then-script-fallback). Name every new exported symbol."
+    },
+    {
+      "area": "page-actions.ts handler maps",
+      "finding": "pageActionHandlers(ports, sandboxTab, captureDebugger, captureStore) builds const raw: Record<PageAction,Handler> then returns a second Record where every entry except ping is guard(raw.x). h9's evaluatePage raw handler: validate params -> return {error} sentinel BEFORE any port call -> const tabId = await sandboxTab.resolveTabId() -> await captureDebugger.evaluate(tabId, code) -> coerceExecuteScriptOutcome. Helpers: coerceExecuteScriptOutcome, MAX_EXECUTE_SCRIPT_RESULT_CHARS, coercePointerOutcome, isRecord, nonEmptyString, resolveCoordinate.",
+      "filePath": "tools/chrome-bridge/src/extension/page-actions.ts",
+      "implication": "Add scrollPage to BOTH raw and guarded maps. Handler: validate params BEFORE resolveTabId, then resolveTabId, then captureDebugger.scroll, then a NEW dedicated coercer in the coercePointerOutcome style (not InPageScriptOutcome)."
+    },
+    {
+      "area": "page-actions.unit.test.ts fakes",
+      "finding": "fakeDebugger(overrides: Partial<DebuggerPorts> = {}) builds a base { captureScreenshot: vi.fn, evaluate: vi.fn } and Reflect.sets overrides. describe('pageActionHandlers - evaluatePage') has 5 tests: value read, empty/missing code (asserts port NOT called), {ok:false,error} passthrough, over-large cap, resolver-throws.",
+      "filePath": "tools/chrome-bridge/src/extension/page-actions.unit.test.ts",
+      "implication": "fakeDebugger's base object must gain a scroll: vi.fn(...) default (adding a required interface method breaks every DebuggerPorts-typed literal). Add a describe('pageActionHandlers - scrollPage') block mirroring the 5-test matrix."
+    },
+    {
+      "area": "service-worker.ts + service-worker.unit.test.ts",
+      "finding": "ServiceWorkerDeps.debuggerPorts: DebuggerPorts; production passes chromeCaptureDebuggerPorts(). pageActionHandlers(deps.ports, deps.sandboxTabPorts, deps.debuggerPorts, captureStore) - no new constructor param. Test fake fakeDebuggerPorts() (line 87) returns a literal { captureScreenshot, evaluate }.",
+      "filePath": "tools/chrome-bridge/src/extension/service-worker.unit.test.ts",
+      "implication": "fakeDebuggerPorts() must add a scroll: () => Promise.resolve(...) entry or tsc fails. Second of exactly two fake-implementers. No service-worker.ts source change."
+    },
+    {
+      "area": "mcp/tool-catalog.ts",
+      "finding": "TOOL_CATALOG: Record<PageAction,ToolCatalogEntry> where entry = { description, inputSchema: JsonSchemaObject }. Shared property blocks are as const consts. listTools() maps PAGE_ACTIONS (never Object.keys). evaluatePage entry: long description + inputSchema { properties:{code}, required:['code'], additionalProperties:false }. STALE COMMENT: tool-catalog.ts line 4 says 'Two of the ten tools'.",
+      "filePath": "tools/chrome-bridge/src/mcp/tool-catalog.ts",
+      "implication": "Add scrollPage TOOL_CATALOG entry with honest description + inputSchema exposing exactly amountPx + toBottom, required:[], additionalProperties:false. Add reusable SCROLL_PROPERTIES as const block. Stale 'ten tools' comment optional cleanup."
+    },
+    {
+      "area": "Hardcoded action-count unit tests",
+      "finding": "actions.unit.test.ts: expect([...PAGE_ACTIONS]).toEqual([...18 literals]) AND expect(PAGE_ACTIONS.length).toBe(18). tool-catalog.unit.test.ts: expect(names).toEqual([...PAGE_ACTIONS]), it('advertises exactly eighteen tools', () => expect(listTools()).toHaveLength(18)), plus a required map assertion + per-action schema-shape tests. h9 also fixed a stale it()-label.",
+      "filePath": "tools/chrome-bridge/src/protocol/actions.unit.test.ts",
+      "implication": "Bump both: ordered-tuple array + .toBe(18)->19; toHaveLength(18)->19 + it()-label 'eighteen'->'nineteen' + required-map + a schema-shape test for the scroll schema."
+    },
+    {
+      "area": "README.md action-count / enumeration surface",
+      "finding": "count/enumeration/prose/e2e appear at: (1) line ~48 'advertises the eighteen page actions' + full 18-name inline enumeration; (2) line ~177 'connected with 18 tools'; (3) numbered manual-e2e steps 1-13 (step 12 is the h9 evaluatePage head-to-head with a dated 'Verified' paragraph); (4) a second full enumeration in the built service-worker.js bullet (~L205-211); plus prose paragraphs per newer action.",
+      "filePath": "tools/chrome-bridge/README.md",
+      "implication": "Edit: 'eighteen'->'nineteen', '18 tools'->'19', BOTH enumerations, add a scrollPage prose paragraph, add a numbered manual-e2e step 14 with a dated Verified stub."
+    },
+    {
+      "area": "sandbox-ports.ts resolveTabId",
+      "finding": "SandboxTabPorts has resolveTabId(): Promise<number> (CREATES/recreates the tab when missing/stale, dedupes concurrent creates) and peekStoredSandboxTabId(): Promise<number | undefined> (pure storage read, never creates). Every acting handler calls resolveTabId(); only getTabState uses the peek.",
+      "filePath": "tools/chrome-bridge/src/extension/sandbox-ports.ts",
+      "implication": "The scroll handler uses await sandboxTab.resolveTabId() like every other acting handler. No sandbox-ports change."
+    },
+    {
+      "area": "Existing scroll/Input/mouseWheel code",
+      "finding": "grep of tools/chrome-bridge/src for scroll|mouseWheel|dispatchMouseEvent|scrollBy|scrollIntoView|Input. finds ZERO implementation. Only textual mentions in a debugger-ports.ts header comment. clickAt/hover dispatch untrusted PointerEvent/MouseEvent via ports.executeScript in the page - NOT CDP Input.",
+      "filePath": "tools/chrome-bridge/src/extension/page-actions.ts",
+      "implication": "Greenfield - no existing scroll code to reconcile or reuse. The clickAt/hover in-page-dispatch pattern is the anti-pattern the task rejects."
+    },
+    {
+      "area": "package.json / config gates",
+      "finding": "verify = typecheck && lint && test; typecheck = tsc --noEmit; lint = eslint . --max-warnings 0; test = vitest run. vitest include = ['src/**/*.unit.test.ts','src/**/*.int.test.ts'], node env. eslint = tseslint strictTypeChecked + no-explicit-any:error, no-non-null-assertion:error, consistent-type-imports, bans JSON.parse(x) as T and satisfies, prefer-as-const. tsconfig: strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes, noImplicitOverride, noUnusedLocals/Parameters, verbatimModuleSyntax.",
+      "filePath": "tools/chrome-bridge/package.json",
+      "implication": "exactOptionalPropertyTypes: build result interfaces without assigning undefined explicitly. noUncheckedIndexedAccess: guard CDP reply record access. Type-only imports must be import type. All new exported symbols need co-located tests. npm run verify must exit 0 with no skips."
+    },
+    {
+      "area": "blockers.md (package-local) + notes files",
+      "finding": "tools/chrome-bridge/blockers.md item 2 ('No scroll primitive... a scroll({dy}) / scrollToBottom() tool driven from the extension, not the page') and item 7 directly describe this horizon's gap. h9 found (via amendment) that an action grep MUST include package-local *.md. Also present: 'tools/chrome-bridge/full inventory and gap analysis against the claude-in-chrome MCP.md'.",
+      "filePath": "tools/chrome-bridge/blockers.md",
+      "implication": "Phase 2 marks blockers.md item 2 resolved on a pass and notes item 7's partial dependency."
+    },
+    {
+      "area": "h9 roadmap phase structure (closest precedent)",
+      "finding": "h9 = 4 phases: (1) remove dead action; (2) add the CDP port method + co-located tests (no deps); (3) add the action across the six coordinated places + bump 2 count tests + README (depends 1&2); (4) live-Chrome head-to-head (depends 3). Phase 4 shape: rebuild dist/extension, restart MCP server, remove+re-add unpacked extension (stale SW = silent timeout), fresh MCP session, record transcript. Phase 4 attempt 1 ended BLOCKED because the pre-h9 MCP session did not advertise the new tool; attempt 2 in a fresh session passed. h9 phase 2 hit a filesAffected amendment: it missed that the interface method ripples to service-worker.ts + 2 test fakes.",
+      "filePath": "docs/roadmaps/agent-agnostic-browser-bridge/horizons/horizon-09-cdp-strict-csp-value-reads-roadmap.md",
+      "implication": "H10 has NO dead action to remove -> ~3 phases: (0) add DebuggerPorts.scroll + tests + PRE-DECLARE the ripple to the two fakes; (1) add scrollPage across the six coordinated places + 2 count tests + README; (2) live-Chrome head-to-head in a FRESH post-h10 MCP session after rebuild+reload with an explicit MANUAL_CHROME_CHECK_PENDING fallback."
+    },
+    {
+      "area": "decisions.md CDP scroll status",
+      "finding": "decisions.md line 28 (h9): 'the broader CDP pivot (Input.dispatch* trusted input, CDP scroll, persistent CDP sessions) is greenlit for later horizons without re-asking'. Line 30 (h9): strict-CSP reads go through evaluatePage on the sandbox tab; executeScript stays unchanged. Line 21 (h6): CDP originally restricted to Page.captureScreenshot only.",
+      "filePath": "docs/roadmaps/agent-agnostic-browser-bridge/decisions.md",
+      "implication": "No user decision gate needed to build CDP scroll - it is pre-approved. decisions.md gets a new h10 line: action name scrollPage, narrowed two-field param model, success-fidelity choice (method-that-moved-the-page). Persistent CDP session stays out of scope."
+    },
+    {
+      "area": "InPageScriptOutcome / coercion reuse",
+      "finding": "InPageScriptOutcome = { ok:true; json:string } | { ok:false; error:string }, used by executeScript and h9's CDP evaluate. coerceExecuteScriptOutcome(raw) -> HandlerOutcome ({result:{value}} or {error}), applying MAX_EXECUTE_SCRIPT_RESULT_CHARS. Pointer actions use coercePointerOutcome -> {result:{found, dispatched}}.",
+      "filePath": "tools/chrome-bridge/src/extension/page-actions.ts",
+      "implication": "The scroll port returns a structured status object (method/scrollY/reachedEnd), so it must NOT reuse InPageScriptOutcome/coerceExecuteScriptOutcome - define a small dedicated coercer in the coercePointerOutcome style."
+    }
+  ],
+  "requiredMaterials": [
+    {
+      "name": "Chrome DevTools Protocol reference for Input.dispatchMouseEvent (type 'mouseWheel') wheel params",
+      "kind": "knowledge",
+      "whyNeeded": "The scroll port method must send an exact CDP command whose param shape (type:'mouseWheel', x, y, deltaX, deltaY, whether pointerType/modifiers are required for Blink to treat it as a real wheel) is asserted byte-for-byte in the new debugger-ports.unit.test.ts describe('scroll') block; guessing the shape risks a test that locks in a non-functional command.",
+      "acquisitionNote": "Read https://chromedevtools.github.io/devtools-protocol/tot/Input/#method-dispatchMouseEvent and the Runtime.evaluate scrollBy fallback semantics; cross-check against how puppeteer/playwright construct wheel events."
+    },
+    {
+      "name": "A public, no-auth page tall enough to scroll in the main document (a long article or long list page)",
+      "kind": "knowledge",
+      "whyNeeded": "The narrowed live-Chrome check in phase 2 needs a real reachable page whose main document scrolls, so a scrollPage call can be shown to increase window scrollY in the unfocused sandbox tab. It does NOT need to be a virtualized/infinite-scroll list — row materialization is no longer the gate.",
+      "acquisitionNote": "Pick any stable public no-auth page with a tall main document (e.g. a long Wikipedia article or a long docs page); confirm the list/content is in the top-level document (not an embedded iframe) since scrollPage/readPage act on the top frame only. Record the chosen URL in the transcript."
+    },
+    {
+      "name": "Expectation that the CDP Input.dispatchMouseEvent mouseWheel path hangs in an unfocused tab and falls through to the Runtime.evaluate scrollBy/scrollTo script path",
+      "kind": "knowledge",
+      "whyNeeded": "Phase 2 records the observed scrollPage result method value and must interpret it: in the deliberately-unfocused sandbox tab the wheel path is expected to hang (bounded at 750ms by the mechanism fix) and 'script' is the expected steady-state mechanism. A 'wheel' or 'none' result is a surprise to call out.",
+      "acquisitionNote": "Already established by the user's live probes (recorded in discoveries.md): wheel hangs in the sandbox tab, window.scrollBy works. Phase 2 just echoes the method value from the pasted scrollPage result JSON and notes the wheel-path caveat."
+    }
+  ],
+  "phases": [
+    {
+      "id": "add-debuggerports-scroll-cdp-method",
+      "order": 0,
+      "name": "Add CDP scroll method to DebuggerPorts",
+      "goal": "Add a `scroll(tabId, intent)` method to the `DebuggerPorts` interface and its Chrome factory in `debugger-ports.ts` that moves the sandbox tab's scroll position over the Chrome DevTools Protocol (CDP - the low-level `chrome.debugger` wire protocol), trying a synthetic mouse-wheel event first and falling back to a script scroll only when the wheel did not move the page, with full co-located unit tests.",
+      "rationale": "The bridge today has zero scroll capability: the ISOLATED-world `chrome.scripting` path used by `readPage`/`getPageText`/`findElement` cannot reliably move an unfocused tab's scroll position, so framework-virtualized rows (rows a UI only renders into the DOM once scrolled near the viewport) stay invisible to those reads. A CDP-issued scroll is the focus-independent, CSP-exempt motion that can materialize them, but a synthetic wheel event does not always drive scroll on a background tab, so the method needs a script fallback and must report which mechanism actually worked. This phase builds only the transport method so it can be reviewed in isolation before any action wiring.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/extension/debugger-ports.ts",
+        "tools/chrome-bridge/src/extension/debugger-ports.unit.test.ts",
+        "tools/chrome-bridge/src/extension/page-actions.unit.test.ts",
+        "tools/chrome-bridge/src/extension/service-worker.unit.test.ts"
+      ],
+      "changes": [
+        "In `debugger-ports.ts`, add a third method to `interface DebuggerPorts`: `scroll(tabId: number, intent: ScrollIntent): Promise<ScrollOutcome>`. `ScrollIntent` carries EXACTLY two optional fields - `amountPx?: number` (pixels to scroll DOWN; scroll is always downward) and `toBottom?: boolean` (interpreted as ONE large downward jump toward the current bottom, using `document.documentElement.scrollHeight` as the target - NOT a loop that chases an infinite list; a caller that needs more calls the tool again). There is no `direction` field and no repeat count. When neither field is set, default to `amountPx = 2000` (roughly one large viewport). `ScrollOutcome` carries `{ readonly method: 'wheel' | 'script' | 'none'; readonly scrollYBefore: number; readonly scrollYAfter: number; readonly reachedEnd: boolean }` where `method` names the mechanism that actually moved the page (`'none'` if neither did) and `reachedEnd` is a BEST-EFFORT flag, `true` when `scrollYAfter + innerHeight >= scrollHeight - SLACK` (small pixel slack); on an infinite list that keeps growing it may read `false` forever, which is correct.",
+        "Implement the factory method by calling `withDebuggerSession(tabId, 'scrolling', run)` and widen the private label union type from `'capturing' | 'evaluating'` to `'capturing' | 'evaluating' | 'scrolling'` so the mid-command-detach rejection message reads `\"...while scrolling\"`. No persistent CDP session is introduced - this is one per-command attach/detach like every other method.",
+        "In `run`: (1) read `scrollY`/`scrollHeight`/`innerHeight`/`innerWidth` via `chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })` to get `scrollYBefore`; (2) issue `chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX: 0, deltaY })` where `x`/`y` are pinned to the CENTRE of the visible viewport (`Math.round(innerWidth/2)`, `Math.round(innerHeight/2)` from step 1's read-back) so the wheel lands over page content, and `deltaY` is `amountPx` (or a large value covering `scrollHeight` when `toBottom`); (3) after a short fixed settle delay (a `Runtime.evaluate` of a ~150ms `await new Promise(r=>setTimeout(r,150))` - there is no wait/settle action this horizon) re-read `scrollY`; (4) if `scrollY` did not change from `scrollYBefore`, fall back to a second `Runtime.evaluate` running `window.scrollBy(0, amountPx)` (or `window.scrollTo(0, document.documentElement.scrollHeight)` when `toBottom`) and re-read `scrollY` again; (5) return `method: 'wheel'` if step 3 moved it, `'script'` if step 4 moved it, `'none'` otherwise - `method` names whichever mechanism produced the final observed movement - with the before/after `scrollY` and computed best-effort `reachedEnd`. Reuse the module-private `isRecord` helper to parse replies under `noUncheckedIndexedAccess`. Consult the CDP `Input.dispatchMouseEvent` reference so the `mouseWheel` param shape is correct, since the test asserts it byte-for-byte.",
+        "Add a `describe('scroll')` block to `debugger-ports.unit.test.ts` asserting: the exact `Input.dispatchMouseEvent`/`mouseWheel` command name and params; the wheel `x`/`y` being the viewport centre computed from the read-back; the exact `Runtime.evaluate` read-back and fallback params; `attach({tabId},'1.3')` then `detach` on both success and failure paths; re-attach after a failed command; the once-only `onDetach` listener; a mid-command detach that rejects carrying the `'scrolling'` label string; AND both mechanism paths explicitly - a wheel-only-success case (stub reports `scrollY` moved after the `Input.dispatchMouseEvent` call, so `Runtime.evaluate` scrollBy is NEVER sent and `method === 'wheel'`) and a wheel-then-script-fallback case (stub reports `scrollY` unchanged after the wheel, so the `window.scrollBy`/`scrollTo` `Runtime.evaluate` IS sent and `method === 'script'`). Name every new exported symbol (`ScrollIntent`, `ScrollOutcome`, any new helper) in the test per the testguard co-located-test rule.",
+        "PRE-DECLARED RIPPLE (the known trap from horizon 9's equivalent phase - adding a required interface method breaks every object literal typed as `DebuggerPorts`): update the two fake implementers so `tsc --noEmit` stays green - add a default `scroll: vi.fn(async () => ({ method: 'none' as const, scrollYBefore: 0, scrollYAfter: 0, reachedEnd: false }))` to the base object in `fakeDebugger(...)` in `page-actions.unit.test.ts`, and add a matching `scroll: () => Promise.resolve({ method: 'none' as const, scrollYBefore: 0, scrollYAfter: 0, reachedEnd: false })` entry to the literal returned by `fakeDebuggerPorts()` (around line 87) in `service-worker.unit.test.ts`. No `service-worker.ts` source change is needed - `pageActionHandlers` already receives `deps.debuggerPorts`."
+      ],
+      "boundedContext": "DebuggerPorts / withDebuggerSession (CDP transport)",
+      "layer": "infrastructure",
+      "blastRadius": "medium",
+      "inputs": [
+        "tools/chrome-bridge/src/extension/debugger-ports.ts (current interface: captureScreenshot, evaluate; withDebuggerSession label union; CDP_VERSION='1.3')",
+        "tools/chrome-bridge/src/extension/debugger-ports.unit.test.ts (installStubDebugger stub + describe('evaluate') 8-test pattern)",
+        "CDP reference: Input.dispatchMouseEvent type 'mouseWheel' param shape; Runtime.evaluate window.scrollBy/scrollTo fallback semantics",
+        "stage1.5-discovery.json findings for debugger-ports.ts and the two test fakes"
+      ],
+      "expectedResult": "`DebuggerPorts.scroll(tabId, intent)` exists with a two-field `ScrollIntent` (`amountPx?`, `toBottom?`) and a `ScrollOutcome` reporting `method: 'wheel' | 'script' | 'none'` plus `scrollYBefore`/`scrollYAfter`/`reachedEnd`, is implemented in `chromeCaptureDebuggerPorts()` via `withDebuggerSession(..., 'scrolling', ...)` as a wheel-then-script fallback with no persistent CDP session, has a `describe('scroll')` unit-test block covering both the wheel-only-success and wheel-then-script-fallback paths, and `npm run verify` in `tools/chrome-bridge` exits 0 with the two test fakes updated.",
+      "dependsOn": [],
+      "compensation": "Revert the four files; the `scroll` method has no callers yet so removal is clean.",
+      "rubric": [
+        {
+          "id": "scroll-signature-and-outcome-shape",
+          "label": "scroll() signature and ScrollOutcome shape as specified",
+          "ruleStatement": "The DebuggerPorts interface gains exactly one new method scroll(tabId: number, intent: ScrollIntent): Promise<ScrollOutcome>, with ScrollIntent carrying only amountPx?: number and toBottom?: boolean, and ScrollOutcome being a readonly { method: 'wheel' | 'script' | 'none'; scrollYBefore: number; scrollYAfter: number; reachedEnd: boolean }. 10 = exact shape plus the amountPx default and toBottom single-jump semantics implemented at the right layer; 8 = shape correct and defaults applied; below minScore = extra fields or a widened method type.",
+          "passCriteria": [
+            "interface DebuggerPorts declares scroll with the exact signature and no other new members",
+            "ScrollIntent has exactly two optional fields amountPx and toBottom - no direction, no repeat/count/times",
+            "ScrollOutcome has exactly the four readonly fields with method literally 'wheel' | 'script' | 'none'",
+            "ScrollIntent and ScrollOutcome are exported and each named in debugger-ports.unit.test.ts",
+            "amountPx default 2000 applied in the factory implementation (not left undefined at the wire call); toBottom targets document.documentElement.scrollHeight as a single jump, not a loop"
+          ],
+          "failureExamples": [
+            "A careful dev adds direction?: 'up' | 'down' 'for symmetry' or a repeat?: number field - extra surface the phase explicitly cut",
+            "ScrollOutcome.method typed as string, or reachedEnd omitted, or fields not marked readonly",
+            "amountPx default of 2000 implemented as a JS default parameter on a nested helper that the toBottom branch bypasses, so toBottom + omitted amountPx sends deltaY: NaN",
+            "scroll added only to the Chrome factory object and not to the interface, so fakes typed as DebuggerPorts still compile without it"
+          ],
+          "minScore": 6
+        },
+        {
+          "id": "cdp-command-shape-asserted-byte-for-byte",
+          "label": "Exact CDP command names and params asserted in tests",
+          "ruleStatement": "The unit tests assert the literal CDP wire calls: Input.dispatchMouseEvent with type 'mouseWheel' and correct param keys, the Runtime.evaluate read-backs/fallback, and the wheel x/y being the viewport centre computed from the read-back. 10 = every param pinned and x/y proven derived from the read-back; 8 = command names + key params pinned; below minScore = objectContaining stubs that never pin mouseWheel or deltaY.",
+          "passCriteria": [
+            "a test asserts sendCommand called with method 'Input.dispatchMouseEvent' and params containing type: 'mouseWheel', x, y, deltaX: 0, deltaY",
+            "a test asserts x === Math.round(innerWidth/2) and y === Math.round(innerHeight/2) using values fed by the stubbed first Runtime.evaluate read-back (not hardcoded)",
+            "deltaY asserted to equal the resolved amountPx (default 2000) on the default path and a scrollHeight-covering value on toBottom",
+            "the read-back Runtime.evaluate asserted with returnByValue: true and awaitPromise: true; the settle delay is a Runtime.evaluate of a setTimeout promise (no wall-clock sleep in the test)",
+            "the fallback Runtime.evaluate expression asserted to be window.scrollBy(0, amountPx) default / window.scrollTo(0, document.documentElement.scrollHeight) on toBottom"
+          ],
+          "failureExamples": [
+            "tests assert only expect.objectContaining({}) and never pin type: 'mouseWheel' or deltaY, so a wrong delta sign or missing mouseWheel type passes",
+            "a diligent dev pins x/y to literal numbers (640/360) matching the stub fixture instead of asserting they are derived from the read-back",
+            "the test asserts Input.dispatchMouseEvent params but the implementation omits deltaX and Chrome would reject it - lenient stub does not model required params",
+            "fallback assertion checks 'scrollBy' substring only, so window.scrollBy(0, 0) or a swapped-axis call still passes"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "attach-detach-lifecycle-every-path",
+          "label": "Attach/detach cleanup and label union on every path",
+          "ruleStatement": "scroll() runs entirely inside withDebuggerSession(tabId, 'scrolling', run) with per-command attach then detach on both success and failure, no persistent session, and the private label union widened to include 'scrolling'. 10 = all CDP work inside run, no new persistent attach state anywhere, mid-detach message asserts 'scrolling'; 8 = withDebuggerSession reused and detach covered on both paths; below minScore = attach/detach open-coded or a session cached across the wheel/fallback boundary.",
+          "passCriteria": [
+            "the factory scroll method calls withDebuggerSession with the literal label 'scrolling' and does all CDP work inside run",
+            "the label union type is widened to include 'scrolling'",
+            "a test asserts attach({tabId}, '1.3') then detach on the success path, and detach still runs when a sendCommand rejects",
+            "a test asserts re-attach works after a failed command and the onDetach listener is registered once only",
+            "a test asserts a mid-command detach rejects with a message containing 'scrolling'",
+            "no module-level or instance-level CDP session/attach state is added outside withDebuggerSession"
+          ],
+          "failureExamples": [
+            "the dev calls chrome.debugger.attach/detach directly inside scroll instead of reusing withDebuggerSession, diverging on the error-path detach",
+            "withDebuggerSession is used but the settle-delay Runtime.evaluate is awaited outside the run callback, so on a slow page detach fires before the second read-back",
+            "label union widened and 'scrolling' passed, but the mid-command-detach rejection message is built from a shared constant that still says 'evaluating'",
+            "a caching optimization keeps the debugger attached between the wheel call and the fallback across a helper boundary, leaving the session attached if the fallback throws"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "wheel-then-script-fallback-branch-logic",
+          "label": "Wheel-first, script-fallback branch logic with honest method reporting",
+          "ruleStatement": "The implementation tries the synthetic wheel first, re-reads scrollY after a settle, and only issues the window.scrollBy/scrollTo Runtime.evaluate when scrollY did not change; method reflects whichever mechanism actually produced the final observed movement ('none' if neither did). 10 = three explicit tests (wheel-only, fallback, neither) plus tolerant float comparison and reachedEnd both-cases; 8 = wheel-only and fallback tests pass with honest method; below minScore = both mechanisms always fired or method set on command-resolved not page-moved.",
+          "passCriteria": [
+            "a wheel-only-success test: stub reports scrollY moved after Input.dispatchMouseEvent, so the fallback Runtime.evaluate is NEVER sent and method === 'wheel'",
+            "a wheel-then-script-fallback test: stub reports scrollY unchanged after the wheel, the fallback IS sent, and method === 'script'",
+            "a neither-moved test: both mechanisms leave scrollY unchanged and method === 'none'",
+            "scrollYBefore/scrollYAfter are the actual first and final read-back values",
+            "reachedEnd computed as scrollYAfter + innerHeight >= scrollHeight - SLACK with a small constant slack, and a test covers both true and false"
+          ],
+          "failureExamples": [
+            "the dev always sends both the wheel and the scrollBy for robustness and reports method based on which delta is larger - the wheel-only test fails because the fallback evaluate was still sent",
+            "fallback is gated on scrollYAfter === scrollYBefore using strict equality on floats; a sub-pixel wheel movement is treated as 'no movement' and the script path runs unnecessarily",
+            "method is set to 'wheel' whenever the wheel command resolved without throwing, regardless of movement, so a dispatched-but-inert wheel on a background tab is reported as success",
+            "reachedEnd uses scrollHeight - scrollYAfter <= innerHeight without slack, so a list with 1px sub-pixel rounding never reports reachedEnd at the true bottom"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "predeclared-test-fake-ripples-landed",
+          "label": "Both pre-declared test-fake ripples applied, tsc green",
+          "ruleStatement": "The two fake DebuggerPorts implementers named in the phase are updated with a default scroll stub so tsc --noEmit and the full package verify stay green. 10 = both fakes updated with as-const-typed stubs structurally satisfying ScrollOutcome and full verify green with zero suppressions; 8 = both fakes updated and verify green; below minScore = only one fake updated or a cast/@ts-expect-error used to silence the drift.",
+          "passCriteria": [
+            "fakeDebugger(...) base object in page-actions.unit.test.ts has a scroll: vi.fn(async () => ({ method: 'none' as const, scrollYBefore: 0, scrollYAfter: 0, reachedEnd: false })) entry",
+            "fakeDebuggerPorts() literal in service-worker.unit.test.ts has a matching scroll entry returning the same shape",
+            "no source change to service-worker.ts",
+            "npm run verify in tools/chrome-bridge exits 0 with no it.skip, no @ts-expect-error, no loosened assertions or bumped timeouts introduced",
+            "the new scroll stub return value structurally satisfies ScrollOutcome (method typed as the literal via as const, all four fields present)"
+          ],
+          "failureExamples": [
+            "the dev updates only page-actions.unit.test.ts and runs vitest on that file; service-worker.unit.test.ts still has an object literal missing scroll and only fails once the full verify compiles it",
+            "the stub is added without as const, so method widens to string and no longer matches ScrollOutcome under strict, producing a tsc error the dev silences with a cast",
+            "a stray @ts-expect-error is added above one fake during editing and left in",
+            "scroll stub returns reachedEnd omitted"
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "reply-parsing-robustness",
+          "label": "CDP reply parsing via isRecord under strict TS, no unsafe casts",
+          "ruleStatement": "Runtime.evaluate replies are narrowed through isRecord (or equivalent) with no any, no non-null assertions, no `as T` on JSON-value results, tolerating a malformed/empty reply without throwing. 10 = degenerate-reply test asserts method: 'none' and numeric guards reject NaN; 8 = isRecord used and no banned syntax; below minScore = `as { result: { value: number } }` casts against the stub.",
+          "passCriteria": [
+            "scrollY/scrollHeight/innerHeight/innerWidth extracted via isRecord checks and numeric guards, not result.result.value as number",
+            "no new occurrences of `any`, `!`, or `... as <type>` on a sendCommand reply in the scroll code path",
+            "a test covers a degenerate reply (missing result field or non-numeric value) and asserts scroll resolves with method: 'none' rather than rejecting",
+            "the settle-delay evaluate result is not parsed for a value it does not need",
+            "isRecord is imported/used rather than re-implemented"
+          ],
+          "failureExamples": [
+            "const y = (reply as { result: { value: number } }).result.value - works against the stub, banned by no-restricted-syntax, unsafe against a real malformed reply",
+            "isRecord used for the outer object but Number(rec.value) trusted directly, so { value: 'NaNish' } yields scrollYAfter: NaN silently",
+            "a malformed-reply path throws with no test for it, so a real page returning undefined surfaces as an unhandled rejection",
+            "isRecord re-implemented inline as typeof x === 'object' which passes for null"
+          ],
+          "minScore": 6
+        }
+      ],
+      "healerHint": "The most likely miss is the wheel-then-script branch: the executor sends both the Input.dispatchMouseEvent wheel and the window.scrollBy fallback unconditionally (or gates the fallback on strict float equality of scrollY), breaking the wheel-only-success test and the honest method reporting - gate the fallback on an observed no-movement re-read with small pixel tolerance and only then set method to 'script'."
+    },
+    {
+      "id": "add-scrollpage-action-end-to-end",
+      "order": 1,
+      "name": "Add scrollPage page action across the parity surface",
+      "goal": "Wire a new `scrollPage` page action end to end through the six coordinated places every bridge action must appear, bump both hardcoded action-count unit tests from 18 to 19, and update the README count/enumeration/prose/manual-e2e surface - so the MCP server advertises `scrollPage` as a discrete tool with a two-field input schema and the extension handler drives the sandbox tab through `DebuggerPorts.scroll`.",
+      "rationale": "The bridge keeps its action set drift-free by forcing each action to appear in a fixed set of `Record<PageAction, ...>`-typed locations (an omission becomes a `tsc` error) plus two hardcoded count tests and the README. `scrollPage` (named to mirror the existing `evaluatePage`, one discrete MCP tool, not an enum sub-mode) must land in all of them in one reviewable change. The handler resolves the dedicated unfocused sandbox tab and calls the transport method built in phase 0.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/protocol/actions.ts",
+        "tools/chrome-bridge/src/protocol/types.ts",
+        "tools/chrome-bridge/src/extension/page-actions.ts",
+        "tools/chrome-bridge/src/mcp/tool-catalog.ts",
+        "tools/chrome-bridge/src/protocol/actions.unit.test.ts",
+        "tools/chrome-bridge/README.md"
+      ],
+      "changes": [
+        "In `actions.ts`, append `'scrollPage'` to the `PAGE_ACTIONS` `as const` tuple (after `getTabState`, the end - a scroll action has no natural neighbor, so appending is lowest-risk), taking the length from 18 to 19. No other change: `PageAction`, `isPageAction` derive generically.",
+        "In `types.ts`, add `ScrollPageParams` with EXACTLY two optional readonly fields - `amountPx?: number` (pixels to scroll down; default 2000 when omitted) and `toBottom?: boolean` (one large downward jump toward the current bottom, not a loop) - and `ScrollPageResult` (readonly: `method: 'wheel' | 'script' | 'none'`, `scrollYBefore: number`, `scrollYAfter: number`, `reachedEnd: boolean`; build it without ever assigning `undefined` explicitly because `exactOptionalPropertyTypes` is on). Add one key each to the `PageActionParams` and `PageActionResults` mapped types. There is no `direction` and no `repeat`/`count` field.",
+        "In `page-actions.ts`, add a `scrollPage` entry to BOTH the raw `Record<PageAction, Handler>` object and the `guard(...)`-wrapped return map. The handler: validate params (each present field must be the right type - `amountPx` a non-negative finite number, `toBottom` a boolean) and return a plain `{ error: 'scrollPage accepts an optional numeric amountPx and an optional boolean toBottom' }` sentinel BEFORE calling anything (h9's test asserts the port is not called on bad params), THEN `const tabId = await sandboxTab.resolveTabId()`, THEN build the `ScrollIntent` (omit fields not supplied; do not default in the handler - the port defaults `amountPx` to 2000) and `await captureDebugger.scroll(tabId, intent)`, then coerce to a JSON-safe `{ result: { method, scrollYBefore, scrollYAfter, reachedEnd } }` via a NEW small dedicated coercer written in the `coercePointerOutcome` style (do NOT reuse `InPageScriptOutcome`/`coerceExecuteScriptOutcome` - the scroll outcome is a status object, not an evaluated JSON value). Name the new coercer and any helper in the co-located test.",
+        "In `tool-catalog.ts`, add a `scrollPage` entry to the `TOOL_CATALOG` `Record<PageAction, ToolCatalogEntry>` with an honest description (names the CDP `Input.dispatchMouseEvent` wheel attempt and the `Runtime.evaluate` `window.scrollBy`/`scrollTo` fallback, states it targets the sandbox tab, states the purpose is materializing virtualized/lazy-rendered rows the ISOLATED-world reads miss, and that the result reports which mechanism moved the page) and an `inputSchema` with EXACTLY two optional properties: `amountPx` (`{ type: 'number', minimum: 0 }`, described as pixels to scroll down, default 2000) and `toBottom` (`{ type: 'boolean' }`), `required: []`, `additionalProperties: false`. Add a reusable `SCROLL_PROPERTIES` `as const` block alongside the existing shared property consts. `listTools()` needs no change.",
+        "In `actions.unit.test.ts`, add `'scrollPage'` to the ordered-tuple `toEqual([...])` assertion and change `PAGE_ACTIONS.length` `.toBe(18)` to `.toBe(19)`.",
+        "In `tool-catalog.unit.test.ts`, change `listTools()` `.toHaveLength(18)` to `19`, change the `it('advertises exactly eighteen tools', ...)` label to `'nineteen'`, add `scrollPage` to the required-map assertion, and add a schema-shape test asserting the scroll `inputSchema` exposes only `amountPx` and `toBottom` with no required fields.",
+        "In `README.md`: line ~48 `'eighteen'`->`'nineteen'` and add `scrollPage` to the inline enumeration (lines ~48-53); line ~177 `'18 tools'`->`'19'`; add `scrollPage` to the second full enumeration in the built `service-worker.js` bullet (lines ~205-211); add a `scrollPage` prose paragraph mirroring the `evaluatePage` one that describes the two-field param model (`amountPx` default 2000, `toBottom`) and the wheel-then-script fallback with the `method` field in the result; add a new numbered manual-e2e step (step 14) for a virtualized-list scroll head-to-head, following h9's step-12 template (numbered step + a dated `Verified ...` paragraph left as a stub for phase 2).",
+        "If any file touched in this phase contains a stale action-count comment (e.g. `types.ts` line ~10 'the ten generic page actions', `tool-catalog.ts` line ~4 'Two of the ten tools'), fix it in passing since the file is already open; do not go hunting in untouched files like `server.ts`."
+      ],
+      "boundedContext": "PAGE_ACTIONS parity surface",
+      "layer": "application",
+      "blastRadius": "medium",
+      "inputs": [
+        "stage1-analysis.json successDefinition (the six coordinated places + 2 count tests + README surface)",
+        "stage1.5-discovery.json findings for actions.ts, types.ts, page-actions.ts handler maps, tool-catalog.ts, count tests, README surface",
+        "Phase 0 output: `DebuggerPorts.scroll` signature and the two-field `ScrollIntent` / `method`-bearing `ScrollOutcome` shapes",
+        "h9 evaluatePage as the sibling template for handler, catalog entry, and README paragraph"
+      ],
+      "expectedResult": "`scrollPage` is present in `PAGE_ACTIONS` (19 entries), both mapped types, both handler maps, `TOOL_CATALOG` (input schema exposes only `amountPx` and `toBottom`), both count tests (now 19), and the README (both enumerations, `'eighteen'`->`'nineteen'`, `'18 tools'`->`'19'`, prose paragraph, manual-e2e step 14 stub); `npm run verify` in `tools/chrome-bridge` exits 0 with no skips or suppressions.",
+      "dependsOn": [
+        "add-debuggerports-scroll-cdp-method"
+      ],
+      "compensation": "Remove the `scrollPage` entries from all six files and revert the two count tests and README to 18; `tsc`'s `Record<PageAction, ...>` completeness check confirms nothing dangles.",
+      "rubric": [
+        {
+          "id": "parity-surface-no-drift-completeness",
+          "label": "Parity surface completeness proven by a green verify",
+          "ruleStatement": "scrollPage appears in every Record<PageAction,...>-typed location so the compiler's exhaustiveness check passes, and `npm run verify` in tools/chrome-bridge exits 0 with no skips, it.skip, loosened assertions, bumped timeouts, or eslint-disable added. 10 = all seven locations plus both count tests and a green verify actually run; 8 = all locations present and verify green; below minScore = a Record missing a key or a skipped count test.",
+          "passCriteria": [
+            "PAGE_ACTIONS has 19 entries with 'scrollPage' appended after getTabState",
+            "types.ts has ScrollPageParams and ScrollPageResult interfaces AND a new key in BOTH mapped types",
+            "page-actions.ts has a scrollPage property in BOTH the raw and the guard()-wrapped map",
+            "tool-catalog.ts TOOL_CATALOG has a scrollPage entry",
+            "running npm run verify in tools/chrome-bridge completes green; diff contains no new skip/only/eslint-disable/timeout bump"
+          ],
+          "failureExamples": [
+            "ScrollPageResult is added and referenced by the handler and the handler compiles, but the developer forgets to add the key to the PageActionResults mapped type; the handler coerces to a locally-typed object so tsc does not flag it at the handler, and it only surfaces as a Record completeness error they never saw because verify was never run to green",
+            "scrollPage added to the raw handler map but not the guard()-wrapped map, so the guarded map is Record<PageAction,Handler> minus one key and tsc errors",
+            "it.skip applied to the pre-existing tool-count test because its hardcoded 18 now fails, instead of updating the number"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "validate-params-before-resolving-sandbox-tab",
+          "label": "Handler validates params before any side effect",
+          "ruleStatement": "The scrollPage handler rejects malformed params with a plain { error: ... } sentinel BEFORE calling sandboxTab.resolveTabId() or captureDebugger.scroll(...), and a unit test proves the port is never touched on bad input. 10 = ordering enforced in code and asserted by a call-order test plus NaN/Infinity/negative rejected; 8 = validation precedes the port call and a bad-param test exists; below minScore = resolveTabId called first.",
+          "passCriteria": [
+            "type checks for amountPx (non-negative finite number when present) and toBottom (boolean when present) occur textually and in control flow before resolveTabId() and before .scroll(...)",
+            "invalid params return { error: ... } without throwing",
+            "a co-located unit test passes a bad param (amountPx: -5 / amountPx: 'x' / toBottom: 1) and asserts the fake scroll spy was NOT called and resolveTabId was NOT called",
+            "empty params {} are accepted and reach the port with an empty/partial ScrollIntent"
+          ],
+          "failureExamples": [
+            "Handler does const tabId = await sandboxTab.resolveTabId() first (mirroring an older sibling handler), then validates params; tests still pass because they only assert the error value, not call ordering",
+            "validation uses typeof amountPx === 'number' which admits NaN and Infinity and negative values",
+            "bad params throw instead of returning the sentinel, so the guard wrapper turns it into a different error shape"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "input-schema-exactly-two-optional-fields",
+          "label": "MCP input schema exposes exactly amountPx + toBottom, nothing required",
+          "ruleStatement": "The scrollPage TOOL_CATALOG inputSchema declares exactly the properties amountPx and toBottom, both optional, with required: [] and additionalProperties: false, and a test asserts the exact key set. 10 = SCROLL_PROPERTIES as-const block reused and a test asserts the key set is exactly ['amountPx','toBottom']; 8 = schema correct and a presence test exists; below minScore = a third property or required entry copied from a sibling.",
+          "passCriteria": [
+            "inputSchema.properties has exactly the keys amountPx and toBottom - no direction, no repeat/count, no tabId",
+            "amountPx is { type: 'number', minimum: 0 } with a description naming pixels to scroll down and the default 2000",
+            "toBottom is { type: 'boolean' }",
+            "required: [] (or absent) and additionalProperties: false",
+            "a new test asserts the property key set is exactly ['amountPx','toBottom'] and that required is empty",
+            "a reusable SCROLL_PROPERTIES as const block is defined alongside the other shared property consts and used by the entry"
+          ],
+          "failureExamples": [
+            "Developer models scrollPage on a sibling that threads a tabId through its schema and includes an optional tabId property 'for consistency', adding a third property - the schema still works and no existing test forbids a third key",
+            "amountPx given minimum: 0 but also mistakenly marked in a required array copied from another entry",
+            "schema shape test added but only checks that amountPx and toBottom are present, not that they are the ONLY properties"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "dedicated-scroll-result-coercer",
+          "label": "A dedicated scroll-outcome coercer, not the JSON-value coercer reused",
+          "ruleStatement": "The handler converts the ScrollOutcome to a JSON-safe ScrollPageResult through a new small coercer in the status-object style (like coercePointerOutcome), NOT by routing through coerceExecuteScriptOutcome / the InPageScriptOutcome JSON-value path. 10 = coercer explicitly selects the four fields and is unit-tested across all three method values; 8 = a dedicated named coercer exists and is tested; below minScore = coerceExecuteScriptOutcome reused with the outcome passed as the JSON value.",
+          "passCriteria": [
+            "a new named function (e.g. coerceScrollOutcome) exists in page-actions.ts, is exported or module-local per the file's convention, and is named in the co-located test",
+            "the coercer explicitly picks method, scrollYBefore, scrollYAfter, reachedEnd and returns { result: { ... } } without ever assigning undefined",
+            "coerceExecuteScriptOutcome / InPageScriptOutcome are not referenced by the scrollPage handler",
+            "a unit test feeds a fake ScrollOutcome (all three method values across cases) and asserts the coerced result shape",
+            "method value from the port is passed through unchanged"
+          ],
+          "failureExamples": [
+            "Developer sees coerceExecuteScriptOutcome already returns { result: <json> } and reuses it by passing the outcome object as the JSON value - output looks identical in tests and verify stays green, but the dedicated-coercer requirement is missed",
+            "a dedicated coercer is written but spreads the whole outcome ({ result: { ...outcome } }) so an added transport-only field would leak through",
+            "coercer assigns reachedEnd: outcome.reachedEnd ?? undefined tripping exactOptionalPropertyTypes intent"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "count-test-bump-both-files-and-labels",
+          "label": "Both hardcoded count tests bumped, including it() label text",
+          "ruleStatement": "Both action-count assertions move from 18 to 19 - in actions.unit.test.ts (tuple toEqual plus PAGE_ACTIONS.length .toBe) and tool-catalog.unit.test.ts (listTools() .toHaveLength plus the it('advertises exactly eighteen tools') label) - with the word in the label changed too. 10 = every numeric and the label text updated and no stale 18 in an action-count context remains; 8 = numeric assertions all updated; below minScore = one file missed or a test skipped.",
+          "passCriteria": [
+            "actions.unit.test.ts: 'scrollPage' added to the ordered toEqual tuple in the last position AND .toBe(18) -> .toBe(19)",
+            "tool-catalog.unit.test.ts: .toHaveLength(18) -> 19 AND the it(...) description string changed from eighteen to nineteen",
+            "scrollPage added to the required-map / per-action assertion in tool-catalog.unit.test.ts",
+            "no other numeric literal in these two test files still reads 18 in an action-count context",
+            "tests pass"
+          ],
+          "failureExamples": [
+            "Developer updates every numeric assertion and the tuple and tests pass green, but leaves the it('advertises exactly eighteen tools', ...) label text unchanged because the string does not affect the assertion",
+            "'scrollPage' inserted into the toEqual tuple in alphabetical position rather than appended last, so it mismatches PAGE_ACTIONS order",
+            "only actions.unit.test.ts updated; tool-catalog count test left at 18 and the whole verify run was not executed"
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "readme-surface-fully-updated",
+          "label": "README parity surface fully updated - both enumerations, count word, prose, e2e step",
+          "ruleStatement": "tools/chrome-bridge/README.md reflects scrollPage in all five spots: the count word eighteen->nineteen, BOTH action enumerations, the '18 tools'->'19' mention, a new prose paragraph mirroring evaluatePage, and a numbered manual-e2e step 14 stub. 10 = every spot updated and no README text still asserts 18 or omits scrollPage from an enumeration; 8 = the primary spots updated; below minScore = the second (service-worker.js bullet) enumeration left stale.",
+          "passCriteria": [
+            "eighteen -> nineteen at the count sentence (~L48) and 18 tools/18 -> 19 at ~L177",
+            "scrollPage present in BOTH enumerations - the prose inline list AND the built service-worker.js bullet enumeration",
+            "a dedicated scrollPage paragraph describes the two-field param model (amountPx default 2000, toBottom) and the wheel-then-window.scrollBy/scrollTo fallback with the method result field",
+            "a new numbered manual-e2e step 14 for the virtualized-list head-to-head exists, following the h9 step-12 template, with a Verified <date> paragraph left as an explicit stub for phase 2",
+            "no remaining README text asserts the tool count is 18 or omits scrollPage from a list it enumerates"
+          ],
+          "failureExamples": [
+            "Developer updates the count word, the first inline enumeration, the prose paragraph and adds the e2e step, but misses the SECOND enumeration inside the built service-worker.js bullet further down the file because it is far from the others",
+            "manual-e2e step added but numbered 13 (colliding with an existing step) or without the dated Verified stub paragraph",
+            "prose paragraph added but describes a direction param that does not exist, copied loosely from an imagined API"
+          ],
+          "minScore": 7
+        }
+      ],
+      "healerHint": "For each failing dimension, make the smallest change that puts scrollPage on the missing part of the fixed parity surface - the omitted mapped-type key, the un-bumped count or its it() label word, the second README enumeration, param validation moved ahead of resolveTabId, or a dedicated coerceScrollOutcome replacing a reused JSON-value coercer - then re-run npm run verify in tools/chrome-bridge to green with no skips or suppressions."
+    },
+    {
+      "id": "verify-scrollpage-moves-window-live-chrome",
+      "order": 2,
+      "name": "Verify scrollPage moves the sandbox tab in live Chrome",
+      "goal": "In a fresh chrome-bridge MCP session started after a full dist/extension rebuild and extension remove/re-add, prove on a real public page that a scrollPage call changes the sandbox tab's window scroll position (scrollY after > scrollY before) and record the observed result mechanism (method: 'wheel' | 'script' | 'none'); then record in the roadmap memory files the narrowed horizon-10 success criterion as a binding decision, and record the separate finding that the unfocused sandbox tab cannot materialize virtualized / lazy-rendered rows on any scroll as a known limitation and a future-horizon blocker.",
+      "rationale": "The scroll action is only proven once a live transcript shows it actually moved the page, not merely that the command returned — synthetic input dispatch has repeatedly returned success in this project without the page reacting. The user has checked that the deliberately-unfocused sandbox tab never runs a rendering pass, so no scroll there can reveal rows a framework only draws when they near the viewport; that row-reveal ability is therefore explicitly out of scope for this horizon and is written down as a known limitation for a later horizon whose job is to make the sandbox tab render. The sandbox tab's focus model is deliberately not changed here because an earlier binding decision fixed it.",
+      "filesAffected": [
+        "tools/chrome-bridge/README.md",
+        "docs/roadmaps/agent-agnostic-browser-bridge/discoveries.md",
+        "docs/roadmaps/agent-agnostic-browser-bridge/state.md",
+        "docs/roadmaps/agent-agnostic-browser-bridge/blockers.md",
+        "docs/roadmaps/agent-agnostic-browser-bridge/decisions.md",
+        "tools/chrome-bridge/blockers.md"
+      ],
+      "changes": [
+        "Rebuild dist/extension in tools/chrome-bridge, restart the MCP server, remove and re-add the unpacked extension in chrome://extensions (a stale service worker manifests as a silent command timeout), and start a NEW chrome-bridge MCP session after the rebuild so it advertises the scrollPage tool.",
+        "On a public, no-auth page that is tall enough to scroll in the main document (any long article or long list page; it does NOT need to be a virtualized list, since row-reveal is no longer being tested), run via the fresh MCP session: navigateTo the URL, read window.scrollY (via getTabState or an evaluatePage/readPage-adjacent read), call scrollPage with a large amountPx (or toBottom: true), then read window.scrollY again and confirm it increased. Repeat once with a second scrollPage call to show cumulative movement. Paste the literal tool output — the two scrollY reads and the scrollPage result JSON including its method field — with a real calendar date into a README manual-e2e step, replacing the phase-1 Verified stub.",
+        "Record in the transcript the observed method value ('wheel' | 'script' | 'none') and note that in the unfocused sandbox tab the CDP Input.dispatchMouseEvent wheel path is expected to hang and fall through to the Runtime.evaluate window.scrollBy/scrollTo script path (the mechanism fix bounds the wheel attempt at 750ms).",
+        "In docs/roadmaps/agent-agnostic-browser-bridge/decisions.md add the h10 binding line: action name scrollPage; narrowed two-field param model (amountPx optional, default 2000; toBottom optional boolean; no direction, no repeat/count); success-fidelity choice is mechanism-that-moved-the-page (result reports method: 'wheel' | 'script' | 'none' plus scrollY before/after and best-effort reachedEnd); AND record that horizon 10's live-verification success criterion was deliberately narrowed to 'scrollPage changes window scrollY in the sandbox tab' — the 'reveal virtualized rows a prior readPage missed' gate is dropped for this horizon; persistent CDP session stays out of scope; the sandbox-tab focus model is NOT changed (binding h6 decisions).",
+        "In discoveries.md add a dated one-line finding: the deliberately-unfocused sandbox tab runs no rendering pass, so scrollPage moves window scrollY but scroll events / IntersectionObserver / content-visibility:auto never fire and no virtualized or lazy-rendered page can materialize rows there on any scroll (user-verified live on a trivial local page — it is the tab, not the site).",
+        "In docs/roadmaps/agent-agnostic-browser-bridge/blockers.md and tools/chrome-bridge/blockers.md record the LinkedIn / virtualized-list materialization gap as a KNOWN LIMITATION and an explicit future-horizon item: scrollPage exists and moves the window, but virtualized-list materialization needs the sandbox tab to actually render; the proper follow-up is a horizon that makes the sandbox tab run a render pass. Mark tools/chrome-bridge/blockers.md item 2 ('No scroll primitive') resolved for window movement, with the materialization dependency called out.",
+        "Update state.md to close horizon 10 on the narrowed criterion once the window-movement transcript is present and the memory files are consistent. If the fresh MCP session cannot be established or the build is stale and unfixable in-session, this phase ends BLOCKED with a MANUAL_CHROME_CHECK_PENDING marker carrying the exact rebuild / remove-and-re-add / fresh-session / target-URL steps, and the horizon stays OPEN — a pending marker is never a completed phase."
+      ],
+      "boundedContext": "live-Chrome scroll-movement verification",
+      "layer": "cross-cutting",
+      "blastRadius": "small",
+      "inputs": [
+        "Phase 1 output: a built bridge advertising the scrollPage tool and its README manual-e2e step stub",
+        "User-checked ground truth: sandbox tab runs no render pass; window.scrollBy changes scrollY; wheel path hangs; scroll events / IntersectionObserver / content-visibility never fire",
+        "decisions.md h10 lines (scrollPage param model and mechanism-fidelity) and h6 sandbox-tab focus-model decision",
+        "h9 roadmap phase 4 shape (rebuild -> restart -> remove+re-add unpacked extension -> fresh MCP session -> record transcript)"
+      ],
+      "expectedResult": "README manual-e2e step carries a real dated transcript showing scrollPage increased window scrollY in the sandbox tab in a fresh post-rebuild MCP session (with the observed method value), decisions.md carries the h10 binding line including the narrowed live-verification criterion, and discoveries.md / state.md / both blockers.md files consistently record the verdict plus the sandbox-tab-cannot-materialize-rows limitation as a future-horizon item — or the phase ends BLOCKED with a MANUAL_CHROME_CHECK_PENDING marker and exact reproduction steps and the horizon stays OPEN.",
+      "dependsOn": [
+        "add-scrollpage-action-end-to-end"
+      ],
+      "compensation": "None — this phase only reads live Chrome and writes documentation; a wrong verdict is corrected by re-running the check in a new session.",
+      "rubric": [
+        {
+          "id": "live-transcript-is-real-not-templated",
+          "label": "Live-Chrome transcript is genuine and dated",
+          "ruleStatement": "The README manual-e2e step contains a verbatim transcript from a fresh post-rebuild chrome-bridge MCP session showing literal tool output, not a hand-written or templated illustration.",
+          "passCriteria": [
+            "README carries a dated (real calendar date consistent with the commit) manual-e2e step for scrollPage",
+            "Transcript shows the actual public no-auth URL used and it is a real reachable tall page",
+            "Two literal window.scrollY reads are pasted (before and after) as raw numbers, plus at least one repeat producing a further-increased value for cumulative movement",
+            "The scrollPage result JSON is pasted verbatim including the method field with one of 'wheel' | 'script' | 'none'",
+            "Numbers are internally consistent: after > before, and the delta is plausibly related to the requested amountPx / toBottom"
+          ],
+          "failureExamples": [
+            "scrollY values are round, suspiciously clean placeholders (0 -> 1000) with no URL or date",
+            "The step says 'scrollPage returned successfully' but pastes no scrollY reads — only the command result",
+            "PLAUSIBLE IMPLEMENTATION: developer runs the session honestly but paraphrases the output ('scrollY went from ~200 to ~1600, method was script') instead of pasting the literal tool JSON and the two raw reads, so the evidence cannot be distinguished from a recollection",
+            "Transcript is from the pre-rebuild session (predates the add-scrollpage-action commit) or from a mock/unit harness rather than a live MCP session"
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "movement-claim-scoped-to-window-scroll-only",
+          "label": "Success claim is narrowed to window scrollY movement",
+          "ruleStatement": "Every memory file states the horizon-10 pass condition as 'scrollPage increased the sandbox tab's window scrollY' and nowhere conditions the pass on virtualized/lazy rows being materialized.",
+          "passCriteria": [
+            "decisions.md h10 line states the narrowed live-verification criterion explicitly (window scrollY after > before), plus action name, two-field param model, mechanism-fidelity result, and 'focus model unchanged'",
+            "state.md closes (or BLOCKs) horizon 10 against that same narrowed wording, not against row reveal",
+            "No memory file re-introduces row-materialization as a horizon-10 acceptance gate",
+            "README manual-e2e step's stated expected result is window scroll movement only"
+          ],
+          "failureExamples": [
+            "state.md says horizon 10 is 'complete once scrollPage reveals off-screen list items'",
+            "decisions.md h10 line omits the narrowed criterion and just says 'scrollPage verified in live Chrome' with no definition of what was verified",
+            "PLAUSIBLE IMPLEMENTATION: developer closes the horizon on scrollY movement but the decisions.md line still carries the old goal text ('prove scrollPage materializes virtualized rows') copied forward from the pre-replan roadmap, contradicting the narrowed close and leaving the binding criterion ambiguous",
+            "README expected-result sentence still promises 'newly rendered rows appear after scroll'"
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "materialization-gap-recorded-as-known-limitation",
+          "label": "Row-materialization gap captured as limitation + future-horizon item",
+          "ruleStatement": "The finding that the unfocused sandbox tab runs no render pass — so scrollPage moves scrollY but scroll/IntersectionObserver/content-visibility never fire and no virtualized page materializes rows — is recorded consistently as a known limitation and a future-horizon blocker.",
+          "passCriteria": [
+            "discoveries.md has a dated line stating: unfocused sandbox tab runs no render pass; scrollPage changes scrollY but scroll events / IntersectionObserver / content-visibility callbacks do not fire; no virtualized page materializes rows there",
+            "Both blockers.md files (roadmap blockers.md and tools/chrome-bridge/blockers.md) record the materialization gap as an open future-horizon item",
+            "tools/chrome-bridge/blockers.md item 2 is marked resolved for window movement, with the materialization dependency explicitly called out as still open",
+            "The limitation text attributes the cause (no render pass in the unfocused tab), not just the symptom"
+          ],
+          "failureExamples": [
+            "Gap is mentioned only in a commit message, not in any tracked memory file",
+            "discoveries.md line is undated or states the symptom ('rows didn't appear') without the no-render-pass cause",
+            "PLAUSIBLE IMPLEMENTATION: developer records the limitation thoroughly in discoveries.md and the roadmap blockers.md but marks tools/chrome-bridge/blockers.md item 2 fully 'resolved' with no mention of the materialization dependency, so a future reader believes scroll is completely done",
+            "One blockers.md calls it a future-horizon item while the other calls it won't-fix / out-of-scope-permanently — inconsistent disposition"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "result-mechanism-recorded-honestly",
+          "label": "Observed scroll mechanism recorded with wheel-path caveat",
+          "ruleStatement": "The deliverable records which CDP primitive actually produced the movement (method value) and states the expectation that the Input.dispatchMouseEvent mouseWheel path hangs in the unfocused tab and falls through to the Runtime.evaluate scrollBy script path.",
+          "passCriteria": [
+            "README transcript's scrollPage result JSON method field value is echoed and interpreted in prose ('observed method: script')",
+            "The deliverable states the wheel path is expected to hang / time out in the unfocused sandbox tab and that 'script' is the expected steady-state result there",
+            "If method came back 'wheel' or 'none', that surprise is called out and explained rather than glossed",
+            "decisions.md mechanism-fidelity result reflects the same observed method value as the README transcript"
+          ],
+          "failureExamples": [
+            "README pastes the result JSON but never says which method fired or what that implies",
+            "decisions.md claims mechanism 'wheel' while the pasted transcript shows method:'script' — the two disagree",
+            "PLAUSIBLE IMPLEMENTATION: developer honestly reports method:'script' and that movement happened, but never documents why wheel was not used, leaving a future maintainer to assume the wheel primitive is working and untested",
+            "'none' is returned (no movement) yet the step is still written up as a pass because the command did not throw"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "blocked-exit-is-actionable",
+          "label": "BLOCKED fallback carries a real repro, horizon stays OPEN",
+          "ruleStatement": "If the fresh post-rebuild MCP session cannot be established, the phase ends BLOCKED with a MANUAL_CHROME_CHECK_PENDING marker, exact reproduction steps, and horizon 10 left OPEN in state.md — not silently closed or closed on a partial transcript.",
+          "passCriteria": [
+            "On the pass path: no MANUAL_CHROME_CHECK_PENDING marker remains anywhere and state.md horizon 10 is closed",
+            "On the blocked path: a MANUAL_CHROME_CHECK_PENDING marker exists in blockers.md / state.md and state.md shows horizon 10 OPEN",
+            "Blocked-path repro steps are concrete and ordered: rebuild dist/extension, restart MCP server, remove+re-add unpacked extension, start fresh session, exact scrollPage call and the two scrollY reads to perform",
+            "Blocked-path text names what specifically failed (e.g. relay not connecting, extension not re-added) rather than 'could not verify'"
+          ],
+          "failureExamples": [
+            "Horizon 10 is closed in state.md while a MANUAL_CHROME_CHECK_PENDING marker still sits in blockers.md — contradictory status",
+            "Blocked exit says 'manual check pending' with no repro steps, so nobody can pick it up",
+            "PLAUSIBLE IMPLEMENTATION: the session partly worked — one scrollY read succeeded but the second failed — and the developer writes it up as a pass with a single read and a note 'movement assumed', instead of ending BLOCKED with the pending marker",
+            "Both a real transcript and a stale MANUAL_CHROME_CHECK_PENDING marker are present because the marker from an earlier attempt was never removed"
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "memory-files-mutually-consistent",
+          "label": "All memory files tell one consistent story",
+          "ruleStatement": "README, decisions.md, discoveries.md, state.md, and both blockers.md files agree with each other on the horizon-10 verdict, the narrowed criterion, the observed method, and the materialization-gap disposition.",
+          "passCriteria": [
+            "The horizon-10 status (closed-on-narrowed-criterion, or BLOCKED/OPEN) is identical across state.md and any status line in the other files",
+            "The observed method value is the same everywhere it appears",
+            "The materialization gap has the same disposition (future-horizon item) in both blockers.md files and discoveries.md",
+            "No file references a superseded goal (row materialization as the h10 gate) as if still current",
+            "Dates referenced across README and discoveries.md for the same session match"
+          ],
+          "failureExamples": [
+            "state.md closes horizon 10 but the roadmap blockers.md still lists horizon 10 as OPEN/at-risk",
+            "README says the test ran on example.org, discoveries.md says it ran on a Wikipedia article — different sessions implied",
+            "PLAUSIBLE IMPLEMENTATION: developer updates state.md, decisions.md, discoveries.md and the roadmap blockers.md carefully but forgets tools/chrome-bridge/blockers.md, which still frames scroll as entirely unproven — a reader starting there gets the wrong status",
+            "decisions.md h10 line and README expected-result sentence describe the narrowed criterion in materially different terms (one says 'scrollY increases', other says 'page visibly scrolls a full viewport')"
+          ],
+          "minScore": 8
+        }
+      ],
+      "healerHint": "The most likely miss is evidence that is honest but paraphrased rather than literal — fix it by re-running the fresh post-rebuild MCP session and pasting the verbatim tool output (both raw scrollY reads plus the full scrollPage result JSON with its method field) and a real date into the README step, then reconciling the observed method value across decisions.md and both blockers.md files."
+    }
+  ],
+  "successCriteria": [
+    "A single new page action (scrollPage) lands across exactly the coordinated surface with no drift (PAGE_ACTIONS 18->19, Params+Result interfaces + both mapped types, raw + guarded handler entries, TOOL_CATALOG entry, both hardcoded action-count unit tests bumped to 19, README count/enumerations/prose/manual-e2e step), driven by a new DebuggerPorts.scroll method reusing withDebuggerSession per-command attach/detach with no persistent CDP session; npm run verify in tools/chrome-bridge exits 0 with no skips/suppressions; and the horizon closes only after a live-Chrome transcript shows a scrollPage call increased the sandbox tab's window scrollY in a fresh post-rebuild MCP session (with the observed method value), with the virtualized-row materialization gap recorded as a known limitation held for a future horizon.",
+    "Add CDP scroll method to DebuggerPorts: DebuggerPorts.scroll(tabId, intent) exists with a two-field ScrollIntent and a method-bearing ScrollOutcome, implemented via withDebuggerSession(..., 'scrolling', ...) as a wheel-then-script fallback with no persistent session, with a describe('scroll') unit-test block covering both mechanism paths and the two test fakes updated; npm run verify green.",
+    "Add scrollPage page action across the parity surface: scrollPage present in PAGE_ACTIONS (19), both mapped types, both handler maps, TOOL_CATALOG (schema exposes only amountPx + toBottom), both count tests (19), and the README (both enumerations, count word, prose paragraph, manual-e2e step 14 stub); npm run verify green with no skips.",
+    "Verify scrollPage in live Chrome: README manual-e2e step carries a real dated transcript showing a scrollPage call increased the sandbox tab's window scrollY in a fresh post-rebuild MCP session (with the observed method value); decisions.md has the h10 binding line including the narrowed live-verification criterion; discoveries.md/state.md and both blockers.md files record the verdict AND the finding that the unfocused sandbox tab cannot materialize virtualized rows on any scroll (a known limitation held for a future horizon) - OR the phase ends BLOCKED with a MANUAL_CHROME_CHECK_PENDING marker and exact reproduction steps and the horizon stays OPEN."
+  ],
+  "deferred": [
+    "Trusted keyboard input via CDP Input.dispatchKeyEvent - a separate deferred capability slice; scoping picked scroll over trusted keyboard, and bundling both would make the horizon a family the brief forbids.",
+    "Trusted click-by-coordinate via CDP Input.dispatchMouseEvent press/release - different slice; held for a later horizon.",
+    "A wait/settle action - not the chosen slice; scroll verification uses manual delays this horizon, and a first-class wait/settle action is its own horizon (and a strong horizon 11 candidate).",
+    "Moving to a persistent multi-command CDP session - scoping explicitly keeps per-command attach/detach; deferred until a slice needs ordered Input.dispatch* sequencing.",
+    "Deleting or altering the dead active-tab surface (queryActiveTab / captureVisibleTab / activeTab permission / NO_ACTIVE_TAB) - the user chose to leave it untouched this horizon.",
+    "Resurrecting horizon 5's DOM page-model snapshot (ref-addressable rows + bounding boxes) - a separate never-executed roadmap; scroll does not require it.",
+    "Switching readPage / getPageText / findElement to a CDP evaluation path - they stay on chrome.scripting ISOLATED world; only the scroll motion uses CDP.",
+    "A distinct scroll-element-into-view-by-selector action - the horizon ships ONE atomic scroll action; a selector-targeted variant is additional surface.",
+    "Cleaning up stale action-count comments outside files touched by phase 1 (server.ts headers) - only touched-in-passing fixes are in scope; a dedicated cleanup is deferred (5th time).",
+    "Verifying the MCP config against Gemini CLI / Codex CLI / Cursor - h4 decision binds hand-verification to Claude Code only.",
+    "Wiring tools/chrome-bridge into the repo-root verify.sh pipeline - h1 decision keeps the package self-contained.",
+    "A direction param and a repeat/count field on the scroll action - cut by the user redirect; scrollPage is always downward and a caller needing more scrolling calls the tool again.",
+    "Proving scrollPage materializes virtualized / lazy-rendered rows a prior readPage missed - infeasible in the deliberately-unfocused sandbox tab, which runs no render pass (user-verified live: scroll events / IntersectionObserver / content-visibility never fire there). Held for a future horizon whose job is to make the sandbox tab run a render pass; the scrollPage window-movement mechanism itself already ships this horizon."
+  ],
+  "revision": 1,
+  "revisionReason": "Phase 3 (verify-scrollpage-live-chrome-head-to-head) replaced by verify-scrollpage-moves-window-live-chrome. Its premise - proving scrollPage materializes virtualized rows a prior readPage missed in the unfocused sandbox tab - was verified infeasible: the deliberately-unfocused sandbox tab runs no render pass, so scroll events / IntersectionObserver / content-visibility never fire there (user-verified live on a trivial local page - it is the tab, not the site). User authorized narrowing live verification to 'scrollPage changes window scrollY'; the row-materialization gap is recorded as a known limitation for a future horizon. Phases 1-2 (done, graded) unchanged; objective, phase ids for 1-2, and dependencies unchanged."
+}

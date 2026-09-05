@@ -1,0 +1,299 @@
+{
+  "task": "Add an `evalIsolated` action to the chrome-bridge MCP that evaluates a caller-supplied JavaScript expression in the extension's isolated content-script world (exempt from the page's Content-Security-Policy), so that reading page text and structured values works on strict-CSP sites like LinkedIn, github.com and reddit.com where the existing `executeScript` action (MAIN world) is blocked — while keeping `executeScript` byte-for-byte unchanged.",
+  "analysis": {
+    "objective": "Add an `evalIsolated` page action (and matching MCP tool) to `tools/chrome-bridge` that evaluates a caller-supplied JavaScript expression in the extension's isolated content-script world — which is exempt from the page's Content-Security-Policy — so arbitrary DOM/text/`location` reads work on strict-CSP sites (LinkedIn, github.com, reddit.com) where the MAIN-world `executeScript` is blocked, while leaving `executeScript` unchanged.",
+    "successDefinition": "Done and correct means all of the following hold: (1) `evalIsolated` is added to `PAGE_ACTIONS` (protocol/actions.ts), `PageActionParams` + `PageActionResults` + new `EvalIsolatedParams {code: string}` / `EvalIsolatedResult {value: unknown; error?: string}` (protocol/types.ts, mirroring `ExecuteScriptParams`/`ExecuteScriptResult`), the handler raw+guarded maps (extension/page-actions.ts), and `TOOL_CATALOG` (mcp/tool-catalog.ts), and `tsc --noEmit` is green — the `Record<PageAction, ...>` typing forces completeness. (2) The handler runs the expression in the ISOLATED world (omit `{world:'MAIN'}` / pass `{world:'ISOLATED'}`), reusing the shared `InPageScriptOutcome` `(0, eval)(code)` func body and the `coerceExecuteScriptOutcome` + `MAX_EXECUTE_SCRIPT_RESULT_CHARS` (1MB) cap, returning `{ result: { value } }` and `{ error }` sentinels on bad input, blocked/blocked-eval, serialisation failure, or over-large result. (3) `executeScript` is byte-for-byte unchanged (still `{world:'MAIN'}` with the identical handler). (4) the package's `verify:fast` is green: typecheck, eslint --max-warnings 0, unit/int tests including updated count-hardcoded `actions.unit.test.ts` + `tool-catalog.unit.test.ts`, and the new `evalIsolated` handler test; `listTools()` still derives from `PAGE_ACTIONS`. (5) LIVE CHROME CHECK (required because the change edits the extension): on a real strict-CSP site (github.com and reddit.com, plus LinkedIn if signed in), `evalIsolated` returns a structured value (e.g. `document.querySelector('h1')?.innerText`, `location.href`, a JSON string built from DOM) where the same expression via `executeScript` returns Chrome's verbatim CSP eval error — proving the blocker is actually resolved, not merely typed; the horizon ends `blocked`/`MANUAL_CHROME_CHECK_PENDING` until this live check passes.",
+    "assumptions": [
+      "`chrome.scripting.executeScript` with a `func`/`args` and no `world` (or `{world:'ISOLATED'}`) runs in the isolated content-script world, which is NOT subject to the page's CSP — this is the documented premise of blocker #1 and the basis of the fix.",
+      "The isolated world shares the page's DOM and `location`, so DOM-based reads return real page content; it does NOT expose page-script globals/libraries — but blocker #1's stated extraction path (headline, skills[], experience[], dates, location.href, section visibility) is entirely DOM/location-based, so it is covered.",
+      "`ChromePorts.executeScript` already supports `options.world` and defaults to ISOLATED when omitted (ports.ts line 124), so NO port change is required — the whole change lives in actions.ts / types.ts / page-actions.ts / tool-catalog.ts plus tests.",
+      "`evalIsolated` may reuse the `executeScript` injected func body and `coerceExecuteScriptOutcome` verbatim — the only difference is the world selection.",
+      "Since the new action targets the sandbox tab via `sandboxTab.resolveTabId()` like every other action, and MCP dispatch routes `isPageAction`→`sendCommand` generically, no relay, bridge-client, or command-dispatch change is needed.",
+      "Adding the action changes the extension build, so the standard horizon-closing real-Chrome live verification is mandatory and the horizon ends `blocked`/`MANUAL_CHROME_CHECK_PENDING` until it passes.",
+      "`evalIsolated` confers no new privilege: it runs in the isolated content-script world under the existing `scripting` + `<all_urls>` permissions.",
+      "The expression must return a JSON-serialisable value; returning a DOM node, a function, `undefined`, or a circular/over-large result resolves to an `{error}`, matching `executeScript` semantics.",
+      "A stale service worker loaded in Chrome makes the NEW action TIMEOUT (not error) because `isPageAction` drops the unknown action → 30s timeout; live verification must remove+re-add `dist/extension` (or restart Chrome) to swap the SW.",
+      "No change is made to `getPageText`/`readPage`/`findElement`, which already run in the isolated world via `func`-injection and are thus already CSP-safe for DOM reads; the new action addresses only the string-`eval` gap."
+    ],
+    "risks": [
+      "PRIMARY: the core premise — that `eval` of a caller string inside an isolated-world `func` is exempt from ALL CSPs, not just the page's, including the extension's own MV3 content-script policy — is asserted by blockers.md but not yet measured. If it is not actually exempt, the fix silently doesn't resolve blocker #1; re-confirm empirically on github.com/reddit.com (and LinkedIn if available) in the live-Chrome check and end the horizon `blocked`/`MANUAL_CHROME_CHECK_PENDING` until it passes.",
+      "CROSS-CAPABILITY CEILING (not a bug): `evalIsolated` runs in the isolated world and cannot read page-script globals/libraries (React state, page-bound `window.__...` vars not on the shared DOM). If a strict-CSP site's needed value exists only in page-side JS, `evalIsolated` cannot reach it — that remains the CSP-blocked MAIN path or the explicitly deferred CDP Runtime.evaluate pivot; resist 'fixing' it by falling back to MAIN.",
+      "DRIFT / PARITY: the count-hardcoded unit tests (actions.unit.test.ts, tool-catalog.unit.test.ts) and the README action-count headers are not mechanically updated and will go stale; a missing catalog/handler entry is caught by tsc, but the doc headers and count assertions are residual debt that is easy to forget.",
+      "LIVE-VERIFY FALSE HANG: without a remove+re-add of the unpacked extension (or full Chrome restart), a still-loaded stale service worker makes `evalIsolated` time out rather than error, so a real pass can look like a hang — this must be distinguished from a genuine defect during the live check.",
+      "SERIALISATION EDGE shared with `executeScript`: an expression returning `undefined`, a function, a DOM node, a circular structure, or an over-large (>1MB) result resolves to `{error}`, which a caller could mistake for a real failure if the contract isn't documented as value-returning (return primitives / POJOs / JSON strings)."
+    ],
+    "outOfScope": [
+      "scroll primitive (scrollPage/scrollBy/scrollToElement) — gap #4; no scrolling mechanism is added here.",
+      "wait/settle (waitForSelector/waitForNavigation/network-idle) — gap #3; no read-tool settling is added here.",
+      "response bodies for readNetworkRequests (text/json bodies) — gap #5; network capture is unchanged.",
+      "click-by-text / clickElement({text}) / getByRole + a fuller event sequence — gap #6; clickElement stays CSS-selector-only.",
+      "findElement-returns-refs + the never-landed DOM page-model snapshot (rows/refs/bounding boxes) — gap #2; findElement still returns only a count.",
+      "full-page / element-clipped screenshots (captureTab({fullPage:true})) — gap #7; captureTab stays viewport-only.",
+      "CDP Runtime.evaluate pivot / persistent CDP session — the CSP fix is via the isolated world, not the deferred CDP broaden; horizon-06 bound CDP to the background-screenshot gap only.",
+      "modifying or removing the existing MAIN-world `executeScript`, or converting it to a caller-selectable `world` param — explicitly 'keep unchanged.'",
+      "the dead active-tab surface cleanup (queryActiveTab / captureVisibleTab / activeTab permission, delete-vs-keep) — a separate deferred concern; evalIsolated targets the sandbox tab like every other action.",
+      "new manifest permissions, new chrome port methods, or any new browser capability — the fix uses the existing scripting + <all_urls> + func-injection substrate."
+    ],
+    "domainShape": "technical",
+    "domainShapeReason": "The work is developer tooling machinery — extending a Chrome-bridge MCP action and its protocol surface (a new page action that evaluates JS in a specific execution world to work around a CSP limitation) — with no business entities or rules a domain expert would recognize; it is entirely subsystem/pipeline vocabulary.",
+    "ubiquitousLanguage": [
+      { "term": "page action", "meaning": "A single entry in the `PAGE_ACTIONS` tuple, the protocol's single source of truth; the extension handler map and the MCP `TOOL_CATALOG` are both typed `Record<PageAction, ...>` off it, so adding one is a tsc error unless every consumer updates." },
+      { "term": "execution world (`world`)", "meaning": "The `chrome.scripting.executeScript` ISOLATED vs MAIN target; MAIN inherits the page's Content-Security-Policy, ISOLATED (the default) is exempt — `evalIsolated` runs in ISOLATED, `executeScript` stays MAIN." },
+      { "term": "Content-Security-Policy (CSP) / strict-CSP site", "meaning": "A site's `script-src` directive without `'unsafe-eval'` (LinkedIn, github.com, reddit.com) that makes a MAIN-world string `eval` throw Chrome's 'evaluating a string ... violates ... CSP' error — the blocker being fixed." },
+      { "term": "`func`-injection", "meaning": "Every page action runs a serialised `func` with `args` via `chrome.scripting.executeScript`; `evalIsolated` and `executeScript` share the same injected `(0, eval)(code)` func body, differing only in the world." },
+      { "term": "sandbox tab", "meaning": "The single auto-created, reused tab every page action targets via `sandboxTab.resolveTabId()` (horizon-6 model); `evalIsolated` evaluates on it like every other action." },
+      { "term": "TOOL_CATALOG", "meaning": "The MCP one-tool-per-action map typed `Record<PageAction, ToolCatalogEntry>`; `listTools()` derives the advertised tool set from `PAGE_ACTIONS`, so the new tool is advertised automatically once the action is added." },
+      { "term": "in-page outcome (`InPageScriptOutcome` / `coerceExecuteScriptOutcome`)", "meaning": "The `{ok:true, json}` / `{ok:false, error}` envelope the injected func returns and the coerce that turns it into a `{result:{value}}` / `{error}` outcome, enforcing JSON serialisability and the 1MB result cap." }
+    ]
+  },
+  "discoveryFindings": [
+    { "area": "PAGE_ACTIONS tuple and derivations", "finding": "PAGE_ACTIONS is an `as const` tuple of exactly 17 members in this order: ping, navigateTo, getPageText, readPage, findElement, clickElement, typeText, captureTab, readConsoleMessages, readNetworkRequests, executeScript, navigateBack, navigateForward, reloadTab, clickAt, hover, getTabState. `PageAction = (typeof PAGE_ACTIONS)[number]` and `isPageAction` narrows via `typeof value === 'string' && PAGE_ACTIONS.some(a => a === value)`.", "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/src/protocol/actions.ts", "implication": "`evalIsolated` must be inserted into this ordered tuple (position must be chosen and mirrored exactly in actions.unit.test.ts). Because `Record<PageAction,...>` consumers exist on both extension and MCP sides, adding it here without touching the handler map, types.ts keyed maps, and TOOL_CATALOG is a hard tsc error — which enforces completeness but also means the change is not localized to one file." },
+    { "area": "Params/results keying", "finding": "PageActionParams and PageActionResults are keyed interfaces: `readonly executeScript: ExecuteScriptParams` at line 139 and `readonly executeScript: ExecuteScriptResult` at line 284. ExecuteScriptParams is `{ readonly code: string }`; ExecuteScriptResult is `{ readonly value: unknown; readonly error?: string }`. The `Command` type is a mapped type over PageAction, so a new action is automatically wired into the command frame once the two keyed maps are updated.", "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/src/protocol/types.ts", "implication": "Three edits in types.ts: new `EvalIsolatedParams {code:string}` and `EvalIsolatedResult {value:unknown; error?:string}` interfaces, plus two key entries (`evalIsolated` in PageActionParams and PageActionResults). No change to the `Command` type is needed — it self-derives." },
+    { "area": "executeScript handler (raw + guarded maps)", "finding": "The raw `executeScript` handler validates `params.code` as a non-empty string, resolves `sandboxTab.resolveTabId()`, and calls `ports.executeScript(tabId, func, [params.code], { world: \"MAIN\" })`. The injected func is `(code: string): InPageScriptOutcome => { ... value = (0, eval)(code); ... }`; `InPageScriptOutcome = {ok:true, json:string} | {ok:false, error:string}` (lines 115-117); `coerceExecuteScriptOutcome` maps it to `{result:{value}}` / `{error}` sentinels and enforces `MAX_EXECUTE_SCRIPT_RESULT_CHARS = 1_000_000` (line 36). The guarded map re-exports it as `executeScript: guard(raw.executeScript)`.", "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/src/extension/page-actions.ts", "implication": "`evalIsolated` should be a near-verbatim copy of the raw `executeScript` handler with the ONLY difference being the world selection (omit options, or pass `{ world: \"ISOLATED\" }`). It must be added to BOTH the `raw` Record and the guarded return map (lines 550-568), and `executeScript` must stay byte-for-byte unchanged. The shared `InPageScriptOutcome`, `coerceExecuteScriptOutcome`, and the 1MB cap are module-local and reusable as-is." },
+    { "area": "ChromePorts.executeScript world handling", "finding": "The interface signature is `executeScript(tabId, func, args, options?: { readonly world?: \"ISOLATED\" | \"MAIN\" }): Promise<unknown>`. The real impl spreads `...(options?.world === undefined ? {} : { world: options.world })`, so omitting the world key omits `world` from the injected call and chrome.scripting defaults to ISOLATED. The doc comment explicitly says omitted == \"ISOLATED\", and every existing DOM-read handler already relies on that ISOLATED default; only `executeScript` passes \"MAIN\".", "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/src/extension/ports.ts", "implication": "No port change is needed. `evalIsolated` can simply omit the options arg (or pass `{world:'ISOLATED'}`) to run in the CSP-exempt isolated world. This keeps the entire change confined to actions.ts / types.ts / page-actions.ts / tool-catalog.ts + tests." },
+    { "area": "TOOL_CATALOG and listTools derivation", "finding": "TOOL_CATALOG is typed `Record<PageAction, ToolCatalogEntry>`; ToolCatalogEntry is `{description, inputSchema: JsonSchemaObject}` with `additionalProperties:false`. There is a shared `NO_ARGS` schema const and shared `SINCE_LIMIT_PROPERTIES`, `COORDINATE_PROPERTIES`, `MAX_CHARS_PROPERTY`. `listTools()` maps over `PAGE_ACTIONS` so the new tool is advertised automatically once the action + catalog entry exist. `executeScript`'s entry uses an inline `{code: {type:'string', description}}` schema with `required:[\"code\"]`.", "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/src/mcp/tool-catalog.ts", "implication": "Add an `evalIsolated` key to TOOL_CATALOG with a `required:[\"code\"]` string schema mirroring executeScript's. `listTools()` needs no change. tsc forces the entry because the Record is keyed by PageAction." },
+    { "area": "Hardcoded-count unit tests", "finding": "actions.unit.test.ts asserts the EXACT ordered tuple and `expect(PAGE_ACTIONS.length).toBe(17)`; tool-catalog.unit.test.ts has `it(\"advertises exactly seventeen tools\")` with `toHaveLength(17)` and a required-args test pinning `executeScript` -> `[\"code\"]`. page-actions.unit.test.ts `fakePorts()` defaults `executeScript` to `vi.fn(() => Promise.resolve(undefined))` and re-spies overrides; service-worker.unit.test.ts `fakePorts()` resolves `executeScript` to \"PAGE TEXT\". The executeScript handler test asserts the injected call is `(7, expect.any(Function), [\"document.title\"], { world: \"MAIN\" })`.", "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/src/protocol/actions.unit.test.ts", "implication": "Both the ordered-tuple array and the `17` length assertion must become 18 (with `evalIsolated` in the chosen position), and `toHaveLength(17)` -> 18. Add a new `evalIsolated` handler describe block mirroring the executeScript block (asserting no `{world:'MAIN'}` is passed). The fakePorts helpers need no change — they are generic." },
+    { "area": "Manifest permissions / content scripts", "finding": "manifest.json declares permissions `tabs, activeTab, scripting, storage, alarms, debugger` and `host_permissions: [\"<all_urls>\"]`. It declares TWO content_scripts: `page-script.js` at document_start with `\"world\": \"MAIN\"`, and `capture-forwarder.js` at document_start with NO `world` key (default ISOLATED). There is no existing world-specific general-eval content script.", "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/extension/manifest.json", "implication": "`scripting` + `<all_urls>` are already present, so `evalIsolated` needs no new permission and no new content-script declaration — it rides on the existing `chrome.scripting.executeScript` func-injection. The isolated world is already exercised (capture-forwarder + all DOM-read handlers). No manifest change required." },
+    { "area": "Stale action-count headers/docs", "finding": "Several doc headers already understate the current 17 actions and will go further stale: README.md line 48 says \"sixteen page actions\" and enumerates 16 (it even omits getTabState), line 169 says \"connected with 16 tools\"; src/mcp/server.ts line 2 says \"advertises the eight page actions\"; src/protocol/types.ts line 10 says \"the ten generic page actions\"; src/mcp/tool-catalog.ts line 4 says \"Two of the ten tools\". None are consistent.", "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/README.md", "implication": "Not mechanically enforced by tsc, so the add-action phase should update the README count and enumeration to 18 + include `evalIsolated`, and the manual e2e step; the stale server.ts/types.ts/tool-catalog.ts comment counts are deferred as residual debt." },
+    { "area": "Dispatch path (no relay/dispatch change)", "finding": "MCP `handleToolCall` gates on `isPageAction(toolName)` then `deps.client.sendCommand(toolName, args)` generically; the extension `createCommandDispatcher` gates on `isPageAction(action)` then `handlers[action](params)`. Both are name-generic and derive from PAGE_ACTIONS.", "filePath": "/Users/dimitrykatz/workspace/boky/tools/chrome-bridge/src/mcp/server.ts", "implication": "No relay, bridge-client, controller, or command-dispatch change is needed — the new action flows end-to-end once it is in PAGE_ACTIONS + handler map + catalog. This confines the implementation to the four source files plus tests." }
+  ],
+  "requiredMaterials": [],
+  "phases": [
+    {
+      "id": "add-eval-isolated-action",
+      "order": 0,
+      "name": "Add the evalIsolated page action end-to-end",
+      "goal": "Add a new `evalIsolated` page action (and its matching MCP tool) to tools/chrome-bridge that runs a caller-supplied JavaScript expression in the extension's isolated content-script world — which is exempt from the page's Content-Security-Policy — so DOM/text/location reads work on strict-CSP sites, while leaving `executeScript` byte-for-byte unchanged.",
+      "rationale": "Strict-CSP sites (LinkedIn, github.com, reddit.com) block the MAIN-world `executeScript` string eval with Chrome's CSP error, so DOM/text/location reads fail there. Running the same expression in the isolated content-script world (chrome.scripting's default target, exempt from the page CSP) sidesteps that block. This is a type-locked atomic unit: `PAGE_ACTIONS` is an `as const` tuple and the protocol types, the extension handler map, and the MCP `TOOL_CATALOG` are all typed `Record<PageAction, ...>`, so adding one member breaks tsc unless every consumer and the count-hardcoded tests are updated together — the surface edit and the test-count bump cannot be split.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/protocol/actions.ts",
+        "tools/chrome-bridge/src/protocol/types.ts",
+        "tools/chrome-bridge/src/extension/page-actions.ts",
+        "tools/chrome-bridge/src/mcp/tool-catalog.ts",
+        "tools/chrome-bridge/src/protocol/actions.unit.test.ts",
+        "tools/chrome-bridge/src/mcp/tool-catalog.unit.test.ts",
+        "tools/chrome-bridge/src/extension/page-actions.unit.test.ts",
+        "tools/chrome-bridge/README.md"
+      ],
+      "changes": [
+        "Insert `evalIsolated` into the `PAGE_ACTIONS` const tuple in protocol/actions.ts immediately after `executeScript`, making the tuple 18 members (currently 17).",
+        "In protocol/types.ts add `EvalIsolatedParams { readonly code: string }` and `EvalIsolatedResult { readonly value: unknown; readonly error?: string }` (mirroring `ExecuteScriptParams`/`ExecuteScriptResult`), plus `readonly evalIsolated` key entries in both `PageActionParams` and `PageActionResults`; the `Command` mapped type self-derives so no change is needed there.",
+        "In extension/page-actions.ts add a raw `evalIsolated` handler that validates `params.code` as a non-empty string, resolves `sandboxTab.resolveTabId()`, and calls `ports.executeScript(tabId, func, [params.code])` omitting the world option (or passing `{ world: 'ISOLATED' }`) so it runs in the CSP-exempt isolated world; reuse the shared `InPageScriptOutcome` injected func body, `coerceExecuteScriptOutcome`, and `MAX_EXECUTE_SCRIPT_RESULT_CHARS` (1MB) cap, returning `{ result: { value } }` or an `{ error }` sentinel on bad input / blocked / blocked-eval / serialisation failure / over-large result.",
+        "Register `evalIsolated: guard(raw.evalIsolated)` in the guarded handler map too, and leave the existing `executeScript` raw and guarded handlers byte-for-byte unchanged (still `{ world: 'MAIN' }`).",
+        "In mcp/tool-catalog.ts add an `evalIsolated` key to `TOOL_CATALOG` with an inline `{ code: { type: 'string', description } }` input schema, `additionalProperties: false`, and `required: ['code']`, mirroring the `executeScript` entry.",
+        "Update the count-hardcoded tests: in actions.unit.test.ts change the ordered-tuple `toEqual` array and the `expect(PAGE_ACTIONS.length).toBe(17)` assertion to 18; in tool-catalog.unit.test.ts change the 'exactly seventeen tools' description and `toHaveLength(17)` to 18 and add a `required.get('evalIsolated')` -> `['code']` assertion.",
+        "Add a new `evalIsolated` handler describe block in page-actions.unit.test.ts mirroring the `executeScript` block, asserting the injected call omits (or explicitly sets) the ISOLATED world rather than `{ world: 'MAIN' }`.",
+        "Update README.md action-count docs: change 'sixteen page actions' to eighteen, 'connected with 16 tools' to 18, enumerate `evalIsolated`, and add a numbered manual e2e checklist step for it."
+      ],
+      "boundedContext": "chrome-bridge protocol/action surface",
+      "layer": "infrastructure",
+      "blastRadius": "medium",
+      "inputs": [
+        "PAGE_ACTIONS 17-member as-const tuple",
+        "ExecuteScriptParams/ExecuteScriptResult protocol shape",
+        "raw + guarded executeScript handler",
+        "TOOL_CATALOG executeScript entry"
+      ],
+      "expectedResult": "A green `npm run verify:fast` (typecheck, eslint --max-warnings 0, unit tests) with `evalIsolated` present in `PAGE_ACTIONS`, the protocol types, both handler maps, and `TOOL_CATALOG`, and every count-hardcoded test asserting 18 instead of 17 — confirming the action is fully wired end-to-end and `listTools()` now advertises it.",
+      "dependsOn": [],
+      "rubric": [
+        {
+          "id": "isolated-world-selection",
+          "label": "Isolated-world selection is correct",
+          "ruleStatement": "evalIsolated must evaluate the caller's `code` in the extension's isolated content-script world, exempt from the page's CSP — not in the page's MAIN world. Scaled: 10 = a strict-CSP read works end-to-end and a unit test pins the world; 8 = evalIsolated omits `{ world: 'MAIN' }` and reuses the indirect-eval `(0, eval)` func; 7 = the `ports.executeScript` call carries no MAIN option and the code evaluates in global scope.",
+          "passCriteria": [
+            "In `tools/chrome-bridge/src/extension/page-actions.ts`, the raw `evalIsolated` handler calls `ports.executeScript(...)` with NO `{ world: 'MAIN' }` option — it either omits the options argument or passes `{ world: 'ISOLATED' }`.",
+            "The function handed to `ports.executeScript` is the same indirect-eval `(0, eval)(code)` closure `executeScript` uses (global scope, returning an `InPageScriptOutcome`), not a direct/eval-in-closure variant.",
+            "In `tools/chrome-bridge/src/extension/page-actions.unit.test.ts`, the new `evalIsolated` block asserts the `ports.executeScript` mock was called as `[7, expect.any(Function), [code]]` with no fourth `{ world: 'MAIN' }` argument.",
+            "The guarded return map exposes `evalIsolated: guard(raw.evalIsolated)`, so the action is reachable, not merely declared."
+          ],
+          "failureExamples": [
+            "A careful dev copies the `executeScript` handler to create `evalIsolated`, renames the action, but leaves the `{ world: 'MAIN' }` option on the `ports.executeScript` call — the build and every count test stay green, yet on LinkedIn/github.com it still throws the CSP-eval error, so the feature silently does not do its one job (and the no-MAIN assertion test was never written).",
+            "The dev drops `{ world: 'MAIN' }` but writes a direct `eval(code)` instead of `(0, eval)(code)`, so the expression runs in the injected closure's local scope and `location`/`window` reads behave differently from `executeScript` — an assumed equivalence that only surfaces on a strict-CSP site."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "type-locked-parity-surface",
+          "label": "Type-locked parity surface complete and consistent",
+          "ruleStatement": "`evalIsolated` is added to every `Record<PageAction,...>`-derived surface and to the protocol types so tsc, eslint, and unit tests are green. Scaled: 10 = the symbol is present in every mapped location and the pipeline is green with no `@ts-ignore`/`as`/`eslint-disable` escapes; 8 = present in `PAGE_ACTIONS`, the param/result interfaces, both handler maps, and `TOOL_CATALOG`; 7 = present everywhere and `npm run verify:fast` passes.",
+          "passCriteria": [
+            "`tools/chrome-bridge/src/protocol/actions.ts`: `evalIsolated` sits in `PAGE_ACTIONS` immediately after `executeScript`.",
+            "`tools/chrome-bridge/src/protocol/types.ts`: `EvalIsolatedParams` (`{ readonly code: string }`) and `EvalIsolatedResult` (`{ readonly value: unknown; readonly error?: string }`) exist as their own named interfaces (not aliases of `ExecuteScriptParams`/`ExecuteScriptResult`), and `evalIsolated` appears in both `PageActionParams` and `PageActionResults`.",
+            "`tools/chrome-bridge/src/extension/page-actions.ts`: `evalIsolated` appears in both the `raw` handler object and the final guarded `return` map.",
+            "`tools/chrome-bridge/src/mcp/tool-catalog.ts`: `TOOL_CATALOG` carries an `evalIsolated` key.",
+            "`cd tools/chrome-bridge && npm run verify:fast` (tsc --noEmit, eslint --max-warnings 0, vitest) exits green, with no `// @ts-ignore`, `as any`, or `// eslint-disable` added to force it."
+          ],
+          "failureExamples": [
+            "The dev gets it to compile by slotting `ExecuteScriptParams`/`ExecuteScriptResult` straight into the `evalIsolated` keys of `PageActionParams`/`PageActionResults` — everything is green, but evalIsolated's contract is now an alias of executeScript's, so a later change to executeScript's params silently changes evalIsolated (the surface is not its own symbol).",
+            "The dev wires the handler and catalog but skips `PageActionResults`, and gets tsc to pass only by casting one map or dropping a type — the pipeline is green on the surface but the parity promise is broken and the result type is not mapped."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "executeScript-untouched",
+          "label": "executeScript left byte-for-byte unchanged",
+          "ruleStatement": "The existing `executeScript` action is not regressed while adding evalIsolated — it still runs in the MAIN world, keeps the same serialisation/1MB contract, and its tests and catalog/README description are unmodified. Scaled: 10 = a `git diff` on `page-actions.ts` shows the `executeScript` path and every shared outcome helper untouched; 8 = no behavioral drift (same MAIN option, same error strings, same cap, same description); 7 = the MAIN world and 1MB cap are preserved and executeScript's tests stay green.",
+          "passCriteria": [
+            "`git diff` on `tools/chrome-bridge/src/extension/page-actions.ts` shows the `executeScript` raw handler still passes `{ world: 'MAIN' }` as the fourth `ports.executeScript` argument.",
+            "The `executeScript` unit-test block in `page-actions.unit.test.ts` still asserts `ports.executeScript` was called with `{ world: 'MAIN' }`, and `executeScript`'s description in `tool-catalog.ts` still says it runs in the MAIN world.",
+            "`git diff` shows `coerceExecuteScriptOutcome`, `InPageScriptOutcome`, and `MAX_EXECUTE_SCRIPT_RESULT_CHARS` are unmodified — they are executeScript's existing shared helpers.",
+            "The `executeScript` TOOL_CATALOG entry and the `executeScript` cases in `tool-catalog.unit.test.ts` are unchanged."
+          ],
+          "failureExamples": [
+            "To avoid duplicating the large indirect-eval closure, the dev extracts a shared named function used by both `executeScript` and `evalIsolated` and, while splitting it out, rewords the cap/undefined error to say 'evalIsolated result is too large' — so `executeScript`'s observable failure text drifts even though the deep behavior is identical, on a path the phase promised to leave byte-for-byte unchanged.",
+            "The dev 'tidies' the `executeScript` handler during the split (reorders lines, edits the CSP comment) intending no behavior change, but the diff is non-empty so the byte-for-byte requirement is unmet and the claim is false."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "outcome-contract-parity",
+          "label": "Result/error contract matches executeScript semantics",
+          "ruleStatement": "evalIsolated resolves to the same `{ result: { value } }` / `{ error }` contract as executeScript: the injected function returns an `InPageScriptOutcome`, it passes through `coerceExecuteScriptOutcome`, and an over-1MB, non-serialisable, CSP-blocked, or undefined result maps to `{ error }` (never a throw, never a raw page value). Scaled: 10 = identical contract and cap with unit coverage of the empty-code, no-envelope, and over-large paths; 8 = reuses `coerceExecuteScriptOutcome` and the same `(0, eval)` func; 7 = success returns `{ value }` and every failure path returns `{ error }`.",
+          "passCriteria": [
+            "In `page-actions.ts`, `evalIsolated` validates `code` with the same `nonEmptyString` check as `executeScript` (missing/empty code → `{ error }` before any `ports.executeScript` call).",
+            "`evalIsolated` returns `coerceExecuteScriptOutcome(outcome)` (the shared helper), so `{ ok:true, json }` → `{ result: { value } }`, `{ ok:false, error }` → `{ error }`, a missing/malformed envelope → `{ error }`, and JSON over `MAX_EXECUTE_SCRIPT_RESULT_CHARS` is cut off with the same error.",
+            "In `page-actions.unit.test.ts`, the `evalIsolated` block covers a value result `{ result: { value } }`, an ok:false error passthrough, the no-envelope/CSP error, and the over-large cap error.",
+            "The injected function returns `{ ok, json }` / `{ ok:false, error }` on the success path (never `undefined` or a raw page value)."
+          ],
+          "failureExamples": [
+            "The dev returns `{ result: { value: raw } }` straight from the injected call without `coerceExecuteScriptOutcome`, so a >1MB result, a DOM node, or a circular value reaches the wire instead of an `{ error }` — the JSON-serialisability and 1MB cap are silently lost for the new action.",
+            "The dev reuses the coercion but drops the `nonEmptyString(code)` guard (assuming 'the copy already checked it'), so an empty `{ code: '' }` call is injected into the page instead of returning the clean `{ error }` sentinel — a boundary assumed because the source handler happened to validate."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "count-hardcoded-docs-tests",
+          "label": "Count-hardcoded tests and README counts updated",
+          "ruleStatement": "Every hardcoded action/tool count (17, 16, 'sixteen', 'seventeen') and the action enumeration is updated to 18 and to include `evalIsolated`, so no stale count survives and the manual e2e step exercises the new action. Scaled: 10 = no stale count anywhere in tests or README and the manual e2e step proves evalIsolated on a strict-CSP site; 8 = the count tests and README numbers say 18 and the enumeration/e2e step include evalIsolated; 7 = the two unit-test files and the README agree on 18.",
+          "passCriteria": [
+            "`tools/chrome-bridge/src/protocol/actions.unit.test.ts`: the ordered-tuple literal includes `'evalIsolated'` after `'executeScript'` and `expect(PAGE_ACTIONS.length).toBe(18)`.",
+            "`tools/chrome-bridge/src/mcp/tool-catalog.unit.test.ts`: `expect(listTools()).toHaveLength(18)`, the 'advertises exactly seventeen tools' test now says eighteen, and `required.get('evalIsolated')` equals `['code']`.",
+            "`tools/chrome-bridge/README.md`: 'sixteen page actions' → 'eighteen page actions', the enumerated tool list includes `evalIsolated`, and 'connected with 16 tools' → '18 tools'.",
+            "`README.md` gains a manual e2e step running `evalIsolated` with `{ code: 'document.title' }` on a strict-CSP site and confirms a `{ value: ... }` result instead of the CSP-eval error.",
+            "`grep -rn 'sixteen|seventeen|17|16 tools' tools/chrome-bridge --include=*.ts --include=*.md` returns no stale count."
+          ],
+          "failureExamples": [
+            "The dev updates the two count tests and the README's 'sixteen page actions' sentence but misses the manual-check line 'connected with 16 tools,' so the README is internally inconsistent — one place says 18, the manual step still expects 16.",
+            "The dev bumps `.length` to 18 and the README numbers but forgets to append `evalIsolated` to the ordered-tuple literal in `actions.unit.test.ts`, so the exact-array assertion fails only at test time — a gap the length bump alone never catches."
+          ],
+          "minScore": 7
+        }
+      ],
+      "healerHint": "The build and every count test stay green while evalIsolated still runs in MAIN (the copied executeScript handler kept `{ world: 'MAIN' }`), so on LinkedIn it still throws the CSP-eval error — drop the `{ world: 'MAIN' }` option from evalIsolated's `ports.executeScript` call (ISOLATED is the default) so it actually bypasses CSP."
+    },
+    {
+      "id": "live-verify-eval-isolated",
+      "order": 1,
+      "name": "Live-verify evalIsolated on a strict-CSP site",
+      "goal": "In a real Chrome session with the extension loaded, verify `evalIsolated` returns a structured value on a strict-CSP site (github.com and reddit.com, plus LinkedIn if signed in) where the same expression via `executeScript` returns Chrome's verbatim CSP eval error, proving the CSP blocker is actually resolved rather than merely typed.",
+      "rationale": "This change edits the loaded extension, and the core premise — that a string `eval` inside an isolated-world func is exempt from the page CSP — is asserted but not yet measured. The live check distinguishes a real fix from a merely-typed one, and must also account for a stale service worker (which makes the new action time out rather than error). If the check can't be run, the horizon ends `blocked`/`MANUAL_CHROME_CHECK_PENDING` with the reason rather than claiming success.",
+      "filesAffected": [
+        "tools/chrome-bridge/extension/manifest.json",
+        "tools/chrome-bridge/README.md"
+      ],
+      "changes": [
+        "Remove and re-add the freshly built unpacked extension (or restart Chrome) so the new service worker is loaded — a stale SW makes the new action time out instead of erroring.",
+        "On github.com (and reddit.com, plus LinkedIn if signed in), call `evalIsolated` with an expression such as `document.querySelector('h1')?.innerText`, `location.href`, or `JSON.stringify([...document.querySelectorAll('a')].map(a => a.href))` and confirm it returns the value.",
+        "Run the same expression through `executeScript` on the same site and confirm it returns Chrome's verbatim CSP eval error, demonstrating the isolated-world exemption is the differentiator.",
+        "Record the outcome in the README manual e2e checklist (or the horizon verify record); if the check couldn't be performed, mark the horizon `blocked`/`MANUAL_CHROME_CHECK_PENDING` and state the reason."
+      ],
+      "boundedContext": "chrome-bridge live verification",
+      "layer": "cross-cutting",
+      "blastRadius": "small",
+      "inputs": [
+        "Loaded extension in a real Chrome tab",
+        "github.com and reddit.com strict-CSP tabs",
+        "evalIsolated action from the add phase"
+      ],
+      "expectedResult": "A recorded live-Chrome verification showing `evalIsolated` returns a structured DOM/text/location value on a strict-CSP site where `executeScript` returns the CSP eval error; if it wasn't run, the horizon is marked `blocked`/`MANUAL_CHROME_CHECK_PENDING` with the reason.",
+      "dependsOn": ["add-eval-isolated-action"],
+      "rubric": [
+        {
+          "id": "real-live-chrome-provenance",
+          "label": "Real live-chrome MCP provenance",
+          "ruleStatement": "Scale: 10 means the verdict unambiguously proves it was a live chrome-bridge MCP round trip against the running extension; 8 is the expected score for a competent, complete record; minScore is the ACCEPTABLE bar, not perfect. The verdict must show its evidence came from a real chrome-bridge MCP call against the extension in Chrome — never a unit test and never the Playwright standalone REPL.",
+          "passCriteria": [
+            "Open the recorded verdict and confirm it names the chrome-bridge MCP actions used (evalIsolated and executeScript) and the strict-CSP host (github.com or reddit.com) — not a vitest test name and not a `debug:standalone` REPL command.",
+            "Confirm the quoted result is anchored to the live sandbox tab (id/url/title from getTabState or the tab state shown), so it is attributable to a real browser tab, not a Playwright context or a mock page.",
+            "Confirm the values appear as captured tool return values (structured JSON/text), not hand-typed expected strings that were merely written into the record."
+          ],
+          "failureExamples": [
+            "The 'verified' verdict cites a passing vitest unit test of the evalIsolated action as its only proof.",
+            "Plausible-impl failure: the executor ran the check through the Playwright standalone REPL (`debug:standalone`) against localhost:5175, so the page was never a strict-CSP site and the result proves nothing about CSP — yet the record calls it verified.",
+            "The record lists a result for 'github.com' but names no MCP tool and shows no sandbox-tab state, so nothing ties the value to a real live call."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "same-site-isolated-exemption",
+          "label": "Same-site isolated-world exemption demonstrated",
+          "ruleStatement": "Scale: 10 means both halves (the isolated value AND the executeScript CSP error) are captured verbatim on the same URL with the same expression; 8 is the expected score for a competent record; minScore is the ACCEPTABLE bar. The verdict must demonstrate the differentiator mechanically: evalIsolated returns a structured value and executeScript returns Chrome's verbatim CSP eval error, on the SAME strict-CSP site and SAME expression.",
+          "passCriteria": [
+            "In the record, confirm evalIsolated returned a real structured value (an h1 innerText, location.href, or an array of link hrefs) for the given expression — not undefined or an empty result.",
+            "Confirm the SAME expression run through executeScript on the SAME URL returned Chrome's verbatim CSP eval error string (the 'Refused to evaluate a string as JavaScript because unsafe-eval is not an allowed source' text) — not a timeout, an empty result, or a paraphrased note.",
+            "Confirm both halves are recorded against the same site/tab state and the same expression, so the only differing variable is the execution world (ISOLATED vs MAIN)."
+          ],
+          "failureExamples": [
+            "The record shows evalIsolated returning a value, but the executeScript half is only a browser-console screenshot from a different site (or a paraphrase from memory), so the two halves are not on the same strict-CSP site.",
+            "Plausible-impl failure: the executor ran both calls on a non-strict page (Chrome new-tab, localhost dev URL) where executeScript also succeeds, then labeled the site 'strict-CSP' — the exemption is asserted, not demonstrated.",
+            "The record quotes the expected CSP error text from the docs rather than the exact string executeScript actually returned."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "fresh-extension-load",
+          "label": "Fresh extension load, stale-SW excluded",
+          "ruleStatement": "Scale: 10 means the record documents a fresh unpacked-extension reload (or Chrome restart) immediately before the check and that evalIsolated actually responded; 8 is the expected score; minScore is the ACCEPTABLE bar. The record must rule out a stale service worker, which makes the unknown action time out (30s) rather than error.",
+          "passCriteria": [
+            "Confirm the record states the unpacked extension was removed and re-added (or Chrome restarted) right before the isolation check, and that the reloaded SW/extension is the one containing the evalIsolated action.",
+            "Confirm evalIsolated returned a value rather than timing out; if a 30s timeout was observed, the record distinguishes that timeout from the CSP error and shows the reload-and-recheck succeeded.",
+            "Confirm the record treats timeout and CSP error as distinct phenomena and attributes each to the correct cause."
+          ],
+          "failureExamples": [
+            "Plausible-impl failure: the executor ran `pnpm build`, assumed Chrome auto-reloaded the extension, skipped the remove/re-add, ran evalIsolated, got a 30s timeout, and recorded that timeout as 'the CSP blocked it' — stamping verified when the action never even dispatched.",
+            "The record reloads only the active tab (which does nothing to the service worker) yet claims a 'fresh' extension while evalIsolated times out.",
+            "The record contains no statement about SW load state, so a stale-SW timeout is indistinguishable from a real CSP result."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "truthful-verdict-and-state",
+          "label": "Truthful verdict and horizon state",
+          "ruleStatement": "Scale: 10 means the horizon state exactly reflects whether the live check was actually completed; 8 is the expected score; minScore is the ACCEPTABLE bar. If the live check did not run (or ran incompletely), the record must state the reason and the horizon must stay MANUAL_CHROME_CHECK_PENDING — never marked verified without the complete live record.",
+          "passCriteria": [
+            "Confirm the recorded horizon state is either verified (with the complete live record) or MANUAL_CHROME_CHECK_PENDING with an explicit stated reason; it is never 'verified' without that record.",
+            "If a listed site was required but not checked (e.g. LinkedIn not signed in), confirm the record either completes it or explicitly scopes the verdict to only the sites actually checked.",
+            "Confirm the wording distinguishes 'verified' from 'could not be verified' and does not overstate what the live check proved."
+          ],
+          "failureExamples": [
+            "The record is marked 'verified' but only the evalIsolated half was captured and the executeScript CSP-error half was never shown, so the differentiator was never demonstrated.",
+            "Plausible-impl failure: LinkedIn was not signed in and was silently dropped, yet the verdict says the whole horizon (which lists LinkedIn) is 'verified' — a scope overstatement.",
+            "Chrome was unavailable or the extension could not be loaded, but the record says 'verified' instead of MANUAL_CHROME_CHECK_PENDING with the reason."
+          ],
+          "minScore": 7
+        }
+      ],
+      "healerHint": "Most often the phase fails when verified is stamped with only the evalIsolated value (or a stale-SW timeout is passed off as the CSP error), so the differentiator stays unproven — fastest fix is to remove+re-add the extension, then on the same github.com tab paste BOTH tool return values (the evalIsolated value AND executeScript's verbatim CSP error) into the record before marking it verified."
+    }
+  ],
+  "successCriteria": [
+    "The chrome-bridge MCP advertises evalIsolated in listTools (now 18 tools) and one call on a strict-CSP site returns a structured DOM/text/location value where the same expression via executeScript returns Chrome's verbatim CSP eval error. It runs in the isolated content-script world (exempt from page CSP), reuses executeScript's result/error contract and 1MB cap, and leaves executeScript byte-for-byte unchanged. tsc --noEmit, eslint --max-warnings 0, and the package's vitest pass, and the action-catalog parity surface + count-hardcoded tests + README counts are updated to 18. Verified in real Chrome via the chrome-bridge MCP that the isolated-world read works on strict-CSP (github/reddit, LinkedIn if signed in); until that live check passes, the horizon ends blocked/MANUAL_CHROME_CHECK_PENDING.",
+    "Add the evalIsolated page action end-to-end: A green `npm run verify:fast` (typecheck, eslint --max-warnings 0, unit tests) with `evalIsolated` present in `PAGE_ACTIONS`, the protocol types, both handler maps, and `TOOL_CATALOG`, and every count-hardcoded test asserting 18 instead of 17 — confirming the action is fully wired end-to-end and `listTools()` now advertises it.",
+    "Live-verify evalIsolated on a strict-CSP site: A recorded live-Chrome verification showing `evalIsolated` returns a structured DOM/text/location value on a strict-CSP site where `executeScript` returns the CSP eval error; if it wasn't run, the horizon is marked `blocked`/`MANUAL_CHROME_CHECK_PENDING` with the reason."
+  ],
+  "deferred": [
+    "scroll primitive (scrollPage/scrollBy/scrollToElement) — gap #4; intentionally deferred to the next horizon.",
+    "wait/settle (waitForSelector/waitForNavigation/network-idle) — gap #3; intentionally deferred to the next horizon.",
+    "response bodies for readNetworkRequests (text/json bodies) — gap #5; network capture is unchanged this horizon.",
+    "click-by-text / clickElement({text}) / getByRole + a fuller event sequence — gap #6; clickElement stays CSS-selector-only.",
+    "findElement-returns-refs + the never-landed DOM page-model snapshot (rows/refs/bounding boxes) — gap #2; findElement still returns only a count.",
+    "full-page / element-clipped screenshots (captureTab({fullPage:true})) — gap #7; captureTab stays viewport-only.",
+    "CDP Runtime.evaluate pivot / persistent CDP session to read page-script globals on strict-CSP sites — out of scope; the CSP fix is via the isolated world, and evalIsolated cannot reach page-side JS globals (a known ceiling, not a bug).",
+    "modifying or removing the existing MAIN-world executeScript, or converting it to a caller-selectable world param — explicitly kept unchanged.",
+    "the dead active-tab surface cleanup (queryActiveTab / captureVisibleTab / activeTab permission, delete-vs-keep) — a separate deferred concern; evalIsolated targets the sandbox tab like every other action.",
+    "new manifest permissions, new chrome port methods, or any new browser capability — not needed; the fix uses the existing scripting + <all_urls> + func-injection substrate.",
+    "Refresh the stale action-count comment headers in src/mcp/server.ts, src/protocol/types.ts, src/mcp/tool-catalog.ts — already wrong today (actual count 17, this change makes 18), not tsc-enforced, not needed for evalIsolated's correctness; deferred to a docs-cleanup pass (YAGNI)."
+  ],
+  "revision": 0
+}

@@ -1,0 +1,616 @@
+{
+  "task": "Horizon 13 of the agent-agnostic-browser-bridge project: add full-page (CDP captureBeyondViewport) and single-element (CDP clip rect, element addressed by a findElement CSS-locator ref) screenshots to the standalone tools/chrome-bridge tool, extending the existing captureTab action in place across the parity surface with a flat screenshot result-size guard, closed by a mandatory live-Chrome head-to-head verification.",
+  "analysis": {
+    "objective": "Ship one more browser-control capability in the standalone tools/chrome-bridge tool \u2014 full-page (beyond-viewport) and single-element (CSS-locator-addressed) screenshots of the dedicated unfocused sandbox tab \u2014 as a single atomic change across the established parity surface, closed by a mandatory live-Chrome verification.",
+    "successDefinition": "Done means all of the following hold: (1) one atomic change extends the screenshot capability so a caller can request (a) a capture of the entire scrollable page beyond the current viewport and (b) a capture of a single element addressed by the same CSS-locator ref shape findElement returns, with the existing viewport-only behaviour preserved as the default; (2) the change lands consistently across every surface every recent horizon touched \u2014 PAGE_ACTIONS in protocol/actions.ts, the per-action Params/Result interfaces in protocol/types.ts, both Record<PageAction, ...> mapped types, the raw + guarded handler maps in extension/page-actions.ts, the TOOL_CATALOG entry in mcp/tool-catalog.ts, every count and ordered-list unit test, and the README prose/enumeration/count/manual-e2e step \u2014 with no drift (a missing consumer is a tsc error); (3) failure shapes are explicit and non-throwing where the precedent is non-throwing: element selector matches nothing or has zero/na box, relay/tab unavailable, and an over-large image are each defined result outcomes, not unhandled hangs or crashes; (4) the returned image stays within MCP result-size limits via a documented dimension/byte guard (viewport PNG was already ~275KB per h4), and the result carries enough dimension metadata to be cross-checked; (5) no new manifest permission is added (debugger is already granted); (6) npm run verify for the tools/chrome-bridge package is green (tsc --noEmit, eslint --max-warnings 0, vitest) and boky own extension/bridge/verify pipeline is untouched; (7) a MANDATORY live head-to-head runs in a fresh post-rebuild MCP session against a real scrollable page and against a real large element, cross-checked against a CDP evaluatePage measurement per the horizon-12 precedent \u2014 full-page image height tracks the measured document scroll height and the element image dimensions track the measured getBoundingClientRect \u2014 and is recorded as a dated Verified README block; if the deliberately-unfocused sandbox tab cannot paint content outside the viewport, that is captured as a discovery and triggers REPLAN, never a silent partial pass.",
+    "assumptions": [
+      "The slice is delivered by extending the existing captureTab capability in place \u2014 CaptureTabParams gains optional, mutually-exclusive fullPage and element-selector fields and CaptureTabResult gains dimension/clipped metadata \u2014 keeping PAGE_ACTIONS at 20, mirroring the h12 decision that a result/param shape may change in place rather than via a new action; the roadmap may instead choose to add discrete action(s), but either way it is one atomic parity-surface change.",
+      "The element is addressed by the same self-contained CSS-locator string findElement/clickElement already accept (h12 decision) \u2014 never a CDP backend node id, opaque handle, XPath, or index into a prior result set.",
+      "Full-page capture uses CDP Page.captureScreenshot({ captureBeyondViewport: true }) and element capture uses { clip: { x, y, width, height, scale } }, with the element rect measured via the post-h9 read path (evaluatePage / Runtime.evaluate getBoundingClientRect) \u2014 both stay within the h6 decision that CDP is used only for the captureVisibleTab-family gap via Page.captureScreenshot.",
+      "The capture reuses per-command withDebuggerSession attach/detach (15s cap) with no persistent CDP session, consistent with the h10 scroll decision.",
+      "The result is still returned as a data:image/png;base64,... dataUrl surfaced to MCP as an image content block, as captureTab does today.",
+      "Verification is Claude-Code-only (h4 decision), live signed-in Chrome, in a fresh MCP session started after the extension rebuild + reload.",
+      "h12 established the unfocused sandbox tab returns real visible text and h9/h10 got real layout reads from it via CDP; whether it can composite/paint pixels outside the viewport for a beyond-viewport screenshot is unproven and is the horizon central open risk."
+    ],
+    "risks": [
+      "The deliberately-unfocused sandbox tab suspends its render pass (h10: no paint, no scroll events, no IntersectionObserver); captureBeyondViewport: true may return a blank, viewport-clipped, or short image, or hang \u2014 which would make briefly focus/render the sandbox tab a prerequisite capability and force a REPLAN of this horizon.",
+      "A full-page PNG of a tall page can be multiple MB of base64 \u2014 far past the ~275KB viewport measurement and past the MCP result-size limits observed in h4 \u2014 so without a dimension/byte cap the capability ships an unusable payload; where that cap lives and what it does (downscale, clip, error) is a decision the roadmap must make.",
+      "Large-image CDP encode may exceed the 15s withDebuggerSession cap, reproducing the h10 hang + orphaned-debugger-attachment failure that nav/reloadTab did not clear.",
+      "Element capture needs a bbox-measurement round-trip before the capture; a per-command detach between the measure session and the capture session can race scroll position or lifecycle state, yielding a clipped or offset image.",
+      "captureBeyondViewport interacts with device-scale-factor / emulation overrides \u2014 the returned image may not match measured CSS-pixel dimensions, weakening the mandatory cross-check.",
+      "Live verification is repeatedly blocked in this project by relay-down or a frozen MCP tool catalog (h9, h11, h12); the horizon may again end MANUAL_CHROME_CHECK_PENDING and need a --retry in a later fresh session.",
+      "An element selector that matches nothing, matches a display:none / zero-area node, or matches an off-screen node needs a defined outcome; picking error vs { captured: false } inconsistently with the codebase existing non-throwing precedents is a latent inconsistency."
+    ],
+    "domainShape": "technical",
+    "domainShapeReason": "The work is browser-automation machinery \u2014 extending a Chrome extension CDP screenshot path and its MCP/protocol parity surface \u2014 with no business entities, rules, or workflows a domain expert would recognize.",
+    "outOfScope": [
+      "Capturing network response bodies for text/JSON (blocker #4) \u2014 a separate deferred capability the user explicitly did not pick for horizon 13.",
+      "clickElement / clickAt by visible text or ARIA role and a fuller synthetic pointer/keyboard event sequence (blocker #5) \u2014 a separate deferred slice, unrelated to screenshot capture.",
+      "Reviving the horizon-5 DOM page-model / bounding-box snapshot action \u2014 planned-but-never-executed and possibly superseded by h12 findElement; not this horizon's slice.",
+      "Deleting the dead active-tab surface (queryActiveTab / captureVisibleTab / NO_ACTIVE_TAB / redundant activeTab permission) \u2014 the brief says keep horizon 13 to one deliverable and give that cleanup its own horizon.",
+      "Adding a general focus / briefly render the sandbox tab capability \u2014 only becomes this horizon's work if full-page capture is proven impossible in the unfocused tab, which is a REPLAN trigger, not planned scope.",
+      "Verifying the capability from Gemini CLI, Codex CLI, or Cursor \u2014 the h4 decision binds all hand-verification to Claude Code for the life of the project.",
+      "PDF export, JPEG/quality knobs, or other CDP capture formats/options beyond png + captureBeyondViewport + clip \u2014 not asked for; format proliferation is speculative.",
+      "A scroll-and-stitch client-side full-page fallback if captureBeyondViewport fails \u2014 a different mechanism, its own replanned approach, not part of this slice.",
+      "Migrating boky's own extension/relay/MCP onto the chrome-bridge tool \u2014 the vision's h1 decision forbids it.",
+      "Changing the MCP result-rendering layer to add a generic size guard for all tools \u2014 any size bound added here is scoped to the screenshot result; a cross-tool cap is a separate open question."
+    ],
+    "ubiquitousLanguage": [
+      {
+        "term": "parity surface",
+        "meaning": "the coupled set PAGE_ACTIONS + both Record<PageAction,\u2026> maps + Params/Result types + raw/guarded handler maps + TOOL_CATALOG + count/ordered-list tests + README that every new/changed action must land across at once"
+      },
+      {
+        "term": "captureTab",
+        "meaning": "the existing screenshot page action, today viewport-only via CDP Page.captureScreenshot"
+      },
+      {
+        "term": "sandbox tab",
+        "meaning": "the dedicated deliberately-unfocused Chrome tab every page action targets"
+      },
+      {
+        "term": "captureBeyondViewport",
+        "meaning": "the CDP Page.captureScreenshot option that renders the full scrollable page; clip is the option that captures one rect"
+      },
+      {
+        "term": "withDebuggerSession",
+        "meaning": "the per-command chrome.debugger attach/detach helper, 15s cap, no persistent session"
+      },
+      {
+        "term": "element ref",
+        "meaning": "the self-contained CSS-locator string findElement returns and clickElement accepts"
+      },
+      {
+        "term": "render-pass suspension",
+        "meaning": "the unfocused sandbox tab running no paint / scroll-event / IntersectionObserver pass (h10 finding)"
+      },
+      {
+        "term": "result-size guard",
+        "meaning": "a base64/dimension cap on the returned image against MCP result limits; viewport PNG ~275KB is the baseline"
+      }
+    ]
+  },
+  "discoveryFindings": [
+    {
+      "area": "captureTab params/result",
+      "finding": "CaptureTabParams is `{ readonly _?: never }` (no args) and CaptureTabResult is `{ readonly dataUrl: string }` (a data:image/png;base64,... URL), in src/protocol/types.ts. Both are registered in the PageActionParams and PageActionResults maps (lines ~192 and ~426).",
+      "filePath": "tools/chrome-bridge/src/protocol/types.ts",
+      "implication": "An element/full-page screenshot that reuses captureTab's shape adds optional fields to CaptureTabParams and dimension metadata to CaptureTabResult; a separate action needs its own Params/Result interfaces plus entries in both keyed maps."
+    },
+    {
+      "area": "captureTab handler",
+      "finding": "In src/extension/page-actions.ts the raw handler is `captureTab: async () => { const tabId = await sandboxTab.resolveTabId(); const dataUrl = await captureDebugger.captureScreenshot(tabId); return { result: { dataUrl } }; }` wrapped as `captureTab: guard(raw.captureTab)`. It ignores params and does no size/validation guard. A top-of-file comment says captureTab is deliberately uncapped and presentation of a large PNG is 'the MCP server's decision (a later phase)'.",
+      "filePath": "tools/chrome-bridge/src/extension/page-actions.ts",
+      "implication": "Adding clip/element support means the raw handler must start reading and validating params (currently no param arg); pageActionHandlers already receives `captureDebugger: DebuggerPorts` so a new CDP method is wired through that existing port object."
+    },
+    {
+      "area": "captureTab tool catalog",
+      "finding": "TOOL_CATALOG.captureTab in src/mcp/tool-catalog.ts is `{ description: 'Capture a PNG screenshot of the visible area of the active tab. Takes no arguments.', inputSchema: NO_ARGS }` where NO_ARGS is `{ type:'object', properties:{}, additionalProperties:false }` (no required). listTools() derives the advertised list and order from PAGE_ACTIONS, not Object.keys(TOOL_CATALOG).",
+      "filePath": "tools/chrome-bridge/src/mcp/tool-catalog.ts",
+      "implication": "Changing captureTab args requires replacing NO_ARGS with a real schema; tool-catalog.unit.test.ts asserts captureTab has empty properties and undefined required (the 'ping, captureTab, getTabState empty properties' test) which must change."
+    },
+    {
+      "area": "MCP image block",
+      "finding": "src/mcp/server.ts handleToolCall special-cases `if (toolName === 'captureTab') return imageResult(stripDataUrlPrefix(readDataUrl(response.result)))`. imageResult returns `{ content: [{ type:'image', data: base64Png, mimeType:'image/png' }] }`. Every other tool returns textResult(JSON.stringify(result,null,2)). Errors -> textResult(..., true) with isError:true. No size/base64 guard here.",
+      "filePath": "tools/chrome-bridge/src/mcp/server.ts",
+      "implication": "If element-screenshot is a new action name it must be added to this `=== 'captureTab'` check (or the check generalised to a set) to surface as an image; a shape-only extension of captureTab needs no server.ts change unless a size guard is added here."
+    },
+    {
+      "area": "withDebuggerSession",
+      "finding": "Signature `withDebuggerSession<T>(tabId: number, label: 'capturing' | 'evaluating' | 'scrolling', run: () => Promise<T>, timeoutMs = CDP_COMMAND_TIMEOUT_MS): Promise<T>`. The label union is a closed 3-member string-literal union. CDP_COMMAND_TIMEOUT_MS = 15000. It attaches chrome.debugger '1.3', races run() vs a detach rejection and a timeout, and in finally clears the timeout, deletes the inFlight entry, then detaches (catch noop). One chrome.debugger.onDetach listener registered at construction.",
+      "filePath": "tools/chrome-bridge/src/extension/debugger-ports.ts",
+      "implication": "A new CDP operation (element-rect read, full-page or clip screenshot) reuses an existing label or adds a new label literal to this union and its test; the 15s cap and attach/detach lifecycle come for free."
+    },
+    {
+      "area": "Page.captureScreenshot invocation",
+      "finding": "In screenshotTab: `await chrome.debugger.sendCommand({tabId}, 'Page.captureScreenshot', { format: 'png' })`. Only format:'png' is passed - NO clip, NO captureBeyondViewport, NO quality/fromSurface. Reply parsed by readScreenshotBase64 (reads result.data, rejects on missing/empty), wrapped as `data:image/png;base64,${base64}` at the port layer. debugger-ports.unit.test.ts pins the call: `toHaveBeenCalledWith({tabId:7},'Page.captureScreenshot',{format:'png'})`.",
+      "filePath": "tools/chrome-bridge/src/extension/debugger-ports.ts",
+      "implication": "Full-page = add captureBeyondViewport:true; element = add clip:{x,y,width,height,scale}. DebuggerPorts.captureScreenshot(tabId): Promise<string> needs an optional options arg. The pinned unit-test assertion must be updated in lockstep."
+    },
+    {
+      "area": "CDP evaluate read path",
+      "finding": "DebuggerPorts.evaluate(tabId, expression): Promise<InPageScriptOutcome> in debugger-ports.ts calls Runtime.evaluate `{ expression, returnByValue:true, awaitPromise:true }` mapped via cdpEvalOutcome to {ok:true,json}/{ok:false,error}. The port already does internal geometry reads: private readScrollMetrics evaluates `({ scrollY, scrollHeight: document.documentElement.scrollHeight, innerHeight, innerWidth })` via the same shape.",
+      "filePath": "tools/chrome-bridge/src/extension/debugger-ports.ts",
+      "implication": "Measuring document.scrollingElement.scrollHeight or an element getBoundingClientRect() is directly doable - reuse public evaluate() or add a private helper mirroring readScrollMetrics/parseScrollMetrics. No new CDP domain. ref->rect resolution runs as a Runtime.evaluate returning the rect JSON."
+    },
+    {
+      "area": "h12 findElement ref scheme",
+      "finding": "The ref CSS-locator is generated inside the ISOLATED-world injected function in raw.findElement (page-actions.ts ~line 498) by buildRef(el, depth): prefers `#${CSS.escape(id)}` when unique, else recurses up building `${buildRef(parent)} > ${tag}:nth-of-type(${index})`, capped at MAX_REF_DEPTH = 8. clickElement consumes any selector via document.querySelector(selector) then el.click() - no ref special-casing. findElement re-feeds a ref through document.querySelectorAll(selector).",
+      "filePath": "tools/chrome-bridge/src/extension/page-actions.ts",
+      "implication": "Element-screenshot-by-ref can resolve the rect with document.querySelector(ref).getBoundingClientRect() via CDP evaluate exactly as clickElement/findElement do - no new ref format or handle registry. FindElementMatch.ref type is in types.ts."
+    },
+    {
+      "area": "parity surface - change existing action vs add new action",
+      "finding": "Single source of truth is PAGE_ACTIONS tuple in src/protocol/actions.ts (currently 20 entries, ending ...scrollPage, waitFor). Consumers typed Record<PageAction,...> so tsc enforces completeness: types.ts (Params interface, Result interface, PageActionParams map, PageActionResults map); page-actions.ts (raw handler + guarded map); tool-catalog.ts (TOOL_CATALOG entry). listTools/command-dispatch.ts/guards.ts/server.ts are driven generically off PAGE_ACTIONS/isPageAction and need NO per-action edit. Changing only a Result/Params SHAPE of an existing action touches just types.ts (1 interface), page-actions.ts (1 handler body), tool-catalog.ts (description/schema) - NOT PAGE_ACTIONS, not command-dispatch.ts, not the count tests.",
+      "filePath": "tools/chrome-bridge/src/protocol/actions.ts",
+      "implication": "Folding into captureTab: no PAGE_ACTIONS/count-test churn (stays 20). New action: add to tuple + ordered-list test in actions.unit.test.ts + the .toBe(20)/toHaveLength(20) assertions + new Params/Result/maps/handler/catalog entry + README 'twenty'/'20 tools' prose."
+    },
+    {
+      "area": "hardcoded action-count / ordered-list tests",
+      "finding": "src/protocol/actions.unit.test.ts: `expect([...PAGE_ACTIONS]).toEqual([...20 names...])` and `expect(PAGE_ACTIONS.length).toBe(20)`. src/mcp/tool-catalog.unit.test.ts: `Object.keys(TOOL_CATALOG).sort() toEqual [...PAGE_ACTIONS].sort()`, `listTools() toHaveLength(20)` ('advertises exactly twenty tools'), `names toEqual [...PAGE_ACTIONS]`, a per-action required map assertion, and the 'ping, captureTab, getTabState empty properties' test. command-dispatch.unit.test.ts iterates PAGE_ACTIONS generically (no count literal). No other file hardcodes the count.",
+      "filePath": "tools/chrome-bridge/src/protocol/actions.unit.test.ts",
+      "implication": "New action = edit exactly these two test files' literal lists + three '20' literals. Shape-only change to captureTab = update only captureTab-specific assertions in tool-catalog.unit.test.ts (empty-properties test, required-map)."
+    },
+    {
+      "area": "manifest permissions",
+      "finding": "tools/chrome-bridge/extension/manifest.json permissions: tabs, activeTab, scripting, storage, alarms, debugger; host_permissions <all_urls>; two content scripts. debugger is already present (added h06 phase 0). README step 13's Verified block asserts `diff extension/manifest.json dist/extension/manifest.json` is empty.",
+      "filePath": "tools/chrome-bridge/extension/manifest.json",
+      "implication": "Element/clip/full-page screenshot needs NO new permission - debugger already covers Page.captureScreenshot with clip/captureBeyondViewport and Runtime.evaluate. 'Any new manifest permission' is a red flag the roadmaps require explicit justification for."
+    },
+    {
+      "area": "README action-list / count / e2e occurrences",
+      "finding": "README.md lists the 20 actions by name twice: MCP section (~lines 48-52) prefaced 'the twenty page actions', and service-worker section (~lines 410-414). 'connected with 20 tools' at line 232 (manual e2e step 3). captureTab e2e step 5: 'Call captureTab - a PNG screenshot comes back as an image block.' Dated Verified blocks: horizon 09 evaluatePage (step 12), horizon 12 findElement (step 13), horizon 10 scrollPage (step 14). A dedicated prose paragraph per feature (evaluatePage ~74, findElement ~81, scrollPage ~102, waitFor ~121).",
+      "filePath": "tools/chrome-bridge/README.md",
+      "implication": "A new action bumps 'twenty'/'20 tools'/both name lists + a new manual-e2e step + a new dated Verified block. A captureTab shape change updates step 5 prose + the captureTab paragraph only."
+    },
+    {
+      "area": "test patterns - debugger-ports",
+      "finding": "debugger-ports.unit.test.ts uses installStubDebugger(sendCommand?) which vi.stubGlobal('chrome', stub) with attach/detach/sendCommand/onDetach.addListener spies and fireDetach(tabId,reason). Assertions pin exact sendCommandSpy.toHaveBeenCalledWith({tabId},method,params) for Page.captureScreenshot, Runtime.evaluate, Input.dispatchMouseEvent. Scroll tests use scriptedScroll(before,afterWheel,afterScript) keyed on method + expression string. Fake timers test the 15s timeout via vi.advanceTimersByTime(20000).",
+      "filePath": "tools/chrome-bridge/src/extension/debugger-ports.unit.test.ts",
+      "implication": "New CDP calls are asserted by adding toHaveBeenCalledWith expectations against sendCommandSpy; changing the captureScreenshot params object breaks the existing assertion which must be updated in lockstep."
+    },
+    {
+      "area": "test patterns - page-actions",
+      "finding": "page-actions.unit.test.ts uses fakePorts(overrides), fakeDebugger(overrides) - a fake DebuggerPorts with captureScreenshot default resolving 'data:image/png;base64,QUJD', evaluate a trivial value, scroll a ScrollOutcome - plus fakeStore() and a sandbox stub whose resolveTabId() returns 7. The captureTab describe block asserts { result: { dataUrl: 'data:image/png;base64,QUJD' } }, that captureScreenshot was called with 7, and error propagation when it rejects (guard -> {error}). The injected findElement fn is unit-tested against a jsdom DOM, re-feeding the produced ref.",
+      "filePath": "tools/chrome-bridge/src/extension/page-actions.unit.test.ts",
+      "implication": "Element-screenshot handler tests slot into the fakeDebugger override pattern; if captureScreenshot gains a clip arg the fake's signature and the 'called with 7' assertion change."
+    },
+    {
+      "area": "npm run verify",
+      "finding": "package.json scripts.verify = `npm run typecheck && npm run lint && npm run test` (test is vitest). Roadmaps refer to a 'reliably-green subset' implying some suites are environment-bound.",
+      "filePath": "tools/chrome-bridge/package.json",
+      "implication": "Parity completeness is proven by typecheck (the Record<PageAction,...> mapped types); each phase gates on npm run verify."
+    },
+    {
+      "area": "result-size / base64 / image-size guards",
+      "finding": "The only size guards: MAX_EXECUTE_SCRIPT_RESULT_CHARS = 1_000_000 (executeScript + CDP evaluate JSON length); DEFAULT_MAX_CHARS = 200_000 / MAX_READ_LIMIT (readPage/getPageText/capture reads); MAX_FIND_ELEMENT_MATCHES = 50 / MAX_ELEMENT_TEXT_CHARS = 500. There is NO guard on screenshot byte size, base64 length, or the dataUrl in CaptureTabResult - page-actions.ts defers it and server.ts does no length check before emitting the image block.",
+      "filePath": "tools/chrome-bridge/src/extension/page-actions.ts",
+      "implication": "A screenshot size guard is greenfield - decide whether it lives at the port, the handler, or server.ts. captureBeyondViewport can produce multi-MB base64 vs the ~275KB viewport baseline."
+    },
+    {
+      "area": "h06 roadmap CDP-port phase shape",
+      "finding": "horizon-06 structured CDP introduction as 5 phases: Phase 0 = real-Chrome feasibility gate (prove chrome.debugger attaches to a background tab + Page.captureScreenshot works) as a hard blocker BEFORE any code; Phase 2 = new debugger-ports.ts + co-located unit test with an explicit decisions.md scope note 'CDP only for the screenshot gap'; Phase 4 = switch captureTab to CDP, ending blocked/MANUAL_CHROME_CHECK_PENDING. Verify checks: screenshot-data-url, cleanup-on-all-paths, repeatable-no-lingering-attachment, ondetach-listener-cleanup, cdp-vs-dom-scope-record.",
+      "filePath": "docs/roadmaps/agent-agnostic-browser-bridge/horizons/horizon-06-dedicated-tab-targeting-roadmap.md",
+      "implication": "Precedent: a live-Chrome CDP feasibility probe is its own phase-0 gate; the CDP port phase pairs with a decisions.md scope note; the horizon closes blocked pending manual Chrome verification. A clip/beyond-viewport plan should mirror this (probe on the unfocused sandbox tab first)."
+    },
+    {
+      "area": "h12 roadmap parity-surface phase shape",
+      "finding": "horizon-12 used 2 phases: Phase 1 = change the action Result shape across the FULL parity surface atomically in one commit (types + both mapped types, raw + guarded handlers, TOOL_CATALOG, edited unit tests + count assertions still green at 20 + a new adversarial test, README prose + one new manual-e2e step), proven complete by tsc; Phase 2 = live-Chrome head-to-head, ending blocked MANUAL_CHROME_CHECK_PENDING. Roadmap enumerates parity edit sites when NOT adding an action: '1 type interface, 1 handler body, 1 catalog description, ~4-5 test blocks, README prose + 1 new manual-e2e step'.",
+      "filePath": "docs/roadmaps/agent-agnostic-browser-bridge/horizons/horizon-12-find-element-returns-elements-roadmap.md",
+      "implication": "If element/full-page screenshot extends captureTab (not a new action), build+wire collapses into one phase like h12 phase 1, count stays 20; followed by a live-Chrome verify phase. New design work (clip-rect derivation from a ref) is the analogue of h12's 'ref scheme has no precedent' risk."
+    }
+  ],
+  "requiredMaterials": [
+    {
+      "name": "Live signed-in Chrome session with the chrome-bridge extension loaded and the devtools relay running",
+      "kind": "tool",
+      "whyNeeded": "The horizon's success definition (item 7) makes a mandatory live head-to-head verification in a fresh post-rebuild MCP session non-negotiable: full-page image height cross-checked against measured document scroll height, element image dimensions against measured getBoundingClientRect. It is also the only way to resolve the central open risk - whether the deliberately-unfocused sandbox tab paints content outside the viewport for captureBeyondViewport. Cannot be simulated in vitest.",
+      "acquisitionNote": "Run npm start from repo root for the relay, rebuild + reload tools/chrome-bridge/extension unpacked in a real signed-in Chrome, then start a fresh MCP session. Same setup that blocked h9/h11/h12; budget for a --retry in a later fresh session and a MANUAL_CHROME_CHECK_PENDING close if the environment is unavailable."
+    },
+    {
+      "name": "A real scrollable public page and a real large on-page element for the verification target",
+      "kind": "dataset",
+      "whyNeeded": "Item 7 requires the cross-check to run against a real scrollable page (document scroll height well beyond viewport) and a real large element whose getBoundingClientRect can be measured and compared to the clip-rect capture.",
+      "acquisitionNote": "Pick a stable, long, publicly reachable page (no auth wall) at verification time and navigate the sandbox tab to it via navigateTo; record the URL in the dated README Verified block."
+    },
+    {
+      "name": "CDP Page.captureScreenshot option semantics for captureBeyondViewport, clip, and deviceScaleFactor/emulation interaction",
+      "kind": "knowledge",
+      "whyNeeded": "Risk items 5 and 2: captureBeyondViewport interacts with device-scale-factor and emulation overrides so returned pixel dimensions may not equal measured CSS-pixel dimensions, weakening the cross-check and the size-guard math. Need the exact contract for how clip.scale, fromSurface, and captureBeyondViewport combine, and what dimension metadata CDP returns.",
+      "acquisitionNote": "Chrome DevTools Protocol docs for Page.captureScreenshot - external reference, not in repo. Confirm against the actual Chrome build during the live probe."
+    },
+    {
+      "name": "Concrete MCP result-size / image content-block byte limit",
+      "kind": "knowledge",
+      "whyNeeded": "Item 4 and risk item 2 require a documented dimension/byte guard that keeps the returned PNG within MCP result-size limits. The ~275KB viewport baseline is known but the actual hard limit the guard must enforce is not established in-repo.",
+      "acquisitionNote": "Determine the effective ceiling empirically during live verification and/or from MCP SDK / host limits; the roadmap must pick guard behaviour (downscale vs clip vs error) and location as an explicit decision."
+    }
+  ],
+  "phases": [
+    {
+      "id": "probe-beyond-viewport-and-clip-paint-in-sandbox-tab",
+      "order": 0,
+      "name": "Probe beyond-viewport and clip capture in the sandbox tab",
+      "goal": "Prove, against real signed-in Chrome and before any code is written, whether the deliberately-unfocused sandbox tab can paint pixels outside the current viewport for a CDP Page.captureScreenshot with captureBeyondViewport:true and for a clip rect covering a below-the-fold element.",
+      "rationale": "The sandbox tab is kept unfocused on purpose and stops running its paint pass, so it is unknown whether Chrome will render content the user cannot currently see when asked for a full-page or cropped screenshot. If it cannot, the whole approach needs a different mechanism (a briefly-render-the-tab prerequisite), so this must be settled first as a hard gate.",
+      "filesAffected": [
+        "tools/chrome-bridge/README.md"
+      ],
+      "changes": [
+        "From a fresh MCP session against a real long scrollable public page, run an ad-hoc chrome.debugger Page.captureScreenshot with captureBeyondViewport:true on the sandbox tab and compare the returned image height to a CDP evaluatePage document scroll-height measurement",
+        "Repeat with a clip rect covering a large below-the-fold element and compare the returned image dimensions to that element's measured getBoundingClientRect",
+        "Watch for the horizon-10 failure modes: blank or viewport-clipped or short image, a hang past the 15s withDebuggerSession cap, and an orphaned debugger attachment that nav/reloadTab does not clear",
+        "Record a dated feasibility finding paragraph in the chrome-bridge README stating whether captureBeyondViewport and clip capture paint correctly in the unfocused sandbox tab, with the measured numbers"
+      ],
+      "boundedContext": "chrome-bridge live verification",
+      "layer": "cross-cutting",
+      "blastRadius": "small",
+      "inputs": [
+        "stage1-analysis central open risk (render-pass suspension vs captureBeyondViewport)",
+        "stage1.5-discovery findings on withDebuggerSession and the pinned Page.captureScreenshot invocation",
+        "horizon-06 phase-0 live-Chrome feasibility-gate precedent",
+        "live signed-in Chrome session with the extension loaded and the relay running"
+      ],
+      "expectedResult": "A dated feasibility finding recorded in the chrome-bridge README stating, with measured numbers, whether captureBeyondViewport and clip capture paint content in the unfocused sandbox tab.",
+      "dependsOn": [],
+      "compensation": "If the finding is negative, stop and REPLAN the horizon: a briefly-render-the-sandbox-tab capability becomes a prerequisite phase and the parity-surface build is deferred behind it.",
+      "rubric": [
+        {
+          "id": "measured-numbers-grounding",
+          "label": "Finding grounded in real measured numbers",
+          "ruleStatement": "The finding must report concrete numbers actually observed in a live Chrome run, not asserted or estimated, with enough specificity that a reader could re-derive the pass/fail judgment.",
+          "passCriteria": [
+            "For the beyond-viewport run: the README states the CDP evaluatePage document scroll-height in px AND the returned screenshot image height in px, as specific integers",
+            "For the clip run: the README states the target element's measured getBoundingClientRect width/height AND the returned image width/height, as specific integers",
+            "Each pair is accompanied by an explicit comparison verdict (match within a stated tolerance, or mismatch with the delta)",
+            "The public page used is named by URL and its approximate scroll length is given"
+          ],
+          "failureExamples": [
+            "README says 'captureBeyondViewport returned the full page correctly' with no dimensions quoted",
+            "PLAUSIBLE: dev runs both captures, eyeballs the screenshots, writes 'both worked' with a screenshot attached but never records evaluatePage scroll-height or image pixel dimensions",
+            "Numbers given for viewport height and image height but they're equal (~800px) - the test page wasn't taller than the viewport",
+            "Element rect quoted but returned clip image dimensions are not"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "both-capture-paths-covered",
+          "label": "Both capture paths independently exercised and reported",
+          "ruleStatement": "captureBeyondViewport:true and clip-rect capture are distinct CDP code paths with distinct failure risks; the finding must cover each on its own, against a below-the-fold target for the clip case.",
+          "passCriteria": [
+            "A dedicated result for captureBeyondViewport:true full-page capture",
+            "A separate dedicated result for a clip rect whose y-offset is demonstrably below the initial viewport (finding states the element started off-screen, rect.top exceeds window.innerHeight before any scroll)",
+            "Each path has its own pass/fail conclusion",
+            "If one path passes and the other fails, both outcomes are stated explicitly"
+          ],
+          "failureExamples": [
+            "Only captureBeyondViewport is tested; clip rect is assumed to work 'since it's the same API'",
+            "PLAUSIBLE: dev tests clip capture but picks an element already within the first viewport, so the render-pass-suspension risk for off-screen content is never triggered",
+            "The clip test scrolls the element into view first, defeating the purpose",
+            "Both paths mentioned but only one has a recorded result"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "failure-modes-recorded",
+          "label": "Horizon-10 failure modes observed-for and recorded",
+          "ruleStatement": "The known failure modes (blank / viewport-clipped / short image, hang past the 15s withDebuggerSession cap, orphaned debugger attachment) must each be explicitly checked and their presence or absence recorded.",
+          "passCriteria": [
+            "The finding names each of the three failure modes and states whether it occurred",
+            "Timing recorded: actual wall-clock duration of each capture call, confirmed within the 15s withDebuggerSession cap",
+            "Debugger cleanup confirmed: no lingering chrome.debugger attachment after the runs",
+            "Any partial/clipped/blank artifact is described including where on the image it appeared"
+          ],
+          "failureExamples": [
+            "Finding reports success but never mentions timing or debugger detachment",
+            "PLAUSIBLE: dev's captures succeed cleanly so they write only the positive result and omit the failure-mode checklist entirely",
+            "'No errors' stated globally without per-failure-mode confirmation",
+            "Screenshot has a grey band at the bottom but the finding doesn't note it"
+          ],
+          "minScore": 6
+        },
+        {
+          "id": "clear-go-replan-verdict",
+          "label": "Unambiguous go / replan verdict for the phase gate",
+          "ruleStatement": "Because this phase is a hard gate for the whole capture feature, the finding must end in a single unambiguous verdict that tells the roadmap executor whether to proceed to implementation or switch mechanism.",
+          "passCriteria": [
+            "A clearly labelled conclusion line stating one of: proceed / replan",
+            "The verdict is consistent with the measured numbers reported above it",
+            "If replan: the finding names which path failed and what was observed",
+            "The finding is dated (explicit YYYY-MM-DD) and states it was run from a fresh MCP session against real signed-in Chrome with the relay running"
+          ],
+          "failureExamples": [
+            "Finding ends with 'results were mixed' with no actionable verdict",
+            "PLAUSIBLE: dev records solid measurements and a 'looks feasible' summary but never states the proceed/replan decision in gate terms",
+            "Verdict says 'proceed' but one recorded image-height comparison is a clear mismatch left unexplained",
+            "No date on the finding"
+          ],
+          "minScore": 7
+        }
+      ],
+      "healerHint": "Re-run the live experiment from a fresh MCP session against a genuinely long signed-in page and rewrite the README finding so every claim carries the integer it rests on, covers captureBeyondViewport and a truly below-the-fold clip rect separately, ticks off each horizon-10 failure mode with timing and debugger-detach confirmation, and closes with one dated proceed-or-replan verdict."
+    },
+    {
+      "id": "extend-capturetab-with-a-capture-mode-field",
+      "order": 1,
+      "name": "Extend captureTab with a capture mode field",
+      "goal": "In one atomic change across the captureTab parity surface, add a single mutually-exclusive mode field (visible viewport, full page, or one element by ref) plus an element-ref field, resolve the element ref to a clip rect, return width/height/clipped metadata in the result, and add a simple non-throwing guard that turns an oversized image into a defined too-large outcome.",
+      "rationale": "captureTab today takes no arguments and captures only the visible area, and nothing anywhere checks screenshot size. This phase adds the three capture modes as one explicit enum (never two conflicting optional flags), measures the element rect via the existing CDP evaluate path, and caps the returned base64 payload against a documented ceiling, wired through every coupled consumer at once so a missing one is a compile error. PAGE_ACTIONS stays at 20 because the shape changes in place rather than via a new action.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/protocol/types.ts",
+        "tools/chrome-bridge/src/extension/debugger-ports.ts",
+        "tools/chrome-bridge/src/extension/page-actions.ts",
+        "tools/chrome-bridge/src/mcp/tool-catalog.ts",
+        "tools/chrome-bridge/src/mcp/server.ts",
+        "tools/chrome-bridge/src/mcp/server.unit.test.ts",
+        "tools/chrome-bridge/src/extension/debugger-ports.unit.test.ts",
+        "tools/chrome-bridge/src/extension/page-actions.unit.test.ts",
+        "tools/chrome-bridge/src/mcp/tool-catalog.unit.test.ts",
+        "tools/chrome-bridge/README.md"
+      ],
+      "changes": [
+        "In protocol/types.ts add to CaptureTabParams one required-with-default mode field of exactly three values (visible viewport / full page / element) and a second element field holding a findElement CSS-locator ref, used only when mode is element; add width, height, clipped, and a too-large marker (measured bytes plus the ceiling) to CaptureTabResult; keep the PageActionParams and PageActionResults map entries in lockstep",
+        "Give DebuggerPorts.captureScreenshot an optional options arg that passes captureBeyondViewport:true for full page and clip:{x,y,width,height,scale} for element, and update the pinned Page.captureScreenshot unit-test assertion in the same commit",
+        "In raw.captureTab read and validate params; for element mode resolve the ref to a rect via a Runtime.evaluate document.querySelector(ref).getBoundingClientRect() read mirroring readScrollMetrics, with defined non-throwing outcomes for no-match, zero-area, and relay/tab-unavailable",
+        "Add a size guard in raw.captureTab that measures the returned base64 length against a documented ceiling constant sibling to MAX_EXECUTE_SCRIPT_RESULT_CHARS and, when exceeded, returns the defined too-large result outcome carrying the measured size and the ceiling; no downscale, no re-capture",
+        "Replace NO_ARGS with a real inputSchema for captureTab in tool-catalog.ts, update the captureTab-specific unit assertions (empty-properties test, required map), update README step 5 prose and the captureTab paragraph, and confirm PAGE_ACTIONS stays 20 and the Record<PageAction,...> mapped types still tsc-check; run npm run verify green",
+        "In mcp/server.ts generalise the handleToolCall `toolName === 'captureTab'` branch so a successful capture still renders as an MCP image content block (imageResult over the data:image/png dataUrl), but a structured too-large / element-not-found / zero-area outcome is detected and surfaced via textResult (JSON of the outcome) with isError set as appropriate rather than being forced through readDataUrl/imageResult; add server.unit.test.ts coverage asserting each non-image captureTab outcome round-trips as a text/error block"
+      ],
+      "boundedContext": "chrome-bridge parity surface",
+      "layer": "infrastructure",
+      "blastRadius": "medium",
+      "inputs": [
+        "stage1-analysis assumptions on in-place captureTab extension, the element-ref scheme, and the result-size guard risk",
+        "stage1.5-discovery parity-surface, h12 ref-scheme, and size-guard findings",
+        "horizon-12 single atomic parity-surface phase precedent",
+        "phase-0 feasibility finding"
+      ],
+      "expectedResult": "captureTab accepts the three-value mode field plus an element ref and returns width/height/clipped metadata or a defined too-large outcome, with the mcp/server.ts rendering layer emitting an image block for a real capture and a text/error block for a non-image outcome, npm run verify green and PAGE_ACTIONS still 20.",
+      "dependsOn": [
+        "probe-beyond-viewport-and-clip-paint-in-sandbox-tab"
+      ],
+      "compensation": "CaptureTabParams and CaptureTabResult are an advertised MCP tool contract; to roll back, restore the no-args params and dataUrl-only result, revert NO_ARGS in the tool catalog, and revert the pinned captureScreenshot assertion, all in one commit.",
+      "rubric": [
+        {
+          "id": "parity-surface-completeness",
+          "label": "Parity surface lands atomically and type-checks",
+          "ruleStatement": "Every coupled member of the captureTab parity surface reflects the new mode/elementRef params and width/height/clipped/too-large result shape in the same diff, and the compiler proves no consumer was missed.",
+          "passCriteria": [
+            "tsc --noEmit passes with zero errors across tools/chrome-bridge",
+            "Both Record<PageAction,\u2026> maps (raw handler map and guarded/validated handler map) have their captureTab entries updated in lockstep; no @ts-expect-error, as, any, or ! added to compile",
+            "CaptureTabParams and CaptureTabResult in protocol/types.ts carry the new fields; TOOL_CATALOG, page-actions raw handler, and debugger-ports signature all reference those same types",
+            "PAGE_ACTIONS still contains exactly 20 entries; the count test and the ordered-list test both assert 20 and pass unchanged",
+            "captureTab is extended in place; no entry added to or removed from PAGE_ACTIONS"
+          ],
+          "failureExamples": [
+            "PLAUSIBLE: dev updates the raw handler map and types but the guarded/validated Record<PageAction,\u2026> map keeps the old zero-arg captureTab signature; it still compiles because the param type widened to an all-optional object, so the miss ships silently",
+            "A second page action is added for full-page capture, pushing PAGE_ACTIONS to 21 and breaking the count test, which is then edited to 21",
+            "tool-catalog still exports NO_ARGS for captureTab while types.ts has the new params"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "mode-is-one-exclusive-enum",
+          "label": "Capture mode is a single 3-value enum, viewport-defaulted",
+          "ruleStatement": "The three capture modes are expressed as one mutually-exclusive enum field of exactly three values defaulting to visible viewport, never as multiple independent boolean/optional flags that can conflict.",
+          "passCriteria": [
+            "CaptureTabParams has exactly one mode discriminator field with exactly three literal values; grep shows no fullPage?: boolean + element?: boolean pair",
+            "When mode is absent, behavior is identical to today's viewport capture (default applied in one place, asserted by a unit test)",
+            "elementRef is only read when mode === 'element'; a defined non-throwing outcome is returned if mode === 'element' and elementRef is missing/empty",
+            "TOOL_CATALOG inputSchema encodes mode as an enum of those three exact strings with the viewport default documented, and elementRef as an optional string",
+            "A unit test asserts the enum value set and the default"
+          ],
+          "failureExamples": [
+            "PLAUSIBLE: params expose beyondViewport?: boolean and elementRef?: string; element mode is inferred from elementRef being present \u2014 two optional inputs that silently conflict when both set, and no single enum exists",
+            "mode defaults to viewport in the handler but the tool-catalog schema marks it required with no default, so MCP callers must always pass it",
+            "enum includes a fourth 'auto' value not in the spec"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "defined-outcomes-every-failure-path",
+          "label": "Every failure path returns a defined non-throwing outcome",
+          "ruleStatement": "Element-ref no-match, zero-area element, relay/tab unavailable, and oversized image each resolve to a structured defined result rather than a thrown error or rejected promise.",
+          "passCriteria": [
+            "raw.captureTab (element mode) resolves the ref via Runtime.evaluate querySelector+getBoundingClientRect, mirroring readScrollMetrics' evaluate pattern",
+            "No-match ref \u2192 defined outcome; zero width or height \u2192 defined 'zero-area' outcome; neither throws",
+            "Relay/tab-unavailable path returns the same shape used elsewhere in page-actions for that condition, not an uncaught throw",
+            "Oversized image \u2192 a flat too-large outcome object carrying the measured base64 byte size AND the ceiling constant; no downscale/retry",
+            "The ceiling is a single named module constant with a comment citing the ~275KB viewport-PNG baseline",
+            "Unit tests cover no-match, zero-area, and too-large paths asserting the specific outcome shape"
+          ],
+          "failureExamples": [
+            "PLAUSIBLE: dev wraps ref resolution in try/catch and returns a defined outcome for no-match, but getBoundingClientRect on a matched-but-collapsed element yields 0\u00d70 and is passed straight to CDP clip, which errors inside withDebuggerSession and rejects the command",
+            "too-large outcome returns { ok:false, reason:'too-large' } but omits the measured size and/or the ceiling number",
+            "size guard throws a RangeError instead of returning the outcome; caught only by the generic command wrapper and surfaced as a stack string"
+          ],
+          "minScore": 6
+        },
+        {
+          "id": "pinned-cdp-and-unit-tests-lockstep",
+          "label": "Pinned CDP assertion and all unit suites updated together",
+          "ruleStatement": "The pinned Page.captureScreenshot unit-test assertion is rewritten to match the new options arg in the same commit, and debugger-ports / page-actions / tool-catalog unit tests all pass.",
+          "passCriteria": [
+            "DebuggerPorts.captureScreenshot takes an optional options arg emitting captureBeyondViewport: true for full page and clip: {x,y,width,height,scale} for element mode",
+            "The existing pinned unit test asserting exact Page.captureScreenshot params is updated to the new shape (viewport call still asserted to send no clip / no beyondViewport)",
+            "npm run verify (or the vitest run) is green: debugger-ports.unit, page-actions.unit, tool-catalog.unit all pass",
+            "No test uses it.skip, loosened matchers (toEqual\u2192toMatchObject to dodge a mismatch), or bumped timeouts",
+            "clip scale is set explicitly (1) rather than left undefined where the pinned test expects a value"
+          ],
+          "failureExamples": [
+            "PLAUSIBLE: dev adds the options arg and new tests, but the original pinned viewport assertion still does expect(params).toEqual({ format:'png' }) and now fails because the code always spreads an options object; dev relaxes it to toMatchObject instead of asserting the viewport call sends exactly the old params",
+            "clip rect uses CSS pixels from getBoundingClientRect without accounting for devicePixelRatio/scale, so the pinned test is updated to whatever the code emits rather than a correct rect",
+            "tool-catalog.unit.test still asserts NO_ARGS for captureTab and is left failing / commented out"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "tool-catalog-schema-and-readme-match",
+          "label": "TOOL_CATALOG schema and README match the shipped params exactly",
+          "ruleStatement": "TOOL_CATALOG inputSchema for captureTab describes exactly the new params (no more, no less) and README captureTab prose plus step 5 are updated, with no new manifest permission.",
+          "passCriteria": [
+            "captureTab inputSchema lists exactly: mode (enum of the 3 values, default viewport documented) and elementRef (optional string, described as the findElement ref); no stray or missing properties versus CaptureTabParams",
+            "README captureTab paragraph documents the three modes, the width/height/clipped result fields, and the too-large outcome with its ceiling",
+            "README step 5 (numbered walkthrough) is updated to reflect mode/elementRef usage",
+            "git diff shows no change to manifest.json permissions and no new chrome.* permission string anywhere",
+            "A tool-catalog unit test asserts the inputSchema property set matches the new params"
+          ],
+          "failureExamples": [
+            "PLAUSIBLE: inputSchema adds mode and elementRef correctly, but CaptureTabParams also gained an internal _resolvedClip field that leaks into the schema via a shared type",
+            "README captureTab paragraph is updated but step 5 still shows the old zero-arg call",
+            "dev adds activeTab or <all_urls> to manifest 'just in case' clip capture needs it"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "non-image-outcomes-round-trip-through-server",
+          "label": "Non-image captureTab outcomes round-trip through server.ts, not forced into imageResult",
+          "ruleStatement": "The mcp/server.ts handleToolCall `toolName === 'captureTab'` branch must be generalised so a successful capture still renders as an MCP image content block, but a structured too-large / element-not-found / zero-area outcome is surfaced via textResult (with isError set as appropriate) and is never passed through readDataUrl/imageResult.",
+          "passCriteria": [
+            "server.ts detects a non-image captureTab result (too-large, no-match, zero-area) before the imageResult path and returns textResult(JSON.stringify(outcome, null, 2)), with isError:true where the outcome represents a failure",
+            "A successful visible/full-page/element capture still returns imageResult(stripDataUrlPrefix(readDataUrl(...))) exactly as today",
+            "readDataUrl is only reached when the result actually carries a data:image/png dataUrl",
+            "server.unit.test.ts asserts each of the three non-image outcomes round-trips as a text/error block and that the success case still yields an image block",
+            "npm run verify (vitest) is green including the new server.unit suite"
+          ],
+          "failureExamples": [
+            "PLAUSIBLE: dev updates page-actions.ts and types.ts with the too-large / no-match / zero-area outcomes but leaves server.ts's `=== 'captureTab'` branch untouched, so a too-large outcome reaches imageResult(readDataUrl(...)); readDataUrl throws or emits an empty string and the MCP client receives an empty or corrupt image block",
+            "server.ts is changed to catch the readDataUrl throw and return a bare error string with no structured outcome fields",
+            "the success image path is broken because the branch now always returns textResult",
+            "no server.unit.test.ts coverage for the non-image outcomes"
+          ],
+          "minScore": 7
+        }
+      ],
+      "healerHint": "Land mode as one 3-value enum (viewport default) plus elementRef across every coupled member of the parity surface in a single diff, let tsc prove no map or consumer was missed, give each failure path a defined non-throwing result (oversized\u2192flat too-large with measured bytes + ceiling), and update the pinned CDP assertion, all unit suites, the TOOL_CATALOG schema, and both README spots in lockstep with no new manifest permission and npm run verify green."
+    },
+    {
+      "id": "run-live-chrome-head-to-head-screenshot-verification",
+      "order": 2,
+      "name": "Run the live-Chrome head-to-head screenshot verification",
+      "goal": "In a fresh post-rebuild MCP session against real signed-in Chrome, capture all three modes on a real long page and a real large below-the-fold element, cross-check the returned pixel dimensions against CDP evaluatePage measurements, and record a dated Verified README block; end the horizon MANUAL_CHROME_CHECK_PENDING if the live environment is unavailable.",
+      "rationale": "The binding project rule (horizon-02 decision) is that any horizon changing the extension closes only after a real end-to-end Chrome check. This phase navigates the sandbox tab to a real scrollable page and a real large element, captures each mode, and compares the returned image dimensions to CDP measurements.",
+      "filesAffected": [
+        "tools/chrome-bridge/README.md"
+      ],
+      "changes": [
+        "Rebuild and reload the chrome-bridge extension, start a fresh MCP session, and navigate the sandbox tab to a stable long public page",
+        "Call captureTab in full-page mode and confirm the image height tracks a CDP evaluatePage document scroll-height measurement; call captureTab in element mode with a ref for a large below-the-fold element and confirm the image dimensions track its measured getBoundingClientRect; call visible-viewport mode and confirm the default is unchanged",
+        "Confirm the size guard returns the defined too-large outcome on a genuinely tall page and that no debugger attachment is left orphaned",
+        "Add a dated Verified block and a new manual-e2e step to the README recording the target URLs and the measured-vs-returned dimensions; leave the horizon MANUAL_CHROME_CHECK_PENDING if the live environment is unavailable"
+      ],
+      "boundedContext": "chrome-bridge live verification",
+      "layer": "cross-cutting",
+      "blastRadius": "small",
+      "inputs": [
+        "stage1-analysis success definition item 7 (mandatory live head-to-head, CDP cross-check)",
+        "horizon-12 live head-to-head verify-phase precedent",
+        "phase-1 extended captureTab build",
+        "live signed-in Chrome session with the extension loaded and the relay running"
+      ],
+      "expectedResult": "A dated Verified README block recording the full-page, element, and viewport captures cross-checked against CDP dimension measurements, or a MANUAL_CHROME_CHECK_PENDING note if the environment was unavailable.",
+      "dependsOn": [
+        "extend-capturetab-with-a-capture-mode-field"
+      ],
+      "rubric": [
+        {
+          "id": "three-modes-exercised-live",
+          "label": "All three capture modes exercised against real Chrome",
+          "ruleStatement": "The Verified block must show that visible-viewport, full-page (captureBeyondViewport), and single-element capture were each actually invoked in a live MCP session against a real signed-in Chrome sandbox tab during this run, not merely described or carried over from an earlier horizon.",
+          "passCriteria": [
+            "A dated Verified block (explicit YYYY-MM-DD within ~today) exists in tools/chrome-bridge/README.md",
+            "Names the concrete target page URL(s) used and states the page was loaded in the sandbox tab via the live MCP session",
+            "For each of the three modes there is a distinct recorded result: visible mode returned an image at viewport size; full-page mode returned a taller image; element mode returned an image clipped to one element with the element ref recorded",
+            "States the MCP session was fresh/post-rebuild-and-reload",
+            "The three results are presented as observed outputs, not expected behavior"
+          ],
+          "failureExamples": [
+            "Block says 'full-page and element capture verified working' with no per-mode detail or URL",
+            "Only full-page and element are recorded; visible-viewport default is assumed unchanged but never re-invoked in this session (PLAUSIBLE: dev reasonably thinks the default path was untouched, but the rubric requires confirming by actually calling it)",
+            "Block is copied from the horizon-12 verification with the date bumped but the same generic wording",
+            "Modes described in future/imperative tense indicating the plan was pasted, not executed"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "dimension-cross-check-with-numbers",
+          "label": "Returned pixel dimensions cross-checked against CDP evaluatePage measurements with actual numbers",
+          "ruleStatement": "Full-page image height must be cross-checked against a CDP evaluatePage document scroll-height measurement, and element image dimensions against the element's measured getBoundingClientRect, with all raw numbers recorded and the match (within a stated tolerance) shown.",
+          "passCriteria": [
+            "Full-page: records the CDP evaluatePage measurement (e.g. document.documentElement.scrollHeight) as a number AND the returned image height as a number, plus device-pixel-ratio if the two differ in units",
+            "Element: records the measured getBoundingClientRect width and height AND the returned element image width and height, all as numbers",
+            "States the comparison outcome explicitly (equal, or within a named tolerance) rather than 'matches' / 'looked right'",
+            "The measurement path is CDP evaluatePage (the h9 Runtime.evaluate read path), not a hand estimate",
+            "Numbers are internally plausible (full-page height > viewport height; element height < full-page height; DPR applied consistently)"
+          ],
+          "failureExamples": [
+            "'Full-page height matched the page scroll height' with no numbers",
+            "Screenshot pixel height recorded but compared to a guessed page height instead of a CDP measurement",
+            "Element dimensions recorded but only width cross-checked, height omitted",
+            "DPR ignored so a 2x-scaled 1600px image is declared a mismatch against an 800px CSS measurement, or a match with no explanation of the 2x (PLAUSIBLE: dev records real numbers from both sources but never reconciles the retina scale factor)",
+            "Numbers present but self-contradictory (full-page height smaller than the recorded viewport height)"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "size-guard-too-large-observed",
+          "label": "Size guard too-large outcome observed on a genuinely tall page",
+          "ruleStatement": "The block must record that the size guard's defined too-large outcome was actually triggered and observed on a real, genuinely tall page, with the guard's response captured verbatim.",
+          "passCriteria": [
+            "Names the tall page used and gives its measured height (CDP number) showing it genuinely exceeds the guard threshold",
+            "Records the exact too-large outcome returned (structured code / measured bytes / ceiling) as defined by phase-1's implementation",
+            "Confirms the outcome matches the guard's documented contract",
+            "Distinguishes this from a normal full-page capture that merely succeeded on a moderately long page"
+          ],
+          "failureExamples": [
+            "'Size guard works as designed' with no page, no height, no returned message",
+            "Guard threshold reasoning shown but the tall-page case was only computed, not run, because no sufficiently tall public page was handy (PLAUSIBLE: dev verifies the threshold math and a normal capture, assumes the guard branch is trivial, and never forces a real oversized capture)",
+            "A page long but under threshold is used and the guard correctly does not fire, recorded as if it confirmed the guard",
+            "The too-large path is simulated by lowering the threshold in code rather than a real tall page"
+          ],
+          "minScore": 6
+        },
+        {
+          "id": "no-orphaned-debugger-attachment",
+          "label": "No orphaned chrome.debugger attachment after the run",
+          "ruleStatement": "The block must record an explicit post-run check that no chrome.debugger attachment was left on the sandbox tab (or any tab) after the verification session completed.",
+          "passCriteria": [
+            "States how the check was made (chrome://inspect / no 'DevTools is debugging this tab' banner / getTabState / debugger.getTargets)",
+            "Records the result as observed ('no attachment present after run')",
+            "The check is timestamped to after the capture sequence, not before",
+            "If any detach step was needed it is noted, otherwise confirms clean auto-detach"
+          ],
+          "failureExamples": [
+            "No mention of debugger attachment state at all",
+            "'Extension detaches automatically' stated as a design fact without a post-run observation (PLAUSIBLE: dev trusts the finally/detach code path from phase-1 and never opens chrome://inspect to confirm nothing lingered after an error path)",
+            "Attachment checked only at session start",
+            "A target stayed attached and this is noted but the block still claims an overall pass"
+          ],
+          "minScore": 6
+        },
+        {
+          "id": "honest-pending-vs-hollow-pass",
+          "label": "Honest PENDING when blocked; no hand-waved pass",
+          "ruleStatement": "If the live Chrome environment was unavailable (relay down, frozen MCP catalog, no signed-in session), the block must say MANUAL_CHROME_CHECK_PENDING and state why; it must never present a pass without the concrete live evidence the other dimensions require.",
+          "passCriteria": [
+            "Exactly one of two honest states is presented: (A) a full pass carrying real URLs, real CDP numbers, and the guard/debugger observations; or (B) MANUAL_CHROME_CHECK_PENDING",
+            "If PENDING: names the specific blocker (relay ws unreachable, MCP catalog stale, no signed-in Chrome) and lists exactly what a human must run to close it",
+            "If PENDING: the horizon is left open / not marked done, and no dimension above is claimed as passed on described-only evidence",
+            "If PASS: contains no filler phrases substituting for data ('captures looked correct', 'verified visually') in place of numbers",
+            "The block does not mix a PENDING admission with a 'but effectively verified' claim"
+          ],
+          "failureExamples": [
+            "'Live verification pending (relay down) \u2014 but the code paths were reviewed and are correct, marking verified'",
+            "MANUAL_CHROME_CHECK_PENDING stated but the roadmap checkbox is still ticked as complete",
+            "A pass block where every cross-check reads 'matched expected' with zero recorded numbers (hollow pass)",
+            "PENDING with no named blocker and no manual-steps list",
+            "Partial pass: visible mode verified live, full-page and element 'to be confirmed', overall marked verified"
+          ],
+          "minScore": 8
+        }
+      ],
+      "healerHint": "If the block claims a pass, make it carry real target URLs plus the paired CDP-measured and capture-returned numbers for full-page height and element dimensions (with DPR reconciled), the verbatim size-guard too-large outcome on a measured tall page, and a post-run 'no debugger attachment' observation; otherwise replace the whole block with an honest MANUAL_CHROME_CHECK_PENDING that names the blocker and the manual steps, and do not tick the horizon done."
+    }
+  ],
+  "successCriteria": [
+    "Done means all of the following hold: (1) one atomic change extends the screenshot capability so a caller can request (a) a capture of the entire scrollable page beyond the current viewport and (b) a capture of a single element addressed by the same CSS-locator ref shape findElement returns, with the existing viewport-only behaviour preserved as the default; (2) the change lands consistently across every surface every recent horizon touched \u2014 PAGE_ACTIONS in protocol/actions.ts, the per-action Params/Result interfaces in protocol/types.ts, both Record<PageAction, ...> mapped types, the raw + guarded handler maps in extension/page-actions.ts, the TOOL_CATALOG entry in mcp/tool-catalog.ts, every count and ordered-list unit test, and the README prose/enumeration/count/manual-e2e step \u2014 with no drift (a missing consumer is a tsc error); (3) failure shapes are explicit and non-throwing where the precedent is non-throwing: element selector matches nothing or has zero/na box, relay/tab unavailable, and an over-large image are each defined result outcomes, not unhandled hangs or crashes; (4) the returned image stays within MCP result-size limits via a documented dimension/byte guard (viewport PNG was already ~275KB per h4), and the result carries enough dimension metadata to be cross-checked; (5) no new manifest permission is added (debugger is already granted); (6) npm run verify for the tools/chrome-bridge package is green (tsc --noEmit, eslint --max-warnings 0, vitest) and boky own extension/bridge/verify pipeline is untouched; (7) a MANDATORY live head-to-head runs in a fresh post-rebuild MCP session against a real scrollable page and against a real large element, cross-checked against a CDP evaluatePage measurement per the horizon-12 precedent \u2014 full-page image height tracks the measured document scroll height and the element image dimensions track the measured getBoundingClientRect \u2014 and is recorded as a dated Verified README block; if the deliberately-unfocused sandbox tab cannot paint content outside the viewport, that is captured as a discovery and triggers REPLAN, never a silent partial pass.",
+    "Probe beyond-viewport and clip capture in the sandbox tab: A dated feasibility finding recorded in the chrome-bridge README stating, with measured numbers, whether captureBeyondViewport and clip capture paint content in the unfocused sandbox tab.",
+    "Extend captureTab with a capture mode field: captureTab accepts the three-value mode field plus an element ref, returns width/height/clipped metadata or a defined too-large outcome, with npm run verify green and PAGE_ACTIONS still 20.",
+    "Run the live-Chrome head-to-head screenshot verification: A dated Verified README block recording the full-page, element, and viewport captures cross-checked against CDP dimension measurements, or a MANUAL_CHROME_CHECK_PENDING note if the environment was unavailable.",
+    "The full-page + element capability is delivered as one atomic parity-surface change (phase 1), gated by the phase-0 live-Chrome feasibility probe and closed by the phase-2 mandatory live head-to-head; protocol/actions.ts (PAGE_ACTIONS) is verified UNCHANGED at 20 entries, not edited."
+  ],
+  "deferred": [
+    "Network response-body capture for text/JSON (blocker #4) \u2014 Explicitly out of scope for this horizon; a separate deferred capability the user did not pick.",
+    "clickElement / clickAt by visible text or ARIA role and a fuller synthetic pointer/keyboard event sequence (blocker #5) \u2014 a separate deferred slice, unrelated to screenshot capture.",
+    "Reviving the horizon-5 DOM page-model / bounding-box snapshot action \u2014 planned-but-never-executed and possibly superseded by h12 findElement; not this horizon's slice.",
+    "Deleting the dead active-tab surface (queryActiveTab / captureVisibleTab / NO_ACTIVE_TAB / redundant activeTab permission) \u2014 the brief says keep horizon 13 to one deliverable and give that cleanup its own horizon.",
+    "Adding a general focus / briefly render the sandbox tab capability \u2014 only becomes this horizon's work if full-page capture is proven impossible in the unfocused tab, which is a REPLAN trigger, not planned scope.",
+    "Verifying the capability from Gemini CLI, Codex CLI, or Cursor \u2014 the h4 decision binds all hand-verification to Claude Code for the life of the project.",
+    "PDF export, JPEG/quality knobs, or other CDP capture formats/options beyond png + captureBeyondViewport + clip \u2014 not asked for; format proliferation is speculative.",
+    "A scroll-and-stitch client-side full-page fallback if captureBeyondViewport fails \u2014 a different mechanism, its own replanned approach, not part of this slice.",
+    "Migrating boky's own extension/relay/MCP onto the chrome-bridge tool \u2014 the vision's h1 decision forbids it.",
+    "Changing the MCP result-rendering layer to add a generic size guard for all tools \u2014 any size bound added here is scoped to the screenshot result; a cross-tool cap is a separate open question.",
+    "Downscale-and-retry / re-capture-at-lower-scale behaviour for an oversized screenshot payload \u2014 Per the user redirect the size guard stays simple: an oversized base64 payload returns a defined non-throwing too-large outcome. Adaptive downscale/clip-to-fit/re-capture machinery is speculative and fails the needed-now YAGNI gate."
+  ],
+  "revision": 0
+}

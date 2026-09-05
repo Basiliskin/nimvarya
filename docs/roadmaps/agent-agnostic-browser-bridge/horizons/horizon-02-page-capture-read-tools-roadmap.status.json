@@ -1,0 +1,319 @@
+{
+ "roadmapFile": "docs/roadmaps/agent-agnostic-browser-bridge/horizons/horizon-02-page-capture-read-tools-roadmap.json",
+ "roadmapTask": "Plan horizon 2 of the agent-agnostic-browser-bridge project (tools/chrome-bridge/). Horizon 1 shipped the standalone package: protocol (PAGE_ACTIONS single source of truth), standalone ws relay on 127.0.0.1:8766, the standalone MV3 extension with the 7 page actions (navigate, getPageText, readPage, findElement, clickElement, typeText, captureTab), the controller client, and the stdio MCP server with one tool per page action.\n\nHorizon 2 scope, in priority order:\n1. readConsoleMessages and readNetworkRequests: capture page console output and page network requests (fetch/XHR) from the real Chrome tab into bounded per-tab ring buffers held in the extension, and expose them as two new page actions / MCP tools with a `since` + `limit` query parameter (queryable ring buffer with clear-since semantics). This needs a MAIN-world page script (console/fetch/XHR wrapping), an ISOLATED content script forwarding to the service worker, the build plumbing for those two extra entries in the plain-Vite extension build, and wiring through PAGE_ACTIONS / TOOL_CATALOG so the tsc parity mechanism covers them. These are guaranteed in this horizon.\n2. The multi-client README MCP config snippet verified by hand against two non-Claude clients. Installed on this machine: Gemini CLI, Crush (charmbracelet crush CLI), and the Cursor app; Codex CLI is NOT installed. Verify with Gemini CLI + Crush; document Cursor and Codex config shapes. Only if it fits in the phase budget; otherwise defer to horizon 3.\n3. Size-cap tuning: empirical check of response sizes (readPage 200k-char default, captureTab image block) against the clients. Lowest priority; defer if it does not fit.\n\nUser decisions from scoping: capture delivery is PULL-ONLY (entries accumulate in extension-side ring buffers and are returned only by the two read tools; no observation-frame streaming to controllers, no tail CLI in this horizon). Capture tools come first; README/size-cap spill to horizon 3 if the horizon exceeds ~5 phases.",
+ "createdAt": "2026-09-02T15:54:33.756Z",
+ "updatedAt": "2026-09-02T17:45:27.864043+00:00",
+ "roadmapRevision": 0,
+ "phases": [
+  {
+   "phaseId": "capture-contract",
+   "status": "done",
+   "attempts": 1,
+   "compensationInvoked": false,
+   "startedAt": "2026-09-02T16:09:08.548Z",
+   "completedAt": "2026-09-02T16:16:41.256Z",
+   "gateRun": "cd tools/chrome-bridge && npm run verify (tsc --noEmit + eslint --max-warnings 0 + vitest run: 14 files, 120 tests) \u2014 exit 0; node .claude/hooks/check-tests.mjs --files src/protocol/capture.ts \u2014 exit 0; mutation sanity (guard always-true \u2192 8 tests fail; boundText no-truncate \u2192 3 tests fail); root npm run verify:fast \u2014 5/5 green; grep \"status\\?:\" etc \u2192 none",
+   "gradeResult": {
+    "phaseId": "capture-contract",
+    "dimensionScores": [
+     {
+      "dimensionId": "guard-rejects-every-field-violation",
+      "score": 10,
+      "pass": true,
+      "evidence": "Hand-written predicate (no as/satisfies/!) checks every field of both shapes: separate null-accepting vs undefined/wrong-type rejection for status/contentType/bodyPreview, and console-shaped entry under channel network is rejected via the paired isConsoleEntry/isNetworkEntry guards. A 9 would loosely handle nullable fields or the pairing."
+     },
+     {
+      "dimensionId": "boundtext-utf8-correctness",
+      "score": 10,
+      "pass": true,
+      "evidence": "boundText measures UTF-8 bytes with TextEncoder, returns input unchanged under the cap, and truncates on code-point boundaries (for...of) so byte length is always <= maxBytes; handles 2/3/4-byte chars and the maxBytes=0 edge. A 9 would be untested against surrogate pairs; emoji case keeps the pair whole at 4 bytes."
+     },
+     {
+      "dimensionId": "types-model-nullability-exactly",
+      "score": 10,
+      "pass": true,
+      "evidence": "CaptureEnvelope is a two-member discriminated union so env.entry.requestId typechecks under network and errors under console; grep confirms nullable fields are | null (no ?:), CAPTURE_NAMESPACE is as const, level/channel string-literal unions. A 9 would have a nullable field declared optional."
+     },
+     {
+      "dimensionId": "test-file-is-real-coverage",
+      "score": 10,
+      "pass": true,
+      "evidence": "Every export named verbatim and behaviour asserted; factory helpers (withoutEntryField, consoleEnvelope, networkEnvelope) mutate exactly one field per negative case, both channels have accept (toBe(true)) and reject (5+ distinct toBe(false)) cases, plus 3 boundText assertions incl. a byte-length check. A 9 would share a hand-copied fixture."
+     }
+    ],
+    "overallPass": true
+   },
+   "notes": "Graded 10/10/10/10 by a general-purpose subagent (not self-graded), overallPass. Only the two phase-listed files touched; PAGE_ACTIONS/tool-catalog untouched. Package eslint prefer-as-const rule forced CAPTURE_NAMESPACE to `as const` instead of the rubric-listed explicit literal annotation (rubric passCriteria explicitly allows `as const`) \u2014 recorded as a decisions.md entry. No compensation (phase has none)."
+  },
+  {
+   "phaseId": "capture-ring-buffer",
+   "status": "done",
+   "attempts": 1,
+   "compensationInvoked": false,
+   "startedAt": "2026-09-02T16:24:12.771480Z",
+   "completedAt": "2026-09-02T16:24:12.771480Z",
+   "gateRun": "cd tools/chrome-bridge && npm run verify (tsc --noEmit + eslint --max-warnings 0 + vitest: 15 files, 142 tests) \u2014 exit 0; node .claude/hooks/check-tests.mjs --files tools/chrome-bridge/src/extension/capture-buffer.ts \u2014 exit 0; mutation sanity (dropped `>since+1`\u2192`>since`: 2 fail; stale `>`\u2192`>=`: 2 fail; truncated `matched>returned`\u2192`===limit`: 3 fail); root npm run verify:fast \u2014 5/5 green",
+   "gradeResult": {
+    "phaseId": "capture-ring-buffer",
+    "dimensionScores": [
+     {
+      "dimensionId": "window-read-arithmetic",
+      "score": 8,
+      "pass": true,
+      "evidence": "read filters seq>since on an always-ascending buffer, slices to limit, truncated = matched.length > entries.length, nextSince echoes since on empty match. Tests cover the passCriteria cases; since=newest-1 and limit=1 boundaries not explicitly tested, so short of 10."
+     },
+     {
+      "dimensionId": "wraparound-and-dropped-flag",
+      "score": 10,
+      "pass": true,
+      "evidence": "Both sides of the exact since+1 dropped boundary asserted in one ring (since=2->false, since=1->true, since=0->true) plus a >1-wrap test (9 pushes into ring(4) -> seqs exactly [6,7,8,9], size 4)."
+     },
+     {
+      "dimensionId": "stale-cursor-and-clear",
+      "score": 9,
+      "pass": true,
+      "evidence": "Both stale boundaries tested (since:999->[1,2,3]; since:3==newest->empty) plus stale read on empty ring proving cursor not stranded; grep-able 'Stale cursor rule' doc comment names the MV3 SW suspend/restart reason. clear() tested with since:0 not non-zero, so short of 10."
+     },
+     {
+      "dimensionId": "non-destructive-and-bounded",
+      "score": 10,
+      "pass": true,
+      "evidence": "5000 pushes into ring(500) asserts entries[0].seq===4501 AND entries[499].seq===5000 (exact shift-eviction identity); returned entries array mutated then re-read to prove it is a copy; normalizeLimit/normalizeSince carry written policy comments backed by limit:0/-1, since:NaN, createCaptureRing(0) tests."
+     },
+     {
+      "dimensionId": "strict-ts-and-test-naming",
+      "score": 9,
+      "pass": true,
+      "evidence": "verify green; no `!`, no casts on indexed reads, no satisfies; all five exports named verbatim and constants asserted ===500/100/500; CaptureRead<Msg> used as explicit annotation twice. Short of 10: index-narrowing has no inline comment, and factory uses a default-valued param instead of the roadmap's `?:` form."
+     }
+    ],
+    "overallPass": true
+   },
+   "notes": "Graded 8/10/9/10/9 by a general-purpose subagent (not self-graded), overallPass; every dimension >= its minScore. Only the two phase-listed files touched (capture-buffer.ts + co-located unit test); no protocol/actions or tool-catalog edits (deferred to read-capture-page-actions). Deliberate signature deviation recorded: createCaptureRing<T extends object>(maxEntries: number = DEFAULT_MAX_ENTRIES) \u2014 `T` constrained to object for the {...entry, seq} spread, default value instead of `?:` (still callable with no arg); createCaptureRing(0) throws RangeError. No compensation (phase has none)."
+  },
+  {
+   "phaseId": "page-script-wrapper",
+   "status": "done",
+   "attempts": 1,
+   "compensationInvoked": false,
+   "startedAt": "2026-09-02T16:56:23.379120+00:00",
+   "completedAt": "2026-09-02T16:56:23.379120+00:00",
+   "gateRun": "cd tools/chrome-bridge && npm run verify (tsc --noEmit + eslint --max-warnings 0 + vitest: 16 files, 167 tests) \u2014 exit 0; new file alone 25 tests green; node .claude/hooks/check-tests.mjs --files tools/chrome-bridge/src/extension/page-script.ts \u2014 exit 0; root npm run verify:fast \u2014 5/5 green; mutation sanity (always-false truncated -> 2 fail; no-op reader.cancel() -> 1 fail)",
+   "gradeResult": {
+    "phaseId": "page-script-wrapper",
+    "dimensionScores": [
+     {
+      "dimensionId": "console-wrap-transparency",
+      "score": 10,
+      "pass": true,
+      "evidence": "original(...args) called before postConsole for all 5 levels; circular-arg + throwing-postMessage + double-install (env-shared PAGE_CAPTURE_INSTALLED_FLAG) tests all present; uncaught paths carry Error name+message."
+     },
+     {
+      "dimensionId": "fetch-preview-bounded-streaming",
+      "score": 10,
+      "pass": true,
+      "evidence": "getReader()+TextDecoder{stream:true}, break at MAX_BODY_PREVIEW_BYTES, await reader.cancel() in finally, no .text()/.json(); multi-byte-split, 204 null-body, endless-stream+cancelSpy, binary no-clone, Object.is(result,response) all tested."
+     },
+     {
+      "dimensionId": "fetch-error-and-xhr-paths",
+      "score": 9,
+      "pass": true,
+      "evidence": "rejected fetch rethrows same instance (.rejects.toBe(boom)) + failed:true/status:null; XHR per-instance WeakMap meta, loadend post, durationMs from env.now(), responseType gate, status 0 -> failed. Short of 10: URL-object input and responseType blob not covered by a test."
+     },
+     {
+      "dimensionId": "page-world-byte-bounding",
+      "score": 9,
+      "pass": true,
+      "evidence": "all text fields via boundText w/ imported caps; truncated ORs every field; afterEach replays every posted envelope through isCaptureEnvelope; 20x100KB worst-case asserts JSON.stringify(envelope).length<12000. Short of 10: tryJson runs full JSON.stringify before slice(0,WORK_SLICE) -> bounded output, unbounded work for a large non-circular object."
+     },
+     {
+      "dimensionId": "node-safe-bootstrap",
+      "score": 10,
+      "pass": true,
+      "evidence": "typeof window guard; env built from explicit window.* incl window.fetch.bind(window) and window.postMessage(env,'*'); test snapshots globalThis.fetch/console.log/flag before await import and asserts Object.is identity + flag undefined; no any/!/as in page-script.ts."
+     }
+    ],
+    "overallPass": true
+   },
+   "notes": "Graded 10/10/9/9/10 by a general-purpose subagent (not self-graded), overallPass; every dimension >= minScore 7. Only the two phase-listed files touched (page-script.ts + co-located unit test); PAGE_ACTIONS/tool-catalog untouched (deferred to read-capture-page-actions). Deviations from the roadmap phase text: env is abstracted via getFetch/setFetch + readInstalledFlag/setInstalledFlag (not a bare mutable `globalScope`/`postMessage`), keeping the installer cast-free; XHR open always forwards async (defaults to true) because lib.dom's open signature requires >=3 args. Known score-9 limitation (recorded, not blocking): serializeArgs' tryJson runs a full JSON.stringify on object args before slicing to WORK_SLICE \u2014 bounded output but O(arg size) work in the page world. No compensation (phase has none)."
+  },
+  {
+   "phaseId": "capture-forwarder",
+   "status": "done",
+   "attempts": 1,
+   "compensationInvoked": false,
+   "startedAt": "2026-09-02T17:02:36.244035+00:00",
+   "completedAt": "2026-09-02T17:02:36.244035+00:00",
+   "gateRun": "cd tools/chrome-bridge && npm run verify (tsc --noEmit + eslint --max-warnings 0 + vitest: 17 files, 171 tests, +4) \u2014 exit 0; node .claude/hooks/check-tests.mjs --files tools/chrome-bridge/src/extension/capture-forwarder.ts \u2014 exit 0; root npm run verify:fast \u2014 5/5 green; mutation sanity (drop source!==self guard \u2192 1 fail; catch rethrows \u2192 1 fail)",
+   "gradeResult": {
+    "phaseId": "capture-forwarder",
+    "dimensionScores": [
+     {
+      "dimensionId": "source-and-shape-gate",
+      "score": 10,
+      "pass": true,
+      "evidence": "Strict-identity event.source!==deps.self + shared isCaptureEnvelope import (no re-implemented shape check); tests reject each check independently, different-source test uses a distinct truthy object not null; valid-envelope test asserts sendToWorker called once with toBe same reference."
+     },
+     {
+      "dimensionId": "never-throws-into-page",
+      "score": 10,
+      "pass": true,
+      "evidence": "try{deps.sendToWorker(event.data)}catch{} empty catch with a comment forbidding console.*; guards run outside the try; recovery test flips shouldThrow so first call throws and second succeeds (call count 2, toBe on 2nd arg)."
+     },
+     {
+      "dimensionId": "side-effect-free-import",
+      "score": 8,
+      "pass": true,
+      "evidence": "Bootstrap guarded by typeof window && typeof chrome, delegates to exported installCaptureForwarder (no inline dup), void chrome.runtime.sendMessage with no eslint-disable, self:window; no @vitest-environment jsdom. Short of 10: no dedicated test explicitly asserting zero import side effects \u2014 only implicit."
+     },
+     {
+      "dimensionId": "export-naming-and-test-coverage",
+      "score": 10,
+      "pass": true,
+      "evidence": "Only exports are ForwarderDeps interface + installCaptureForwarder fn; handler param structural {source:unknown;data:unknown} so tests use plain object literals; test imports ForwarderDeps via dedicated import type line; +4 tests."
+     },
+     {
+      "dimensionId": "csp-rationale-header",
+      "score": 10,
+      "pass": true,
+      "evidence": "Opening /** */ block names connect-src, contrasts chrome.runtime.sendMessage vs a ws:// socket, states ISOLATED vs MAIN split and page world has no chrome.runtime, cites concrete site-breakage consequence and cross-references log-forwarder.ts."
+     }
+    ],
+    "overallPass": true
+   },
+   "notes": "Graded 10/10/8/10/10 by a general-purpose subagent (not self-graded), overallPass; every dimension >= its minScore (8/8/7/8/7). Only the two phase-listed files touched (capture-forwarder.ts + co-located unit test); no protocol/actions or tool-catalog edits. Deviation from phase text: bootstrap guard uses `typeof window === 'undefined' || typeof chrome === 'undefined'` (early-return form) rather than the positive `&&` wording, semantically identical. sendToWorker dep is sync `void` per contract; bootstrap uses `void chrome.runtime.sendMessage(...)` for no-floating-promises. No compensation (phase has none)."
+  },
+  {
+   "phaseId": "service-worker-capture-intake",
+   "status": "done",
+   "attempts": 1,
+   "compensationInvoked": false,
+   "startedAt": "2026-09-02T17:05:25.968341+00:00",
+   "completedAt": "2026-09-02T17:16:08.902883+00:00",
+   "gateRun": "cd tools/chrome-bridge && npm run verify -> exit 0 (tsc --noEmit clean; eslint --max-warnings 0 clean; vitest 19 files / 191 tests pass). Root npm run verify:fast -> 5/5 stages green, nothing under extension/ touched. node .claude/hooks/check-tests.mjs --files capture-store.ts capture-ports.ts service-worker.ts -> exit 0. grep: zero new eslint-disable/@ts-expect-error/@ts-ignore/as-unknown-as in changed production files.",
+   "gradeResult": {
+    "phaseId": "service-worker-capture-intake",
+    "dimensionScores": [
+     {
+      "dimensionId": "per-tab-isolation-and-routing",
+      "score": 10,
+      "pass": true,
+      "evidence": "Map<number,TabRings> keyed by tabId, lazily created in ringsFor(); interleaved 1,2,1,2 console+network test asserts all four (tab x ring) reads; dedicated per-(tab,ring) cursor-independence test; since/limit forwarded unchanged to ring.read (windowed test seq [3,4])."
+     },
+     {
+      "dimensionId": "eviction-and-unknown-tab-reads",
+      "score": 10,
+      "pass": true,
+      "evidence": "evict() is tabs.delete(tabId); unknown + evicted tab both return {entries:[],nextSince:0,dropped:false,truncated:false} for console and network; re-ingest-after-evict test asserts fresh ring seq restarts at 1; onTabRemoved wired via CapturePorts and fired in installCaptureIntake test; evict on unknown tab does not throw."
+     },
+     {
+      "dimensionId": "defensive-intake-validation",
+      "score": 9,
+      "pass": true,
+      "evidence": "isCaptureEnvelope gate + senderTabId===undefined||<0 guard (tests: {foo:1}, string, undefined, -1); boundText from protocol/capture.js with MAX_CONSOLE_TEXT_BYTES/MAX_BODY_PREVIEW_BYTES, no hard-coded limit; oversize console text and network bodyPreview tested within cap + truncated true; null bodyPreview stays null; listener returns void."
+     },
+     {
+      "dimensionId": "service-worker-wiring-no-side-effects",
+      "score": 10,
+      "pass": true,
+      "evidence": "ServiceWorkerDeps.capturePorts: CapturePorts; startServiceWorker calls installCaptureIntake and returns named StartedServiceWorker {client, captureStore}; chromeCapturePorts() only inside the typeof chrome guard; capture-ports.ts no top-level chrome.*; no capture file touches bridge-client outbox; test asserts each listener registered once and reads store off return value."
+     },
+     {
+      "dimensionId": "verify-green-and-test-naming",
+      "score": 10,
+      "pass": true,
+      "evidence": "npm run verify exit 0 (tsc + eslint --max-warnings 0 + vitest 19 files/191 tests); root verify:fast green, nothing under extension/ touched; createCaptureStore/installCaptureIntake/CaptureStore all named in capture-store.unit.test.ts; capture-ports.ts has a real co-located test (chrome global stubbed); zero new eslint-disable/@ts-expect-error/as unknown as."
+     }
+    ],
+    "overallPass": true
+   },
+   "notes": "New: capture-ports.ts (CapturePorts + chromeCapturePorts), capture-store.ts (createCaptureStore/installCaptureIntake/CaptureStore), plus co-located unit tests. Modified: service-worker.ts return type is now StartedServiceWorker {client, captureStore}; the horizon-1 root .testguard.json exemption is /ports\\.ts$/ which does NOT match 'capture-ports.ts' (needs a slash before 'ports'), so a real co-located capture-ports.unit.test.ts was written instead of relying on the exemption. compensation not needed."
+  },
+  {
+   "phaseId": "extension-build-entries",
+   "status": "done",
+   "attempts": 1,
+   "compensationInvoked": false,
+   "startedAt": "2026-09-02T17:21:44.545976+00:00",
+   "completedAt": "2026-09-02T17:21:44.545976+00:00",
+   "gateRun": "cd tools/chrome-bridge && npm run build:extension (3-pass) + rubric mechanical checks (iife/grep/md5 repeatability/stale-purge/bogus-mode) && npm run verify (tsc + eslint --max-warnings 0 + vitest: 19 files/191 tests, exit 0)",
+   "gradeResult": {
+    "phaseId": "extension-build-entries",
+    "dimensionScores": [
+     {
+      "dimensionId": "content-script-bundle-format",
+      "score": 9,
+      "pass": true,
+      "evidence": "Clean rebuild: exactly service-worker.js/page-script.js/capture-forwarder.js; both content scripts open `(function() { \"use strict\";`, zero import/export, shared capture.ts inlined; service-worker.js keeps format es."
+     },
+     {
+      "dimensionId": "manifest-content-script-declarations",
+      "score": 8,
+      "pass": true,
+      "evidence": "Two content_scripts entries, page-script MAIN + forwarder ISOLATED-default, document_start/<all_urls>; permissions unchanged, no web_accessible_resources; built manifest byte copy. Unpacked Chrome load not performed (no session) -> capped at 8."
+     },
+     {
+      "dimensionId": "build-repeatability-and-pass-ordering",
+      "score": 10,
+      "pass": true,
+      "evidence": "Unknown --mode throws via switch default (exit 1, names bad mode) with no silent fallback; only service-worker sets emptyOutDir:true and runs first; two clean builds md5-identical; stale.js purged."
+     },
+     {
+      "dimensionId": "lint-and-verify-green",
+      "score": 9,
+      "pass": true,
+      "evidence": "npm run verify exit 0 (191 tests); mode-switch means no new root config file; no eslint-disable; header comment rewritten naming three modes; README names three files + MAIN/ISOLATED."
+     }
+    ],
+    "overallPass": true
+   },
+   "notes": "Graded 9/8/10/9 by a general-purpose subagent (not self-graded), overallPass; every dimension >= minScore 7. Only the 4 phase-listed files touched (vite.extension.config.ts, extension/manifest.json, package.json, README.md); eslint.config.mjs untouched (mode-switch, no new root config file). manifest-content-script-declarations capped at 8: no real Chrome session available for an unpacked-load check. Build: 3 chained vite passes (service-worker ES + emptyOutDir first, then page-script & capture-forwarder IIFE with emptyOutDir:false); unknown --mode throws."
+  },
+  {
+   "phaseId": "read-capture-page-actions",
+   "status": "done",
+   "attempts": 3,
+   "compensationInvoked": false,
+   "startedAt": "2026-09-02T17:37:31.079591+00:00",
+   "gateRun": "cd tools/chrome-bridge && npm run verify -> tsc 0 / eslint --max-warnings 0 0 / vitest 19 files 204 tests 0; npm run build:extension (3-pass) 0; repo-root npm run verify:fast -> 5/5 green, nothing under extension/ or services/. Deliberate-omission tsc proof recorded (both TS2741, restored, final tsc 0). LIVE real-Chrome end-to-end (relay :8766 + standalone extension loaded unpacked, driven via throwaway ws controller against a local page doing console.log/warn/error + fetch + XHR).",
+   "notes": "IMPLEMENTATION COMPLETE, MANUAL CHECK PENDING.\nFiles changed (all from phase filesAffected): src/protocol/actions.ts (+2 PAGE_ACTIONS -> 10), src/protocol/types.ts (ReadCaptureParams + CaptureReadResult<T> defined locally to keep src/protocol free of an inward dep on src/extension; ReadConsole/NetworkMessages Params+Results added to PageActionParams/Results), src/extension/page-actions.ts (pageActionHandlers(ports, captureStore); exported resolveSince/resolveReadLimit; readCapture(channel) factory; both handlers guard()-wrapped, NO_ACTIVE_TAB on no tab, since/limit hand-validated), src/extension/service-worker.ts (passes captureStore to pageActionHandlers), src/mcp/tool-catalog.ts (SINCE_LIMIT_PROPERTIES `as const` shared const, 2 TOOL_CATALOG entries), README.md (ten tools everywhere; new readConsoleMessages/readNetworkRequests section with fields + cursor + caps DEFAULT_MAX_ENTRIES=500 / MAX_CONSOLE_TEXT_BYTES=8192 / MAX_BODY_PREVIEW_BYTES=4096 verified against code; in-memory/worker-suspension caveat; Manual end-to-end check extended with the cursor round-trip step, heading count unchanged at 1). Tests: page-actions.unit.test.ts (+ resolveSince/resolveReadLimit boundary table, readConsole/readNetwork routing, over-max clamp asserts store received MAX_READ_LIMIT, bad since/limit -> {error} without touching store, NO_ACTIVE_TAB parity vs getPageText, guard-wrapped throwing store -> {error}, equal-to-nextSince empty window); tool-catalog.unit.test.ts (10 tools, integer/minimum, additionalProperties:false, no required, nextSince + non-destructive wording, identical shared property block); actions.unit.test.ts updated to 10.\nDELIBERATE-OMISSION TYPECHECK PROOF (both restored, final tsc exit 0, verified):\n  (a) remove `readNetworkRequests: guard(raw.readNetworkRequests),` from the handler map return in page-actions.ts ->\n      src/extension/page-actions.ts(280,3): error TS2741: Property 'readNetworkRequests' is missing in type '{ ping: Handler; ...; readConsoleMessages: Handler; }' but required in type 'Record<\"ping\" | ... | \"readNetworkRequests\", Handler>'.\n  (b) remove the `readNetworkRequests` TOOL_CATALOG entry from tool-catalog.ts ->\n      src/mcp/tool-catalog.ts(74,14): error TS2741: Property 'readNetworkRequests' is missing in type '{ ping: {...}; ...; readConsoleMessages: {...}; }' but required in type 'Record<\"ping\" | ... | \"readNetworkRequests\", ToolCatalogEntry>'.\n  Note (per phase text): PageActionParams/PageActionResults are plain interfaces, so an omission there is only caught where `Command` maps over PageAction (PageActionParams[\"readConsoleMessages\"] -> property error) -- accepted for this horizon.\nserver.ts unchanged: capture-read results fall through to the JSON text path.\nNOT GRADED: grading deferred until the manual Chrome check is done, since the dominant rubric dimension (live-chrome-cursor-roundtrip, minScore 8) cannot pass without it and its passCriteria explicitly require the blocked/MANUAL_CHROME_CHECK_PENDING state in that case.\n\n--- attempt 2 (--retry, 2026-09-02T17:37:31.079591+00:00) ---\nExtension reconnected but stale. Probe via a throwaway ws controller on :8766:\n  getPageText -> {\"text\":\"capture test\",\"totalChars\":12,\"truncated\":false}  (my local test page loaded, so navigateTo works too)\n  bogusActionXyz -> TIMEOUT (no response)\n  readConsoleMessages {since:0,limit:5} -> TIMEOUT\n  readNetworkRequests {since:0,limit:5} -> TIMEOUT\ngrep dist/extension/service-worker.js for readConsoleMessages|readNetworkRequests -> 6 (build is current, the Chrome-loaded copy is not). Also note: the chrome-bridge MCP server process Claude Code is connected to still advertises only 8 tools (pre-tool-catalog-change) \u2014 restart it / reconnect `/mcp` before the MCP-path check, though the ws-relay probe above already exercises the extension directly.\nNo code change this attempt. Still NOT graded.\n\n--- attempt 3 (--retry, 2026-09-02T17:45:27.864043+00:00) \u2014 DONE ---\nExtension reloaded with the fresh build. Live end-to-end via a throwaway ws controller (scratchpad/live-check.mjs starts a local http page that console.log/warn/error + fetch(/data) + XHR(/xhrdata)):\n  readConsoleMessages {since:0,limit:50} -> 5 entries [seq1 log \"CAPTURE_TEST_MARKER_LOG hello world\", seq2 warn \"CAPTURE_TEST_MARKER_WARN careful\", seq3 error \"CAPTURE_TEST_MARKER_ERROR boom\", seq4 log \"xhr-done xhr-body-ok\", seq5 log \"fetch-done {...}\"], nextSince 5\n  readNetworkRequests {since:0,limit:50} -> 2 entries [seq1 GET /xhrdata 200 text/plain bodyPreview \"xhr-body-ok\", seq2 GET /data 200 application/json bodyPreview '{\"hello\":\"from-fetch\",...}'], nextSince 2\n  [reload page] readConsoleMessages {since:5} -> seq 6..10 only (no repeat), nextSince 10; readNetworkRequests {since:2} -> seq 3..4 only, nextSince 4  => nextSince cursor round-trip verified\n  readConsoleMessages {since:-1} -> error \"`since` must be a non-negative integer when provided\"\n  readNetworkRequests {limit:\"3\"} -> error \"`limit` must be a positive integer when provided\"\n  after 60s idle: readConsoleMessages {since:0} -> seq1 still retained, dropped:false  => keepalive kept buffers alive\nGraded 9/9/9/9/9 by a general-purpose subagent (not self-graded), overallPass; every dimension >= its minScore (8/7/7/7/7). One post-grade README polish (service-worker.js bullet now lists the two new action names) \u2014 README only, no gate impact. No compensation invoked (compensation documented in the roadmap; not needed).",
+   "completedAt": "2026-09-02T17:45:27.864043+00:00",
+   "gradeResult": {
+    "phaseId": "read-capture-page-actions",
+    "dimensionScores": [
+     {
+      "dimensionId": "live-chrome-cursor-roundtrip",
+      "score": 9,
+      "pass": true,
+      "evidence": "Real-Chrome check 2026-09-02 vs relay :8766, page http://127.0.0.1:38123/: readConsoleMessages call#1 {since:0} -> 5 entries nextSince 5; readNetworkRequests call#1 -> 2 entries nextSince 2; call#2 since=prev nextSince returns only seq 6..10 / 3..4, no first-call entry repeats; quoted 'CAPTURE_TEST_MARKER_LOG hello world' + URLs /data (application/json) /xhrdata; 60s idle seq1 retained dropped:false; discoveries.md 'live capture verified' line; since:-1 and limit:\"3\" -> command-response errors. Not 10: MCP-server tools/list path not re-listed live (needs server restart); proof stops at the extension handler."
+     },
+     {
+      "dimensionId": "since-limit-validation",
+      "score": 9,
+      "pass": true,
+      "evidence": "resolveSince/resolveReadLimit hand-validate, return {error} not throw; unit tests cover -1/1.5/NaN/\"3\"/null/{} (since) and 0/-1/1.5/\"3\"/NaN (limit), assert store received MAX_READ_LIMIT on over-max, store untouched on bad input, NO_ACTIVE_TAB parity with getPageText, guard-wrapped throwing store -> {error}, equal-to-nextSince empty window. Not 10: nothing beyond a complete implementation of every passCriteria item."
+     },
+     {
+      "dimensionId": "typecheck-parity-proof",
+      "score": 9,
+      "pass": true,
+      "evidence": "PAGE_ACTIONS exactly 10; handler map Record<PageAction,Handler>, TOOL_CATALOG Record<PageAction,ToolCatalogEntry>; names identical across 4 files, no singular/plural drift; both tsc TS2741 errors pasted (page-actions.ts(280,3), tool-catalog.ts(74,14)), restored, final tsc 0; listTools() toHaveLength(10) from PAGE_ACTIONS order; verify:fast 5/5, nothing under extension/. Not 10: PageActionParams/Results omission only indirectly caught via the Command mapped type."
+     },
+     {
+      "dimensionId": "mcp-schema-strictness",
+      "score": 9,
+      "pass": true,
+      "evidence": "Single SINCE_LIMIT_PROPERTIES `as const` mirroring MAX_CHARS_PROPERTY, spread into both (since defined once); since integer minimum 0, limit integer minimum 1, descriptions name defaults 0/100 and max 500; both additionalProperties:false, no required; unit test asserts that + /nextSince/ + non-destructive wording; listTools() 10 with no server.ts transform. Not 10: non-destructive note is prose not a schema annotation; identical-block test compares wording not object identity."
+     },
+     {
+      "dimensionId": "readme-accuracy",
+      "score": 9,
+      "pass": true,
+      "evidence": "grep eight/'8 tools'/'8 page' -> none; MCP config + manual-check step 3 say ten/10; new read* section explains entries/nextSince/dropped/truncated + since/limit + reject-not-coerce; caps 500/8192/4096 match capture-buffer.ts/capture.ts constants; in-memory/lost-on-suspension caveat; existing 'Manual end-to-end check' heading (count unchanged) gained the cursor round-trip + idle step. Post-grade polish: the service-worker.js bullet enumeration also updated to list both new names. Not 10: minor prose completeness."
+     }
+    ],
+    "overallPass": true
+   }
+  }
+ ]
+}

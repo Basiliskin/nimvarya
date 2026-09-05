@@ -1,0 +1,589 @@
+{
+  "task": "Horizon 16 of agent-agnostic-browser-bridge: generalize captureTab's non-throwing too-large result pattern to executeScript and evaluatePage, fix findElement's duplicated size-limit constants, and add an explicit action to close the sandbox tab on request.",
+  "analysis": {
+    "objective": "Generalize captureTab's non-throwing, structured too-large result pattern (CaptureTabFailureResult) to executeScript and its CDP twin evaluatePage (both currently throw on oversize despite sharing one constant), fix findElement's duplicated MAX_MATCHES/MAX_TEXT_CHARS constants (a real platform constraint: the chrome.scripting-injected function cannot close over module scope, so the limits must be threaded through as call arguments), and add a new explicit closeSandboxTab page action so the extension's single dedicated tab no longer stays open indefinitely.",
+    "successDefinition": "executeScript and evaluatePage both return a defined non-throwing too-large result instead of throwing, surfaced as isError:true at the MCP layer; findElement's match/text-length limits are defined exactly once (module-level) and threaded into the isolated-world function as arguments; a new closeSandboxTab action closes the sandbox tab and clears its persisted id (no-op-safe, scoped only to the sandbox tab, reusing existing capture-buffer eviction); tools/chrome-bridge's own npm run verify (tsc/eslint/vitest) is green; README and the MCP tool catalog are updated; a live-Chrome head-to-head via the chrome-bridge MCP demonstrates both the oversize isError path and the close/recreate tab lifecycle against a real running extension.",
+    "assumptions": [
+      "Horizon 15 completed successfully (render-the-tab primitive shipped, full-page capture live-verified) so this horizon does not need to revisit that primitive",
+      "evaluatePage moves in lockstep with executeScript in this horizon because they currently share the exact same MAX_EXECUTE_SCRIPT_RESULT_CHARS constant and near-identical throw/error-sentinel mechanism (page-actions.ts:648-673, debugger-ports.ts:588-595); leaving only one non-throwing would be a foreseeable, avoidable inconsistency",
+      "findElement's injected function genuinely cannot close over module scope (chrome.scripting structured-clones the function reference into an isolated world) — the only mechanical fix is threading the limits through as call arguments, confirmed by a pre-implementation grep that findElement's call site is the sole invocation of that injected function",
+      "The user explicitly chose an EXPLICIT, MCP-caller-invoked closeSandboxTab action over any automatic close-on-disconnect/suspend behavior, because relay disconnects are routine/transient (bridge-client.ts auto-reconnects) and SW suspension is undetectable/already-lossy by design, and because this project has repeated precedent (horizon 2 pull-only, horizon 6 'deliberately left in place', horizon 15 explicit-scoped-restore) against implicit behavior",
+      "getTabState stays strictly read-only per its horizon-7 binding decision; closeSandboxTab is a new PAGE_ACTION, not a change to getTabState",
+      "Byte-size caps for readConsoleMessages/readNetworkRequests are explicitly deferred (dropped from this horizon's scope at the user's request during the Alignment Preview) even though they currently have zero size cap; this is intentional, not an oversight",
+      "closeSandboxTab reuses the existing generic onTabRemoved listener (capture-ports.ts) for capture-buffer eviction rather than duplicating that cleanup logic"
+    ],
+    "risks": [
+      "executeScript and evaluatePage use different transports (chrome.scripting vs CDP) despite sharing one size constant; assuming transport parity without diffing the two oversize branches first could produce two subtly different result shapes under the same discriminant",
+      "chrome.scripting silently passes undefined for missing trailing arguments rather than erroring — if findElement's injected function turns out not to be the sole caller, threading the limits as arguments could leave a second caller silently receiving undefined limits",
+      "Adding an explicit closeSandboxTab action that resolves the tab id via a broader chrome.tabs.query instead of the existing stored-id lookup could close the wrong tab under a multi-tab-matching race; the roadmap requires reusing sandbox-ports.ts's existing lookup specifically to avoid this",
+      "A too-large outcome surfacing as isError:true at the MCP layer could be implemented by string-matching a generic error field instead of a proper discriminant, conflating genuine thrown errors with the new non-throwing oversize outcome — defeating the horizon's own design intent",
+      "The live-Chrome closing verification is the step most likely to be asserted without real evidence (\"it worked\") rather than measured (tab id before/after, actual isError:true response body) — every prior horizon's closing phase has required concrete measured evidence and this one is no different"
+    ],
+    "outOfScope": [
+      "Byte-size caps for readConsoleMessages/readNetworkRequests — dropped from this horizon at the user's request; they remain uncapped by byte size (only entry-count capped) until a future horizon",
+      "JPEG/quality downscale rung for captureTab (deferred per decisions.md horizon 14)",
+      "Removing the dead active-tab code surface (queryActiveTab/captureVisibleTab/activeTab permission) — repeatedly deferred since horizon 6",
+      "The persistent-CDP-session redesign (replacing per-command withDebuggerSession attach/detach)",
+      "A second render-the-tab primitive consumer (virtualized/lazy-content reads, trusted CDP input)",
+      "Measuring the true AI-client image-block reject size (still-open blocker since horizon 4/13/14/15)",
+      "Any pagination/continuation retrieval mechanism for truncated/oversize results",
+      "Any change to captureTab's own image ladder mechanism or ceiling value",
+      "Automatic/implicit sandbox-tab closing on relay disconnect or service-worker suspension — explicitly rejected in favor of an explicit caller-invoked action"
+    ],
+    "ubiquitousLanguage": [
+      "sandbox tab",
+      "page action",
+      "PAGE_ACTIONS",
+      "chrome.scripting injected function",
+      "CDP (chrome.debugger)",
+      "SizeCeilingOutcome",
+      "size ceiling",
+      "oversize outcome",
+      "isError",
+      "MCP tool catalog",
+      "closeSandboxTab",
+      "MAX_FIND_ELEMENT_MATCHES",
+      "MAX_ELEMENT_TEXT_CHARS",
+      "MAX_EXECUTE_SCRIPT_RESULT_CHARS",
+      "chrome-bridge-extension",
+      "chrome-bridge-mcp"
+    ],
+    "domainShape": "technical",
+    "domainShapeReason": "Developer-tooling machinery inside an MCP bridge (result-shape policy and tab lifecycle code) with no business entities a domain expert would recognize, consistent with vision.md's classification."
+  },
+  "discoveryFindings": [
+    {
+      "area": "captureTab result shape (source pattern)",
+      "finding": "CaptureTabFailureResult (protocol/types.ts:343-356) is { captured: false, reason, size?, limit?, floor?, attempts?, detail? }; only the ladder mechanism is image-specific, the discriminant+size/limit shape is the reusable pattern.",
+      "filePath": "tools/chrome-bridge/src/protocol/types.ts",
+      "implication": "The new shared helper generalizes only the flat-ceiling shape, not the downscale ladder."
+    },
+    {
+      "area": "executeScript/evaluatePage shared oversize mechanism",
+      "finding": "coerceExecuteScriptOutcome (page-actions.ts:648-673) throws/returns {error} over MAX_EXECUTE_SCRIPT_RESULT_CHARS; debugger-ports.ts:588-595 imports the same constant and duplicates near-identical behavior for the CDP evaluatePage path. Two existing tests hard-assert the current throw contract (page-actions.unit.test.ts:1983, :2110-2126).",
+      "filePath": "tools/chrome-bridge/src/extension/page-actions.ts",
+      "implication": "Both must move together or diverge; the two tests must be rewritten, not just one."
+    },
+    {
+      "area": "findElement duplicated constants — platform constraint",
+      "finding": "Module-level MAX_FIND_ELEMENT_MATCHES/MAX_ELEMENT_TEXT_CHARS (page-actions.ts:99,106) are never referenced by the handler; the chrome.scripting-injected function (887-972) redeclares local consts (890-891) because it is structured-cloned into an isolated world and cannot close over module scope (documented at 883-886).",
+      "filePath": "tools/chrome-bridge/src/extension/page-actions.ts",
+      "implication": "The only mechanical fix is threading constants through as injected-function arguments."
+    },
+    {
+      "area": "sandbox tab creation and lifecycle",
+      "finding": "resolveTabId() (sandbox-ports.ts:50-109) lazily creates the sandbox tab via chrome.tabs.create({active:false}) and persists its id in chrome.storage.local under SANDBOX_TAB_ID_KEY (line 24). No chrome.tabs.remove call exists anywhere in tools/chrome-bridge/src today (confirmed by repo-wide grep) — closing is entirely greenfield.",
+      "filePath": "tools/chrome-bridge/src/extension/sandbox-ports.ts",
+      "implication": "closeSandboxTab must reuse this existing storage key and lookup, and clear it on close so the next resolveTabId() lazily recreates a fresh tab via its existing fallback path."
+    },
+    {
+      "area": "existing tab-removal cleanup listener",
+      "finding": "onTabRemoved (capture-ports.ts:34,49-53) already wires chrome.tabs.onRemoved to evict that tab's console/network capture buffers for ANY tab, per horizon 2's decision. It is not sandbox-specific and needs no change.",
+      "filePath": "tools/chrome-bridge/src/extension/capture-ports.ts",
+      "implication": "closeSandboxTab should call chrome.tabs.remove and let this listener fire naturally, not duplicate its cleanup logic."
+    },
+    {
+      "area": "getTabState read-only contract",
+      "finding": "getTabState (page-actions.ts:1225-1253) is a documented, binding (decisions.md horizon 7) READ-ONLY, non-mutating peek.",
+      "filePath": "tools/chrome-bridge/src/extension/page-actions.ts",
+      "implication": "closeSandboxTab must be a new PAGE_ACTION, never folded into getTabState."
+    },
+    {
+      "area": "no natural session boundary / pull-only precedent",
+      "finding": "bridge-client.ts auto-reconnects on any disconnect (lines 115-154) — disconnects are routine, not session-end signals. decisions.md records repeated explicit-over-implicit precedent: horizon 2's pull-only capture decision, horizon 6's 'deliberately left in place' sandbox-tab decision, horizon 15's explicit-scoped focus-emulation restore.",
+      "filePath": "tools/chrome-bridge/src/extension/bridge-client.ts",
+      "implication": "Confirms the user's chosen design: an explicit caller-invoked close action, not automatic cleanup on disconnect or SW suspension."
+    },
+    {
+      "area": "MCP surfacing of non-captureTab tools",
+      "finding": "handleToolCall (mcp/server.ts:135-165) special-cases only captureTab (isCaptureTabImage branch, 151-159); every other action falls through to a generic non-error textResult (line 160).",
+      "filePath": "tools/chrome-bridge/src/mcp/server.ts",
+      "implication": "A new branch is needed to flip isError:true for executeScript/evaluatePage's too-large outcome, scoped to just those two tools."
+    }
+  ],
+  "requiredMaterials": [],
+  "phases": [
+    {
+      "id": "shared-oversize-result-helper",
+      "name": "Add shared oversize result helper",
+      "goal": "Introduce a small colocated helper that turns an over-cap byte size into a consistent structured result, plus a shared type for it, with zero behavior change to any existing tool.",
+      "rationale": "executeScript and evaluatePage currently throw on oversize results with duplicated ad-hoc logic; before either can be made non-throwing, the codebase needs one shared, unit-tested primitive (checkSizeLimit / buildOversizeResult + a SizeCeilingOutcome type) that both call sites will consume in the next phase. Building it standalone first keeps this phase's blast radius tiny and lets the size-comparison logic be verified in isolation before anything depends on it. The type is named SizeCeilingOutcome (not OversizeOutcome) to avoid implying captureTab's existing downscale-ladder sizing semantics — a one-line doc comment on the type must say so explicitly.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/extension/size-limits.ts",
+        "tools/chrome-bridge/src/extension/size-limits.unit.test.ts"
+      ],
+      "changes": [
+        "Add a SizeCeilingOutcome type (flat ceiling result, e.g. {withinLimit:boolean, actualBytes:number, limitBytes:number}) with a one-line doc comment distinguishing it from captureTab's ladder-aware downscale sizing",
+        "Add checkSizeLimit(bytes, limitBytes): SizeCeilingOutcome — pure flat comparison, no I/O, treating exactly-at-cap as within limit",
+        "Add buildOversizeResult(...) helper that shapes a consistent non-throwing result payload from a SizeCeilingOutcome, generic and not coupled to any one tool's field names",
+        "Unit-test both helpers in isolation: under-cap, exactly-at-cap, and over-cap cases, asserting real values not just non-throw"
+      ],
+      "expectedResult": "A new, fully unit-tested size-limits.ts module exporting SizeCeilingOutcome, checkSizeLimit, and buildOversizeResult; no existing file changed and no existing test behavior altered.",
+      "boundedContext": "chrome-bridge-extension",
+      "layer": "infrastructure",
+      "dependsOn": [],
+      "order": 1,
+      "blastRadius": "small",
+      "inputs": [
+        "page-actions.ts:648-673 (coerceExecuteScriptOutcome, current throw contract to be replaced next phase)",
+        "debugger-ports.ts:588-595 (CDP evaluatePage oversize path, current throw contract to be replaced next phase)"
+      ],
+      "rubric": [
+        {
+          "dimensionId": "shared-type-semantics",
+          "label": "SizeCeilingOutcome type is correctly shaped and documented",
+          "ruleStatement": "The new module exports a SizeCeilingOutcome type with fields describing a flat ceiling comparison, carrying a one-line doc comment explicitly distinguishing it from captureTab's downscale-ladder sizing semantics.",
+          "passCriteria": "SizeCeilingOutcome is exported from size-limits.ts, has fields unambiguously representing a within-limit signal plus actual/limit byte counts, with a doc comment on the type itself stating it is a flat ceiling result distinct from captureTab's ladder-aware sizing.",
+          "failureExamples": [
+            "Dev names the type SizeCeilingOutcome with the right fields, but the doc comment just says '// size outcome type' without mentioning captureTab or the ladder distinction",
+            "Dev adds the disambiguating comment but places it on checkSizeLimit instead of on the type declaration, so hovering the type in an editor shows no disambiguation"
+          ],
+          "minScore": 7
+        },
+        {
+          "dimensionId": "check-size-limit-purity",
+          "label": "checkSizeLimit is a pure, correct flat comparator",
+          "ruleStatement": "checkSizeLimit(bytes, limitBytes) performs a pure, synchronous, side-effect-free comparison and returns a SizeCeilingOutcome correct for under-cap, exactly-at-cap, and over-cap inputs, treating exactly-at-cap as within limit.",
+          "passCriteria": "Function does no I/O, calls no chrome.*/DOM/async API, returns withinLimit true when bytes <= limitBytes and false when bytes > limitBytes, with actualBytes/limitBytes echoing the inputs unchanged.",
+          "failureExamples": [
+            "Dev implements the comparison as bytes < limitBytes (strict), so exactly-at-cap is reported as over-limit, inverting the stated boundary",
+            "Function is correct but declared async / returns a Promise unnecessarily, forcing every future call site to await a pure comparison"
+          ],
+          "minScore": 8
+        },
+        {
+          "dimensionId": "build-oversize-result-shape",
+          "label": "buildOversizeResult produces a consistent, consumable non-throwing payload",
+          "ruleStatement": "buildOversizeResult takes a SizeCeilingOutcome plus minimal generic context and returns a plain, serializable result object shaped for a future non-throwing tool handler, without embedding tool-specific fields only executeScript or evaluatePage would have.",
+          "passCriteria": "Helper returns a plain object built only from generic inputs, contains no hardcoded reference to a specific PAGE_ACTIONS action name or tool-specific field, and is unit-tested to show its output shape.",
+          "failureExamples": [
+            "Dev bakes in a field like actionName:'executeScript' or an MCP content-block wrapper shape lifted directly from executeScript's current code, coupling the helper to one call site before phase 2 starts",
+            "Helper silently discards limitBytes/actualBytes from the outcome instead of surfacing them, so a future caller can't report actual vs limit size"
+          ],
+          "minScore": 7
+        },
+        {
+          "dimensionId": "unit-test-coverage",
+          "label": "Both helpers are unit-tested across the three required boundary cases",
+          "ruleStatement": "size-limits.unit.test.ts exercises checkSizeLimit and buildOversizeResult with under-cap, exactly-at-cap, and over-cap inputs, asserting on actual returned values, not just non-throw.",
+          "passCriteria": "Distinct test cases for under-cap, exactly-at-cap, over-cap for checkSizeLimit with real value assertions; buildOversizeResult exercised at least for the over-cap case with a shape assertion.",
+          "failureExamples": [
+            "Three test cases all assert only toBeDefined()/not.toThrow() rather than checking withinLimit/actualBytes/limitBytes, so a boundary regression would pass silently",
+            "Exactly-at-cap tested for checkSizeLimit but omitted for buildOversizeResult, and buildOversizeResult special-cases withinLimit===true by returning undefined unnoticed"
+          ],
+          "minScore": 7
+        },
+        {
+          "dimensionId": "zero-behavior-change-isolation",
+          "label": "No existing file touched, no existing test behavior altered",
+          "ruleStatement": "Only the two new files are added; no existing source file (captureTab, executeScript, evaluatePage, findElement, or their constants) is modified, and no existing test is edited.",
+          "passCriteria": "File list for the phase shows exactly two new files and zero modifications to any pre-existing file; existing test suite passes unchanged.",
+          "failureExamples": [
+            "Dev 'helpfully' refactors findElement's duplicated constants in this same phase since it's mentioned in the horizon objective, violating the zero-behavior-change constraint",
+            "Dev adds a barrel export/index.ts touch to wire up the new module for convenience, counting as an existing-file modification"
+          ],
+          "minScore": 8
+        },
+        {
+          "dimensionId": "type-quality-and-repo-conventions",
+          "label": "New code follows repo TypeScript strictness and layering rules",
+          "ruleStatement": "The new module uses no any, no non-null assertions, correct type-only imports where applicable, and stays a pure/self-contained utility without chrome.*/DOM dependencies.",
+          "passCriteria": "tsc --noEmit and eslint --max-warnings 0 pass on the new files; no any/!/JSON.parse-as-T patterns; module has no chrome.*/DOM usage.",
+          "failureExamples": [
+            "Dev types a field loosely in a way that passes a lenient check but fails the repo's strict lint rule",
+            "Dev imports a type via a value import instead of `import type`, failing verbatimModuleSyntax/consistent-type-imports in CI"
+          ],
+          "minScore": 7
+        }
+      ],
+      "healerHint": "When healing, first check whether the failure is about the type's doc comment placement/wording — the fix is a one-line JSDoc-style comment directly above `type SizeCeilingOutcome` naming captureTab's downscale ladder and stating this type is unrelated. For checkSizeLimit boundary bugs, remember exactly-at-cap must count as within limit (use <=, not <), and keep the function fully synchronous and pure. For buildOversizeResult, strip out anything copy-pasted from executeScript's/evaluatePage's current oversize-handling code (tool names, MCP wrappers) — it should accept only the SizeCeilingOutcome and generic context, still surfacing actualBytes/limitBytes. For weak tests, replace toBeDefined()/not.toThrow() with concrete value assertions for under-cap, exactly-at-cap, and over-cap, plus an equivalent buildOversizeResult over-cap case. If any existing file was touched, revert that change — this phase is additive-only. Run tsc --noEmit and eslint --max-warnings 0 against the two new files before resubmitting."
+    },
+    {
+      "id": "nonthrowing-executescript-evaluatepage-oversize",
+      "name": "Make executeScript and evaluatePage return oversize results",
+      "goal": "Replace the current throw-on-oversize behavior of executeScript and evaluatePage with a non-throwing structured result built on the new SizeCeilingOutcome helper, updating the tests that hard-assert the old throw contract.",
+      "rationale": "Both tools currently throw an error when their result exceeds the size cap, an inconsistent caller experience versus a normal too-large result the caller can branch on. This phase rewires the two independent oversize code paths (chrome.scripting-based executeScript and CDP-based evaluatePage) onto the shared helper from the prior phase. Because the two paths use different transports despite sharing the same size constant, the two oversize-handling code paths must be diffed side by side before implementation to confirm they truly produce an equivalent result shape under the shared helper, rather than assuming transport parity.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/extension/page-actions.ts",
+        "tools/chrome-bridge/src/extension/debugger-ports.ts",
+        "tools/chrome-bridge/src/extension/page-actions.unit.test.ts"
+      ],
+      "changes": [
+        "Before editing, diff the coerceExecuteScriptOutcome oversize branch (page-actions.ts:648-673) against the CDP evaluatePage oversize branch (debugger-ports.ts:588-595) to confirm both can produce an equivalent SizeCeilingOutcome-based result despite differing transports",
+        "Rewrite coerceExecuteScriptOutcome (page-actions.ts:648-673) to call checkSizeLimit/buildOversizeResult and return the new outcome instead of throwing/returning {error}",
+        "Rewrite the CDP evaluatePage oversize path (debugger-ports.ts:588-595) to do the same, reconciling any transport-specific field differences explicitly rather than dropping them",
+        "Update the two existing tests that hard-assert the old throw contract (page-actions.unit.test.ts:1983 and :2110-2126) to assert the new non-throwing result shape",
+        "Add new under-cap tests confirming normal (non-oversize) results are unaffected for both tools",
+        "Do not wrap the surrounding success/error handling in a broader try/catch that would swallow unrelated failures (injection errors, CDP disconnects) into an oversize-shaped result"
+      ],
+      "expectedResult": "executeScript and evaluatePage both return a structured too-large result instead of throwing when over the size cap, backed by shared-helper unit tests plus updated/added tests in page-actions.unit.test.ts.",
+      "boundedContext": "chrome-bridge-extension",
+      "layer": "infrastructure",
+      "dependsOn": ["shared-oversize-result-helper"],
+      "order": 2,
+      "blastRadius": "medium",
+      "inputs": [
+        "page-actions.ts:648-673 (coerceExecuteScriptOutcome)",
+        "debugger-ports.ts:588-595 (CDP evaluatePage oversize path)",
+        "page-actions.unit.test.ts:1983,:2110-2126 (tests asserting current throw contract)",
+        "size-limits.ts (new helper from prior phase)"
+      ],
+      "rubric": [
+        {
+          "dimensionId": "both-transports-rewired",
+          "label": "Both executeScript and evaluatePage rewired",
+          "ruleStatement": "The oversize branch of BOTH coerceExecuteScriptOutcome (chrome.scripting transport) AND the CDP evaluatePage oversize path must be rewritten to use the shared SizeCeilingOutcome helper instead of throwing.",
+          "passCriteria": "Grep/diff confirms neither branch contains a throw for the oversize case; both call the shared helper and return a non-throwing oversize result of equivalent shape.",
+          "failureExamples": [
+            "Dev rewrites coerceExecuteScriptOutcome but leaves debugger-ports.ts's CDP oversize branch throwing, having only skimmed it rather than diffing as required",
+            "Dev updates both but the CDP path returns a different shape (e.g. omits a field executeScript's path includes) because the pre-implementation diff was skipped"
+          ],
+          "minScore": 7
+        },
+        {
+          "dimensionId": "prior-diff-performed",
+          "label": "Oversize branches diffed before implementation",
+          "ruleStatement": "The two oversize branches must have been compared to confirm they can produce an equivalent SizeCeilingOutcome-based shape before the rewrite, not assumed equivalent by transport-name similarity.",
+          "passCriteria": "Evidence shows the two branches converge on identical field names/types for the oversize result, with any transport-specific divergence explicitly reconciled rather than silently dropped or mismatched.",
+          "failureExamples": [
+            "The two rewritten oversize results have subtly different field sets because the transports' available metadata differ and the dev didn't reconcile them",
+            "Dev copies the executeScript oversize shape verbatim into the CDP path without checking CDP actually has the same fields available"
+          ],
+          "minScore": 6
+        },
+        {
+          "dimensionId": "no-throw-non-oversize-preserved",
+          "label": "Non-oversize behavior unchanged",
+          "ruleStatement": "Normal (under-cap) executeScript and evaluatePage results must remain unaffected — no behavior change, no new throw paths, no change to the success result shape.",
+          "passCriteria": "Existing under-cap tests for both tools continue to pass unmodified, and new under-cap tests explicitly assert normal results are unchanged in shape and value.",
+          "failureExamples": [
+            "Dev incidentally changes the success-path return type signature while adding the oversize helper call, breaking type contracts even though existing tests weren't updated to catch it",
+            "The CDP rewrite accidentally changes error handling for a legitimately-different CDP failure (e.g. debugger detach) while touching the oversize branch"
+          ],
+          "minScore": 7
+        },
+        {
+          "dimensionId": "old-throw-tests-updated-plus-new-under-cap-tests",
+          "label": "Both hard-assert tests rewritten and new under-cap tests added, all passing",
+          "ruleStatement": "The two existing tests hard-asserting the old throw contract must be rewritten to assert the new non-throwing result shape, and new under-cap tests must be added for both tools; the full test file must pass.",
+          "passCriteria": "page-actions.unit.test.ts no longer expects executeScript or evaluatePage to throw/reject on oversize; contains updated tests asserting the structured result for both tools, plus new passing under-cap tests for both; the test run is green.",
+          "failureExamples": [
+            "Dev updates the executeScript oversize test but leaves the CDP-oriented assertions at 2110-2126 checking .rejects.toThrow() because it looked like a different module and was overlooked",
+            "New under-cap tests are added only for executeScript, leaving evaluatePage's non-oversize path implicitly assumed unaffected without a passing regression test"
+          ],
+          "minScore": 8
+        },
+        {
+          "dimensionId": "no-error-swallowing-non-size-errors",
+          "label": "Only size-ceiling errors become non-throwing; other errors still throw/reject",
+          "ruleStatement": "The rewrite must not accidentally convert other error conditions (script injection failure, CDP disconnect, invalid tab, syntax errors) into non-throwing oversize-shaped results — only the size-ceiling condition changes.",
+          "passCriteria": "Code/tests show non-size errors still propagate as thrown errors or otherwise-distinct results, isolated from the new oversize branch.",
+          "failureExamples": [
+            "Dev wraps the entire executeScript body in a try/catch that funnels any error into the SizeCeilingOutcome-shaped result, so a genuine injection failure silently reports as oversize",
+            "The CDP rewrite reuses a broadened catch block that also swallows a debugger-detach exception, misreporting it as an oversize response"
+          ],
+          "minScore": 7
+        }
+      ],
+      "healerHint": "Start by literally diffing the two oversize branches side by side, noting what data each transport actually has available before deciding the shared shape, rather than copy-pasting one rewrite into the other. Use the checkSizeLimit/buildOversizeResult helper for both, keeping the change scoped narrowly to the oversize branch only — do not wrap surrounding success/error handling in broader try/catch that would swallow unrelated failures. After rewriting both source files, find both old hard-throw assertions in page-actions.unit.test.ts (near line 1983, and the block at 2110-2126 — don't skip it thinking it belongs elsewhere) and convert each to assert the new structured result. Add new passing under-cap tests for both tools. Run the test file and grep both oversize branches for a stray `throw` to make sure none survived the rewrite."
+    },
+    {
+      "id": "findelement-limits-as-injected-args",
+      "name": "Thread findElement limits as injected arguments",
+      "goal": "Pass MAX_FIND_ELEMENT_MATCHES and MAX_ELEMENT_TEXT_CHARS into the injected chrome.scripting function as explicit arguments instead of relying on duplicated local constants inside the injected closure.",
+      "rationale": "The function injected into the page via chrome.scripting currently redeclares its own local copies of the match/text-length limits instead of receiving the module's real constants — a real platform constraint: the injected function is structured-cloned into an isolated world and cannot close over module scope, so merging the two const declarations is impossible; the constants must be passed as arguments. Because chrome.scripting silently passes undefined for missing trailing arguments rather than erroring, the codebase must first be grepped to confirm findElement's call site is the sole invocation of this injected function.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/extension/page-actions.ts",
+        "tools/chrome-bridge/src/extension/page-actions.unit.test.ts"
+      ],
+      "changes": [
+        "Grep the codebase to confirm the findElement call site (page-actions.ts:887-972) is the sole invocation of the injected function before changing its signature; document the search and result in the commit/PR",
+        "Extend the chrome.scripting args array from [selector] to [selector, MAX_FIND_ELEMENT_MATCHES, MAX_ELEMENT_TEXT_CHARS] at the call site",
+        "Update the injected function's parameter list to accept the two limits as arguments, explicitly typed as number",
+        "Remove the duplicated local const declarations inside the injected function (lines 890-891), including any fallback default",
+        "Update page-actions.unit.test.ts:622-668 to import and assert against the real module constants instead of hardcoded literals 50/500, in both the match-count and text-length assertions"
+      ],
+      "expectedResult": "findElement's injected page function receives its limits as explicit arguments sourced from the module constants, with no duplicated local declarations and tests asserting against the constants rather than magic numbers.",
+      "boundedContext": "chrome-bridge-extension",
+      "layer": "infrastructure",
+      "dependsOn": [],
+      "order": 3,
+      "blastRadius": "small",
+      "inputs": [
+        "page-actions.ts:887-972 (findElement call site and injected function)",
+        "page-actions.unit.test.ts:622-668 (tests asserting hardcoded 50/500 literals)"
+      ],
+      "rubric": [
+        {
+          "dimensionId": "sole-caller-grep-verified",
+          "label": "Sole-caller grep performed and documented",
+          "ruleStatement": "Before changing the injected function's signature, the implementer must grep the codebase for other invocations of the same injected function and record that findElement's call site is confirmed as the sole invocation.",
+          "passCriteria": "Explicit, checkable evidence the grep was run and its result stated — naming the search performed and the conclusion.",
+          "failureExamples": [
+            "Developer states 'this is the only injected function of its kind' without showing what was searched, and a second chrome.scripting call elsewhere silently receives undefined for the new args",
+            "Developer greps only the literal function name but the function is passed inline/anonymously, so the grep trivially returns one hit while missing an equivalent duplicated closure defined elsewhere"
+          ],
+          "minScore": 6
+        },
+        {
+          "dimensionId": "args-threaded-not-closed-over",
+          "label": "Limits threaded as chrome.scripting args, not module closure",
+          "ruleStatement": "MAX_FIND_ELEMENT_MATCHES and MAX_ELEMENT_TEXT_CHARS must be passed into the injected function via the chrome.scripting args array, not referenced via closure over module scope.",
+          "passCriteria": "The call site's args array is exactly [selector, MAX_FIND_ELEMENT_MATCHES, MAX_ELEMENT_TEXT_CHARS] in order matching the injected function's parameter list, which uses them in place of the removed local consts.",
+          "failureExamples": [
+            "Developer removes the local consts but forgets to extend the args array, leaving the new parameters silently bound to undefined at runtime",
+            "Developer passes the constants in the wrong order relative to the parameter list, swapping match-count and text-length semantics with no type error since both are numbers"
+          ],
+          "minScore": 7
+        },
+        {
+          "dimensionId": "no-duplicated-local-consts",
+          "label": "Duplicated local declarations removed",
+          "ruleStatement": "The injected function must no longer declare its own local const copies of the match/text-length limits; the only source of these values inside the closure is the function's parameters.",
+          "passCriteria": "Reading the injected function body shows no re-declared local consts for these limits — all usages reference the parameter names directly.",
+          "failureExamples": [
+            "Developer leaves the old local consts in place as a 'safety fallback' (e.g. const X = arg ?? 50), reintroducing the exact duplication the phase eliminates",
+            "Developer renames the parameters but leaves one stray reference to the original const name inside a nested helper, causing a ReferenceError on a rarely-hit branch"
+          ],
+          "minScore": 7
+        },
+        {
+          "dimensionId": "module-constants-are-source-of-truth",
+          "label": "Module-level constants remain single source of truth",
+          "ruleStatement": "MAX_FIND_ELEMENT_MATCHES and MAX_ELEMENT_TEXT_CHARS keep their module-level declarations and the call site reads its args from those same constants — no new hardcoded numeric literals at the call site.",
+          "passCriteria": "The args array entries are the constant identifiers, not numeric literals typed inline.",
+          "failureExamples": [
+            "Developer inlines the numbers at the call site (args: [selector, 50, 500]), silently desyncing if the constants ever change",
+            "Developer defines a second, newly-named constant equal to the original instead of reusing the existing export, recreating a two-source-of-truth problem"
+          ],
+          "minScore": 7
+        },
+        {
+          "dimensionId": "tests-assert-against-imported-constants",
+          "label": "Tests reference imported constants, not re-hardcoded literals",
+          "ruleStatement": "page-actions.unit.test.ts must assert findElement's limit behavior using the actual imported constants, not restated literals like 50 or 500.",
+          "passCriteria": "The test file imports the two constants and uses those identifiers in assertions everywhere the old hardcoded literals previously appeared; no bare magic numbers duplicate the limit values in the affected test block.",
+          "failureExamples": [
+            "Developer imports the constants but only uses them in one of the two assertions, leaving the other still hardcoded so a future limit change silently breaks it without being caught",
+            "Developer imports the constants for fixture construction but the final expect() assertion still hardcodes the literal, so the test would falsely pass even if the constant changed"
+          ],
+          "minScore": 7
+        },
+        {
+          "dimensionId": "behavior-and-type-safety-preserved",
+          "label": "Behavior parity, typing, and test coverage of the new argument path",
+          "ruleStatement": "The refactor must not change findElement's observable behavior and must satisfy the repo's strict TS rules, with at least one test exercising the args-array call shape.",
+          "passCriteria": "Existing findElement tests pass with identical semantics at boundary values, the injected function's new parameters are explicitly typed number, and at least one test verifies the executeScript mock received an args array of length 3 in correct order.",
+          "failureExamples": [
+            "Developer types the new parameters correctly but never adds a test asserting the args array shape, so a future accidental arg-order swap would pass CI silently",
+            "Developer preserves the match-count behavior but introduces an off-by-one at the text-truncation boundary during the conversion, uncaught by any boundary test"
+          ],
+          "minScore": 6
+        }
+      ],
+      "healerHint": "First check the mechanical parts: does the chrome.scripting call site now pass exactly [selector, MAX_FIND_ELEMENT_MATCHES, MAX_ELEMENT_TEXT_CHARS] in that order, with the injected function's parameters explicitly typed number and matching order; are the old local const declarations fully deleted including any fallback; does the test file import the two constants and use those identifiers everywhere a literal previously appeared, in both the match-count and text-length assertions. Then verify the grep-for-sole-caller step: search tools/chrome-bridge/src (and ideally the whole repo) for other chrome.scripting.executeScript / injected-function call sites reusing this function reference, and document that search and its outcome explicitly. Finally sanity-check boundary behavior at exactly the limit values to make sure no off-by-one was introduced when moving from closed-over consts to explicit parameters, adding a boundary test if one doesn't exist."
+    },
+    {
+      "id": "close-sandbox-tab-action",
+      "name": "Close the sandbox tab on request",
+      "goal": "Add a new closeSandboxTab page action that closes the current sandbox tab and clears its persisted id, so the tab no longer stays open indefinitely and the next page action lazily recreates a fresh one.",
+      "rationale": "The single dedicated sandbox tab this extension drives all page actions through is created lazily but never closed anywhere in the codebase (repo-wide grep confirmed no existing chrome.tabs.remove call). This is an explicit MCP-caller-invoked action, not automatic cleanup on disconnect/suspend, matching the project's established pull-only/caller-driven precedent — the user explicitly chose this over automatic cleanup after discovery showed disconnects are routine/transient and SW suspension is undetectable. getTabState is a documented read-only peek and must not be overloaded with mutation, so this is a new PAGE_ACTION. The close call intentionally reuses the existing generic onTabRemoved listener (capture-ports.ts) for capture-buffer eviction rather than duplicating that cleanup logic.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/protocol/actions.ts",
+        "tools/chrome-bridge/src/extension/sandbox-ports.ts",
+        "tools/chrome-bridge/src/extension/page-actions.ts",
+        "tools/chrome-bridge/src/protocol/types.ts",
+        "tools/chrome-bridge/src/mcp/server.ts",
+        "tools/chrome-bridge/src/extension/page-actions.unit.test.ts"
+      ],
+      "changes": [
+        "Add 'closeSandboxTab' to the PAGE_ACTIONS tuple (20 -> 21 entries)",
+        "Add params/result types to protocol/types.ts for closeSandboxTab, result shape {closed: boolean, hadTab: boolean}",
+        "Implement the handler: resolve the current stored sandboxTabId (reusing sandbox-ports.ts's existing lookup, not a new chrome.tabs.query), call chrome.tabs.remove on it if present inside a try/catch so an already-closed/stale tab id never surfaces as a thrown error, letting the existing onTabRemoved listener evict capture buffers naturally",
+        "Clear the persisted SANDBOX_TAB_ID_KEY from chrome.storage.local as part of closing, so the next resolveTabId() call falls through to its existing lazy-create path",
+        "Make the handler non-throwing and no-op-safe: {hadTab:false, closed:false} when no tab is currently open; calling twice in a row is safe",
+        "Add the new action's MCP tool-catalog entry in mcp/server.ts",
+        "Unit test: closes an existing tab and clears storage with {closed:true, hadTab:true}; no-op {closed:false, hadTab:false} when no tab is open (chrome.tabs.remove not called); does not affect any other open (non-sandbox) tab, asserted by mocking multiple tabs and checking chrome.tabs.remove was called with only the sandbox tab's id"
+      ],
+      "expectedResult": "A new closeSandboxTab page action exists end-to-end (protocol action list, types, handler, MCP tool catalog) that closes the sandbox tab and clears its persisted id, verified by new unit tests, with capture-buffer eviction handled by the existing onTabRemoved listener rather than new duplicated logic.",
+      "boundedContext": "chrome-bridge-extension",
+      "layer": "infrastructure",
+      "dependsOn": [],
+      "order": 4,
+      "blastRadius": "medium",
+      "inputs": [
+        "sandbox-ports.ts:24,50-109 (SANDBOX_TAB_ID_KEY, resolveTabId lazy-create/liveness logic)",
+        "capture-ports.ts:34,49-53 (onTabRemoved capture-buffer eviction, reused as-is)",
+        "page-actions.ts:1225-1253 (getTabState, read-only precedent not to be touched)",
+        "protocol/actions.ts (PAGE_ACTIONS 20-entry tuple)"
+      ],
+      "rubric": [
+        {
+          "dimensionId": "no-op-safety",
+          "label": "No-op safety when no tab is open or closed twice",
+          "ruleStatement": "closeSandboxTab must never throw and must return a well-defined non-error result ({closed:false, hadTab:false}) when there is no persisted sandbox tab id, when the persisted id points to a tab chrome.tabs.remove rejects (already closed/gone), and when invoked twice in a row.",
+          "passCriteria": "No stored SANDBOX_TAB_ID_KEY returns {closed:false, hadTab:false} without throwing; calling it twice in immediate succession also returns {closed:false, hadTab:false} on the second call with no unhandled rejection; a stale/dangling tab id is handled by catching the chrome.tabs.remove rejection rather than propagating it.",
+          "failureExamples": [
+            "Handler reads the stored id and calls chrome.tabs.remove(id) inside a bare await with no try/catch, so a manually-closed tab causes the promise to reject and the MCP call surfaces isError instead of {closed:false, hadTab:false}",
+            "Handler calls chrome.tabs.remove unconditionally even when the id is undefined, throwing a TypeError before the no-op branch is reached"
+          ],
+          "minScore": 7
+        },
+        {
+          "dimensionId": "scoping-correctness",
+          "label": "Only the sandbox tab is affected",
+          "ruleStatement": "The handler must resolve and close exactly the tab id stored under SANDBOX_TAB_ID_KEY via the existing sandbox-ports.ts lookup, and must never enumerate, query, or remove any other open tab.",
+          "passCriteria": "Code path only ever calls chrome.tabs.remove with the specific id read from storage/sandbox-ports lookup; unit test asserts other mocked tabs remain untouched — chrome.tabs.remove called with exactly the sandbox tab id and no other.",
+          "failureExamples": [
+            "Developer reimplements tab resolution with a fresh chrome.tabs.query({url: sandboxUrl}) instead of reusing the stored id, which under a race could close the wrong or an extra tab",
+            "Test only verifies chrome.tabs.remove was called once with 'some id' but never asserts it was NOT called with any other tab id in a multi-tab fixture"
+          ],
+          "minScore": 7
+        },
+        {
+          "dimensionId": "reuse-not-duplicate-cleanup",
+          "label": "Reuses existing onTabRemoved listener for capture-buffer eviction",
+          "ruleStatement": "closeSandboxTab must not itself evict/clear console or network capture buffers for the tab; that stays solely with the existing onTabRemoved listener in capture-ports.ts. The handler's job ends at calling chrome.tabs.remove and clearing SANDBOX_TAB_ID_KEY.",
+          "passCriteria": "No new capture-buffer-clearing code, no duplicated eviction logic in page-actions.ts; capture-ports.ts is unmodified.",
+          "failureExamples": [
+            "Developer adds an explicit call to clear the console/network capture buffer inside the handler, duplicating logic onTabRemoved already performs asynchronously and creating a race/double-clear bug",
+            "Developer edits capture-ports.ts to special-case a 'manual close' flag, adding branching complexity to the existing generic listener"
+          ],
+          "minScore": 7
+        },
+        {
+          "dimensionId": "parity-surface-wiring",
+          "label": "Full, consistent parity-surface wiring across protocol/types/handler/catalog",
+          "ruleStatement": "closeSandboxTab must be added consistently to every parity-enforced surface: PAGE_ACTIONS, params/result types with result shape {closed: boolean, hadTab: boolean}, the handler in the Record<PageAction,...> dispatch, and the MCP tool catalog.",
+          "passCriteria": "PAGE_ACTIONS goes from 20 to exactly 21 entries including 'closeSandboxTab'; types.ts exports matching request/result types; the handler type-checks against the declared result type with no as/any casts; mcp/server.ts's tool catalog lists closeSandboxTab with description and schema; typecheck and lint pass with zero errors on the whole chrome-bridge package.",
+          "failureExamples": [
+            "Developer adds the action to PAGE_ACTIONS and implements the handler correctly but forgets the MCP tool-catalog entry, so the action exists internally but is unreachable/undocumented for MCP callers",
+            "Developer defines the result type as {closed: boolean} only, omitting hadTab, then returns an extra field that structurally satisfies a looser type elsewhere, diverging from the documented result shape"
+          ],
+          "minScore": 7
+        },
+        {
+          "dimensionId": "test-coverage-of-behaviors",
+          "label": "Unit tests cover close, no-op, and non-interference cases",
+          "ruleStatement": "At least three distinct assertions: closing an existing tab clears storage and calls chrome.tabs.remove with the right id, no-op behavior when no tab is open, and that other open tabs are unaffected.",
+          "passCriteria": "New test cases exist exercising: (1) existing sandbox tab -> chrome.tabs.remove called with correct id AND SANDBOX_TAB_ID_KEY cleared AND result {closed:true, hadTab:true}; (2) no tab open -> {closed:false, hadTab:false}, chrome.tabs.remove NOT called; (3) a non-sandbox tab in mocked state is not passed to chrome.tabs.remove. All tests pass.",
+          "failureExamples": [
+            "Developer writes a single happy-path test asserting chrome.tabs.remove was called but never asserts the return value shape, so a regression returning undefined would not be caught",
+            "Developer mocks chrome.storage.local.get to always return a fixed tab id, so the 'no tab open' test never actually exercises the empty-storage case"
+          ],
+          "minScore": 6
+        }
+      ],
+      "healerHint": "Focus first on parity-surface wiring — trace one existing similar no-payload action (e.g. getTabState) end-to-end through actions.ts -> types.ts -> page-actions.ts's Record<PageAction,...> handler map -> mcp/server.ts tool catalog, and mirror that exact four-file pattern for closeSandboxTab; check the MCP catalog by hand since tsc's parity type won't catch a missing catalog entry. For no-op safety, wrap chrome.tabs.remove in try/catch so a stale/already-closed tab id never surfaces as isError. For scoping, resolve the tab id strictly via the existing SANDBOX_TAB_ID_KEY storage lookup — do not add a chrome.tabs.query call. For cleanup reuse, do not touch capture-ports.ts at all; trust the existing onTabRemoved listener. Verify the unit tests assert the negative cases explicitly (chrome.tabs.remove NOT called in the no-tab case; not called with any other id when other tabs exist in the mock), and run typecheck/lint/vitest to confirm zero regressions."
+    },
+    {
+      "id": "surface-oversize-and-close-docs-liveverify",
+      "name": "Surface oversize results, document close action, and live-verify",
+      "goal": "Wire the new too-large outcome from executeScript/evaluatePage into MCP-level isError responses, document closeSandboxTab, run the full verify pipeline, and confirm both new behaviors against a real running Chrome session via the chrome-bridge MCP.",
+      "rationale": "Every prior horizon in this project closes with one combined docs+live-verify phase rather than a separate verification phase; this convention is kept here to stay within the 3-5 soft phase-count target. This phase is the integration point for both surviving threads of scope: the non-throwing executeScript/evaluatePage oversize outcome needs the same MCP-level isError surfacing captureTab already has, scoped only to executeScript/evaluatePage; and closeSandboxTab needs both documentation and a real-tab close/recreate check, since a unit test cannot prove chrome.tabs.remove actually closes a live Chrome tab or that the next page action truly gets a fresh one.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/mcp/server.ts",
+        "tools/chrome-bridge/README.md"
+      ],
+      "changes": [
+        "In mcp/server.ts, add a discriminated (not string-matched) isError branch for executeScript/evaluatePage's new too-large outcome, mirroring the existing isCaptureTabImage branch (server.ts:135-165) — scoped to these two tools only, verified not to affect captureTab/findElement/read-tool branches",
+        "Add closeSandboxTab to the MCP tool-catalog documentation and README, explicitly stating the lazy-recreate-on-next-action behavior",
+        "Update README.md's now-false executeScript 'comes back as an error' prose to describe the new non-throwing-but-isError-surfaced contract",
+        "Run npm run verify (full 9-stage pipeline from repo root) and fix any failures surfaced by the prior four phases' changes — no skipped tests, no loosened assertions",
+        "Live-verify via the chrome-bridge MCP against a real Chrome session, capturing actual request/response evidence: (a) drive at least one of executeScript/evaluatePage over its size cap and confirm the response comes back with isError:true and the new outcome shape, not a thrown error; (b) call closeSandboxTab against a real open sandbox tab, capture its tab id, confirm the tab actually closes, then issue a subsequent page action and confirm a genuinely fresh sandbox tab (different id) is created"
+      ],
+      "expectedResult": "executeScript/evaluatePage's oversize outcome surfaces as isError:true at the MCP layer, closeSandboxTab is documented in the tool catalog and README, npm run verify is green, and a live head-to-head via the chrome-bridge MCP confirms both the oversize isError path and the close/recreate tab lifecycle work against a real running extension, with measured before/after tab-identity evidence.",
+      "boundedContext": "chrome-bridge-mcp",
+      "layer": "interface",
+      "dependsOn": [
+        "nonthrowing-executescript-evaluatepage-oversize",
+        "findelement-limits-as-injected-args",
+        "close-sandbox-tab-action"
+      ],
+      "order": 5,
+      "blastRadius": "medium",
+      "inputs": [
+        "mcp/server.ts:135-165 (existing isCaptureTabImage isError branch, pattern to mirror)",
+        "tools/chrome-bridge/README.md (tool catalog docs)",
+        "chrome-bridge MCP (live verification against a real running extension)"
+      ],
+      "rubric": [
+        {
+          "dimensionId": "mcp-oversize-iserror-wiring",
+          "label": "MCP-level isError wiring for executeScript/evaluatePage oversize outcome",
+          "ruleStatement": "server.ts must add a branch that detects the new too-large outcome specifically from executeScript/evaluatePage results and surfaces it as isError:true, mirroring the existing isCaptureTabImage branch's structure without touching console/network read tools or other tool branches.",
+          "passCriteria": "A discriminated check (on outcome/kind field, not string-matching free text) exists in server.ts scoped to executeScript and evaluatePage; when the result signals oversize, the MCP response has isError:true and includes size/ceiling information; other tools are unaffected with passing tests proving so.",
+          "failureExamples": [
+            "Dev keys the branch off a generic 'error' string field also used for thrown exceptions, so genuine execution errors and oversize outcomes get flagged identically, losing the non-throwing distinction",
+            "Dev copies the isCaptureTabImage branch's shape checks but forgets evaluatePage has a different result wrapper than executeScript, so oversize detection works for one tool and silently falls through as isError:false for the other"
+          ],
+          "minScore": 7
+        },
+        {
+          "dimensionId": "closesandboxtab-docs-accuracy",
+          "label": "closeSandboxTab documentation accuracy in tool catalog and README",
+          "ruleStatement": "closeSandboxTab must be documented in both the MCP tool-catalog and README.md, with accurate description of parameters, return shape, and effect (closes the current sandbox tab; next page action creates a fresh one) consistent with the actual implementation.",
+          "passCriteria": "README's tool list includes closeSandboxTab with a description matching its real signature and behavior; the in-code tool-catalog entry is present and non-placeholder; a reader who only has the README can correctly predict what happens when they call it.",
+          "failureExamples": [
+            "Dev adds closeSandboxTab to README but only pastes the function name without noting the next page action lazily recreates the tab, leaving a reader to assume the bridge is left tabless",
+            "Dev documents closeSandboxTab in the code-level MCP tool schema but forgets the README's separate hand-maintained tool table, so the two docs disagree"
+          ],
+          "minScore": 7
+        },
+        {
+          "dimensionId": "full-verify-green",
+          "label": "Full npm run verify pipeline passes",
+          "ruleStatement": "The complete 9-stage npm run verify pipeline must be run (not verify:fast, not a subset) and be green, with any failures caused by this horizon's phases actually fixed rather than worked around.",
+          "passCriteria": "Evidence shows npm run verify executed from repo root through all applicable stages for tools/chrome-bridge with a passing result; only pre-existing documented-red stages (e.g. CLAUDE.md's stage 8 nanoid advisory) are tolerated, explicitly called out; no test skipped, no assertion loosened, no timeout bumped.",
+          "failureExamples": [
+            "Dev hits a real failure in the new isError branch's test coverage and 'fixes' it with it.skip or a loosened assertion instead of correcting the logic, then reports verify as green",
+            "Dev runs a scoped pnpm command inside a different package instead of npm run verify from repo root, reporting it as satisfying the full pipeline requirement"
+          ],
+          "minScore": 8
+        },
+        {
+          "dimensionId": "live-chrome-verification-both-concerns",
+          "label": "Live-Chrome verification with concrete evidence for both oversize isError and close/recreate",
+          "ruleStatement": "Using the chrome-bridge MCP against a real running Chrome session, the phase must produce concrete measured evidence that (a) triggering executeScript or evaluatePage over the size cap returns isError:true with the new outcome shape, and (b) closeSandboxTab actually closes an open sandbox tab and the next page action creates a genuinely fresh tab.",
+          "passCriteria": "Report includes actual observed tool call/response pairs showing the isError:true response body for an oversize call; and a distinguishable before/after tab identity check (tab id) proving the tab was closed and a new one created, not merely that a subsequent call succeeded.",
+          "failureExamples": [
+            "Dev calls closeSandboxTab, then calls a page action, sees it succeed, and reports 'confirmed a fresh tab' without ever capturing a tab id before and after, so the evidence is equally consistent with the same tab never having closed",
+            "Dev triggers an oversize evaluatePage call, gets isError:true, and reports success, but never confirms executeScript (the sibling tool) has the same behavior"
+          ],
+          "minScore": 7
+        },
+        {
+          "dimensionId": "isolated-oversize-scope-no-regression",
+          "label": "Oversize isError scoping does not leak into or break unrelated tools",
+          "ruleStatement": "The new isError branch and any shared helper extracted for it must not alter behavior of captureTab's existing isCaptureTabImage branch, findElement, console/network read tools, or closeSandboxTab — scope is strictly executeScript and evaluatePage.",
+          "passCriteria": "Existing tests for captureTab's oversize path, findElement, and read tools still pass unmodified in assertions; any shared oversize-outcome type/helper is additive and does not change captureTab's response shape or field names.",
+          "failureExamples": [
+            "Dev refactors the shared 'too-large' outcome type to a common shape and renames a field captureTab's branch relied on, requiring an unreviewed matching change there",
+            "The new branch's field-name check accidentally matches a field also present in findElement's result object, causing findElement to spuriously report isError:true"
+          ],
+          "minScore": 7
+        }
+      ],
+      "healerHint": "Focus first on server.ts: find the existing isCaptureTabImage branch (~lines 135-165) and confirm the new executeScript/evaluatePage branch uses a discriminated field (an outcome/kind tag from the domain layer, not string-sniffing an error message) so genuine thrown errors are never conflated with the new non-throwing oversize outcome. Check both executeScript and evaluatePage are covered, since they may have differently-shaped result wrappers, and that captureTab/findElement/read tools are untouched (diff their test files). For docs, verify README.md and the in-code MCP tool-catalog entry for closeSandboxTab both exist, agree with each other, and explicitly state the lazy-recreate-on-next-action behavior. For verify, insist on the actual `npm run verify` from repo root; if something failed and was 'fixed' by skipping/loosening a test, that's a hard fail regardless of green output. The live-Chrome dimension is most likely to be hand-waved — demand actual tool-call transcripts for: an oversize executeScript call, an oversize evaluatePage call, a closeSandboxTab call, and a before/after tab-identity comparison proving the old tab is gone and a new one was created."
+    }
+  ],
+  "successCriteria": [
+    "executeScript and evaluatePage both return a defined non-throwing too-large result instead of throwing, surfaced as isError:true at the MCP layer; findElement's match/text-length limits are defined exactly once and threaded as arguments; a new closeSandboxTab action closes the sandbox tab and clears its persisted id (no-op-safe, scoped only to the sandbox tab); tools/chrome-bridge's own npm run verify is green; README and MCP tool catalog updated; live-Chrome head-to-head confirms both the oversize isError path and the close/recreate tab lifecycle.",
+    "Add shared oversize result helper: A new, fully unit-tested size-limits.ts module exporting SizeCeilingOutcome, checkSizeLimit, and buildOversizeResult; no existing file changed and no existing test behavior altered.",
+    "Make executeScript and evaluatePage return oversize results: executeScript and evaluatePage both return a structured too-large result instead of throwing when over the size cap, backed by shared-helper unit tests plus updated/added tests in page-actions.unit.test.ts.",
+    "Thread findElement limits as injected arguments: findElement's injected page function receives its limits as explicit arguments sourced from the module constants, with no duplicated local declarations and tests asserting against the constants rather than magic numbers.",
+    "Close the sandbox tab on request: A new closeSandboxTab page action exists end-to-end (protocol action list, types, handler, MCP tool catalog) that closes the sandbox tab and clears its persisted id, verified by new unit tests, with capture-buffer eviction handled by the existing onTabRemoved listener rather than new duplicated logic.",
+    "Surface oversize results, document close action, and live-verify: executeScript/evaluatePage's oversize outcome surfaces as isError:true at the MCP layer, closeSandboxTab is documented in the tool catalog and README, npm run verify is green, and a live head-to-head via the chrome-bridge MCP confirms both the oversize isError path and the close/recreate tab lifecycle work against a real running extension."
+  ],
+  "deferred": [
+    "Byte-size caps for readConsoleMessages/readNetworkRequests — dropped from this horizon at the user's request; they remain uncapped by byte size until a future horizon",
+    "JPEG/quality downscale rung for captureTab (deferred per decisions.md horizon 14)",
+    "Removing the dead active-tab code surface (queryActiveTab/captureVisibleTab/activeTab permission) — repeatedly deferred since horizon 6",
+    "The persistent-CDP-session redesign (replacing per-command withDebuggerSession attach/detach)",
+    "A second render-the-tab primitive consumer (virtualized/lazy-content reads, trusted CDP input)",
+    "Measuring the true AI-client image-block reject size (still-open blocker since horizon 4/13/14/15)",
+    "Any pagination/continuation retrieval mechanism for truncated/oversize results",
+    "Any change to captureTab's own image ladder mechanism or ceiling value",
+    "Automatic/implicit sandbox-tab closing on relay disconnect or service-worker suspension — explicitly rejected in favor of an explicit caller-invoked action"
+  ]
+}

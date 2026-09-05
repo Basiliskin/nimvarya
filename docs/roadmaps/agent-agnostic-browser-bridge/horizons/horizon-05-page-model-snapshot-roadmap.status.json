@@ -1,0 +1,30 @@
+{
+  "roadmapFile": "docs/roadmaps/agent-agnostic-browser-bridge/horizons/horizon-05-page-model-snapshot-roadmap.json",
+  "roadmapTask": "Add a ref-addressable page-model snapshot to tools/chrome-bridge: a new pageModel page action that walks the active tab's top-frame DOM via a MAIN-world-injected function and returns a compact, row-capped array of actionable/interactive elements, each with a stable queryable ref, role, name and a viewport bounding box {x,y,width,height}, so an MCP agent feeds the bbox center to the existing clickAt/hover without a CSP-fragile executeScript. DOM-only (no CDP/debugger, no new manifest permission), existing 16 page actions unchanged, top-frame only, single foundational slice of the broader claude-in-chrome replacement.",
+  "createdAt": "2026-09-03",
+  "updatedAt": "2026-09-03",
+  "roadmapRevision": 0,
+  "phases": [
+    {
+      "phaseId": "build-snapshot-row-builder",
+      "status": "superseded",
+      "attempts": 0,
+      "compensationInvoked": false,
+      "notes": "superseded by horizon 6 dedicated-tab-targeting: page-model-snapshot horizon was planned but never executed; user chose to set it aside to plan the dedicated sandbox-tab feature next."
+    },
+    {
+      "phaseId": "add-page-model-action",
+      "status": "superseded",
+      "attempts": 0,
+      "compensationInvoked": false,
+      "notes": "superseded by horizon 6 dedicated-tab-targeting: page-model-snapshot horizon was planned but never executed; user chose to set it aside to plan the dedicated sandbox-tab feature next."
+    },
+    {
+      "phaseId": "verify-snapshot-real-chrome",
+      "status": "superseded",
+      "attempts": 0,
+      "compensationInvoked": false,
+      "notes": "superseded by horizon 6 dedicated-tab-targeting: page-model-snapshot horizon was planned but never executed; user chose to set it aside to plan the dedicated sandbox-tab feature next."
+    }
+  ]
+}

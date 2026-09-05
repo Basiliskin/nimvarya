@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "Chrome Bridge",
+  "version": "0.1.0",
+  "description": "Standalone Chrome-control bridge for MCP-capable terminal AI coding tools.",
+  "permissions": [
+    "tabs",
+    "activeTab",
+    "scripting",
+    "storage",
+    "alarms",
+    "debugger"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "run_at": "document_start",
+      "all_frames": false,
+      "world": "MAIN",
+      "js": [
+        "page-script.js"
+      ]
+    },
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "run_at": "document_start",
+      "all_frames": false,
+      "js": [
+        "capture-forwarder.js"
+      ]
+    }
+  ]
+}

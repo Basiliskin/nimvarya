@@ -1,0 +1,536 @@
+{
+  "task": "Horizon 17 of agent-agnostic-browser-bridge: add byte-size caps to readConsoleMessages and readNetworkRequests, reusing horizon 16's shared oversize-result pattern.",
+  "analysis": {
+    "objective": "Extend horizon 16's shared non-throwing SizeCeilingOutcome/oversize-result pattern to readConsoleMessages and readNetworkRequests so a caller reading an oversized console or network capture window gets a structured, byte-measured 'too large' signal instead of an unbounded response body.",
+    "successDefinition": "Done and correct means: (1) readConsoleMessages and readNetworkRequests each measure the serialised size of the CaptureReadResult they are about to return and, when it exceeds a defined byte/char ceiling, return a non-throwing structured oversize outcome built from the existing checkSizeLimit/buildOversizeResult helpers in tools/chrome-bridge/src/extension/size-limits.ts (reused as-is, not re-implemented) carrying actualBytes and limitBytes, exactly mirroring how executeScript/evaluatePage already behave; (2) a normal within-ceiling read is unaffected \u2014 same CaptureReadResult shape, same since/limit/nextSince/dropped/truncated semantics as today; (3) tools/chrome-bridge/src/mcp/server.ts's isOversizeResult/isError branch (currently scoped to executeScript/evaluatePage only, per the comment on line ~190) is extended to also cover readConsoleMessages/readNetworkRequests, so an oversize read surfaces as an MCP isError:true JSON text block, not a silently-huge success payload; (4) new/adjusted unit tests cover both the within-limit and over-limit paths for both tools (page-actions.unit.test.ts and server.unit.test.ts), and existing tests for the count-based `limit`/`since`/`nextSince`/`dropped`/`truncated` fields keep passing unchanged; (5) tsc --noEmit, eslint --max-warnings 0, and vitest (unit-level, per .testguard.json placement) pass for tools/chrome-bridge; (6) README.md's readConsoleMessages/readNetworkRequests sections document the new byte-size ceiling and the too-large outcome shape, matching how executeScript/evaluatePage/captureTab are already documented.",
+    "assumptions": [
+      "The byte ceiling for these two tools is a NEW constant (not a reuse of MAX_EXECUTE_SCRIPT_RESULT_CHARS/MAX_SCREENSHOT_BASE64_CHARS), sized for console/network payload shapes, and lives alongside the other size constants in page-actions.ts (or size-limits.ts) \u2014 the exact number is an implementation decision for Stage 2/3, not fixed here.",
+      "The measured size is the same convention already used elsewhere in this codebase: JSON.stringify(result).length (UTF-16 code units treated as a byte proxy), not a true UTF-8 byte count, since that is what executeScript/evaluatePage already do and no discovery entry says otherwise.",
+      "The oversize check applies to the whole CaptureReadResult (entries + metadata) after the existing count-based `limit` clamp already ran, not as a replacement for `limit`/`since` semantics \u2014 both mechanisms coexist, matching the two-lever precedent captureTab set (ladder AND flat ceiling exist for different tools).",
+      "'since' cursor and 'nextSince' bookkeeping remain unchanged by this horizon: an oversize result does not need to invent a partial-read/resume story now \u2014 a caller can retry with a smaller `limit` param, which is already supported.",
+      "No change to the extension-side ring buffer capacity, eviction, or per-entry truncation (MAX_CONSOLE_TEXT_BYTES / MAX_BODY_PREVIEW_BYTES already bound individual entries) \u2014 this horizon caps the aggregate serialised RESULT size, not per-entry content.",
+      "This horizon does not touch the dead active-tab code removal or any other deferred item listed in next-horizon-brief.md's 'Decisions the next horizon cannot avoid' \u2014 the user's scoping choice already excluded that alternative."
+    ],
+    "risks": [
+      "The existing count-based `limit` (MAX_READ_LIMIT=500) may already keep most real-world results well under any reasonable byte ceiling, making the new guard rarely exercised in practice \u2014 live-Chrome verification (this project's binding pattern per decisions.md 2026-09-03) is needed to confirm the ceiling is reachable and the oversize path is real, not dead code.",
+      "Choosing the ceiling value without a live measurement (as horizon 13 initially did for captureTab, then had to replan after measuring real bytes) risks setting it too low (false positives on legitimate large-but-useful reads) or too high (never fires) \u2014 Stage 2/3 should measure a real large console/network buffer before fixing the number, mirroring horizon 13's replan lesson already recorded in decisions.md.",
+      "Extending the mcp/server.ts isOversizeResult branch to two more tool names is a small, mechanical change, but the existing code comment explicitly says the check is 'Scoped to these two tools only' \u2014 that comment must be updated in the same change or it becomes stale/misleading documentation.",
+      "If readConsoleMessages/readNetworkRequests results are large primarily because of MANY entries rather than a few huge ones, an aggregate oversize outcome could discard an entire otherwise-useful batch instead of degrading gracefully (e.g. returning fewer entries) \u2014 this mirrors the flat-ceiling (all-or-nothing) tradeoff decisions.md already accepted for executeScript/evaluatePage, so it is a known and accepted pattern, not a new risk to solve differently, but worth naming so it isn't assumed away.",
+      "No security/correctness invariant is being dropped by this task's scope as stated \u2014 it strictly adds a bound where none existed, so there is no conflict to flag against a caller-supplied acceptance criterion (none was supplied)."
+    ],
+    "outOfScope": [
+      "Removing the dead active-tab code surface (queryActiveTab/captureVisibleTab/NO_ACTIVE_TAB/activeTab permission) \u2014 this was the explicitly-rejected alternative in this horizon's AskUserQuestion round, not folded into this scope.",
+      "Any change to the count-based `since`/`limit`/`nextSince`/`dropped`/`truncated` cursor semantics of the ring-buffer read protocol (decisions.md 2026-09-02 horizon 2) \u2014 this horizon adds a byte guard alongside them, it does not redesign the read protocol.",
+      "Per-entry content truncation changes (MAX_CONSOLE_TEXT_BYTES, MAX_BODY_PREVIEW_BYTES) \u2014 those already bound individual entries and are untouched.",
+      "Any downscale/retry-ladder behavior for oversize reads (e.g. auto-retrying with a smaller `limit`) \u2014 the established precedent for executeScript/evaluatePage is a flat non-retrying ceiling, and readConsoleMessages/readNetworkRequests follow the same flat pattern, not captureTab's ladder.",
+      "Streaming/observation-frame delivery of console/network entries \u2014 the wire protocol's unused `observation` frame stays unused (decisions.md 2026-09-02 horizon 2); this horizon stays pull-only.",
+      "Persistent-CDP-session redesign, JPEG/quality downscale rungs for captureTab, or a second render-primitive consumer \u2014 these are other deferred items from next-horizon-brief.md's decision list that belong to different horizons.",
+      "Changes to boky's own extension/bridge/nest-host code \u2014 this project never touches boky itself (decisions.md 2026-09-02 horizon 1)."
+    ],
+    "domainShape": "technical",
+    "domainShapeReason": "The objective is entirely about a subsystem's size-guard/error-signaling mechanism (an MCP tool response pipeline) rather than any business domain concept \u2014 it is infrastructure/pipeline vocabulary through and through.",
+    "ubiquitousLanguage": [
+      "SizeCeilingOutcome",
+      "checkSizeLimit",
+      "buildOversizeResult",
+      "OversizeResult / tooLarge",
+      "readConsoleMessages / readNetworkRequests",
+      "CaptureReadResult",
+      "isError (MCP result)",
+      "since / limit / nextSince (ring-buffer read cursor)"
+    ]
+  },
+  "discoveryFindings": [
+    {
+      "area": "readConsoleMessages/readNetworkRequests handler implementation",
+      "finding": "Both actions are implemented by a single shared closure `readCapture(channel)` inside `pageActionHandlers` (page-actions.ts). It validates `since`/`limit` via `resolveSince`/`resolveReadLimit`, resolves the sandbox tabId, then calls `captureStore.readConsole(tabId, { since, limit })` or `captureStore.readNetwork(...)` and returns `{ result }` verbatim -- there is no byte-size measurement or branching in this closure at all today, only count-based `limit`.",
+      "filePath": "tools/chrome-bridge/src/extension/page-actions.ts",
+      "implication": "The byte-size cap logic must be added inside (or wrapping) `readCapture`, after the store read returns `CaptureRead<T>` and before `{ result }` is returned -- it cannot reuse `coerceExecuteScriptOutcome`'s single-JSON-string check as-is since the payload here is an array of entries, not one JSON string."
+    },
+    {
+      "area": "CaptureRead / CaptureQuery return shape (capture-buffer.ts, capture-store.ts)",
+      "finding": "`CaptureRead<T>` = `{ entries: ReadonlyArray<T & {seq:number}>, nextSince: number, dropped: boolean, truncated: boolean }`. `truncated` is already defined as 'strictly more entries matched than were returned' (count-based, set inside `createCaptureRing.read()`), and `dropped` means the ring overwrote entries the caller's `since` never covered. There is no byte-size field anywhere in this type today.",
+      "filePath": "tools/chrome-bridge/src/extension/capture-buffer.ts",
+      "implication": "Reusing the existing `truncated` boolean for a byte-cap would overload its established meaning (count truncation) with a second, unrelated meaning (byte truncation). The plan should add a new field (e.g. via the oversize-result pattern, or a sibling flag) rather than repurpose `truncated`/`dropped`, to avoid breaking the CaptureRead contract's existing unit tests and docs."
+    },
+    {
+      "area": "size-limits.ts exact API this horizon must reuse",
+      "finding": "`checkSizeLimit(actualBytes, limitBytes): SizeCeilingOutcome` is a pure comparison (`withinLimit = actualBytes <= limitBytes`, inclusive). `buildOversizeResult(outcome): OversizeResult` maps it to `{ tooLarge: boolean, actualBytes: number, limitBytes: number }`. Both are already tool-agnostic per their doc comments ('or any future tool that returns a serialised value'). `executeScript`/`evaluatePage` call this via `coerceExecuteScriptOutcome`: measure `json.length`, `checkSizeLimit(json.length, MAX_EXECUTE_SCRIPT_RESULT_CHARS)`, and on `!withinLimit` return `{ result: buildOversizeResult(ceiling) }` INSTEAD of the normal `{ value }` result -- i.e. the oversize result today fully replaces the payload, it does not accompany a partial one.",
+      "filePath": "tools/chrome-bridge/src/extension/size-limits.ts",
+      "implication": "For readConsoleMessages/readNetworkRequests, a design decision is needed: whether an oversize read total-replaces the whole `CaptureRead` payload (matching executeScript/evaluatePage's contract exactly, but breaking the read tools' 'always return partial entries + cursor' UX) or whether the byte cap instead trims the entries array before hitting the ceiling (more useful, but not literally 'reuse the pattern' the same way). The task text says 'reuse... do not reimplement' the pattern, so the safest reading is: measure the serialized entries size, and only fall back to `buildOversizeResult` as a full-replace sentinel when even the smallest read (or a single entry) cannot fit -- but this needs to be resolved explicitly in the plan, not assumed."
+    },
+    {
+      "area": "mcp/server.ts isError/isOversizeResult branch scoping",
+      "finding": "The oversize branch is explicitly gated by `if (toolName === \"executeScript\" || toolName === \"evaluatePage\")` (line 184) wrapping `isOversizeResult(response.result)`, with a comment: 'Scoped to these two tools only -- the check never runs for captureTab/findElement/read tools.' `isOversizeResult` itself is a generic structural check (`tooLarge === true` + numeric `actualBytes`/`limitBytes`) with no tool-name awareness -- the scoping lives entirely in the `toolName ===` condition.",
+      "filePath": "tools/chrome-bridge/src/mcp/server.ts",
+      "implication": "This horizon must literally widen that string check to `toolName === \"executeScript\" || toolName === \"evaluatePage\" || toolName === \"readConsoleMessages\" || toolName === \"readNetworkRequests\"` (or equivalent), update the comment (it currently explicitly disclaims read tools), and update the existing unit test 'does not flag a tooLarge-shaped result on a tool outside executeScript/evaluatePage' at src/mcp/server.unit.test.ts:258 which currently uses `getPageText` as its 'outside' example -- that test's premise is unaffected (getPageText stays outside), but a new sibling test proving readConsoleMessages/readNetworkRequests ARE now inside the branch is needed."
+    },
+    {
+      "area": "tool-catalog.ts entries for the two read tools",
+      "finding": "`readConsoleMessages`/`readNetworkRequests` catalog entries (tool-catalog.ts lines 250-267) have descriptions mentioning only `since`/`nextSince` cursor semantics and per-tab in-memory lifetime; input schema is `{ properties: { ...SINCE_LIMIT_PROPERTIES }, additionalProperties: false }` with no byte-size-related property. `SINCE_LIMIT_PROPERTIES` (line 50) documents `since`/`limit` only. executeScript/evaluatePage's descriptions explicitly mention 'an over-large result comes back as an error, not a value' as one line appended to their descriptions.",
+      "filePath": "tools/chrome-bridge/src/mcp/tool-catalog.ts",
+      "implication": "The two read-tool descriptions should get an added sentence documenting the new byte cap and the too-large behavior, matching the executeScript/evaluatePage phrasing convention, but likely no new input-schema property is needed since this is a response-shaping cap, not a caller-tunable input (mirrors executeScript/evaluatePage, which also added no new input param for their cap)."
+    },
+    {
+      "area": "README.md documentation convention for oversize/too-large behavior",
+      "finding": "README.md has a dedicated '### Screenshot size policy' section for captureTab's downscale ladder, and a paragraph under '### readConsoleMessages / readNetworkRequests' documenting executeScript/evaluatePage's over-large JSON-char cap with the exact isError/{tooLarge,actualBytes,limitBytes} shape (lines 165-181). The read-tools' own paragraph further down (lines 274-292) documents `since`/`limit`/`entries`/`nextSince`/`dropped`/`truncated` plus 'Buffer caps... DEFAULT_MAX_ENTRIES=500, MAX_CONSOLE_TEXT_BYTES=8192, MAX_BODY_PREVIEW_BYTES=4096' but currently says nothing about a per-read byte ceiling.",
+      "filePath": "tools/chrome-bridge/README.md",
+      "implication": "The plan should extend the existing read-tools paragraph (not create a new section) to document the new byte cap constant, its value, and the resulting isError/too-large shape, following the same terse convention already used for executeScript/evaluatePage in that same section."
+    },
+    {
+      "area": "Existing unit test coverage for read tools' size/limit behavior",
+      "finding": "page-actions.unit.test.ts's 'pageActionHandlers -- readConsoleMessages / readNetworkRequests' describe block (lines 2505-2643) covers: since/limit forwarding to the right store method, limit clamping to MAX_READ_LIMIT, bad since/limit rejection, sandbox-tab-resolution failure, a throwing store surfaced via guard, and stale/equal cursor behavior. None of these tests touch byte size at all -- there is currently zero test coverage of a byte cap for these two tools (because the cap does not exist yet). server.unit.test.ts's oversize describe block (lines ~214-269) has tests only for executeScript/evaluatePage plus one 'outside the branch' test using getPageText.",
+      "filePath": "tools/chrome-bridge/src/extension/page-actions.unit.test.ts",
+      "implication": "This is purely additive test work: new unit tests are needed in page-actions.unit.test.ts for the new byte-measuring/oversize-branching logic in `readCapture`, and new/updated tests in server.unit.test.ts proving readConsoleMessages/readNetworkRequests are now inside the isError/isOversizeResult branch. No existing test asserts an uncapped/no-limit invariant that would need to be deleted, aside from the general shape assertions (e.g. the exact-equality check at line 2639-2641) which must keep passing for normal-size reads."
+    },
+    {
+      "area": "Existing byte-size constants available for reuse",
+      "finding": "page-actions.ts already defines `MAX_EXECUTE_SCRIPT_RESULT_CHARS = 1_000_000` and `MAX_SCREENSHOT_BASE64_CHARS = 1_200_000`, both scoped by their own doc comments to their specific tool (the doc comment for MAX_SCREENSHOT_BASE64_CHARS explicitly says 'Sibling to MAX_EXECUTE_SCRIPT_RESULT_CHARS, scoped to the screenshot result -- a cross-tool cap is a separate open question'). Separately, protocol/capture.ts defines `MAX_CONSOLE_TEXT_BYTES = 8192` (per-entry console text cap) and `MAX_BODY_PREVIEW_BYTES = 4096` (per-entry network body-preview cap) -- both are PER-ENTRY truncation caps applied in capture-store.ts's `reboundConsole`/`reboundNetwork` at ingest time, not per-READ (whole-page) caps.",
+      "filePath": "tools/chrome-bridge/src/extension/page-actions.ts",
+      "implication": "None of the existing constants are directly reusable as a whole-response byte ceiling for a page of console/network entries -- a NEW constant (e.g. MAX_CONSOLE_READ_RESULT_BYTES / MAX_NETWORK_READ_RESULT_BYTES, or one shared MAX_CAPTURE_READ_RESULT_BYTES) is needed, following the same co-located, doc-commented convention as the other two."
+    },
+    {
+      "area": "Ring buffer / capture store measurement point",
+      "finding": "`createCaptureRing.read()` (capture-buffer.ts) already slices `matched` down to `limit` entries and computes `truncated` purely by count, with no serialization or byte measurement anywhere in the ring. `CaptureStore.readConsole`/`readNetwork` (capture-store.ts) just delegate straight to `rings.console.read(query)` / `rings.network.read(query)` with no post-processing. There is no natural existing seam where a serialized-size measurement happens before the count clamp -- the count clamp happens first and is unconditional.",
+      "filePath": "tools/chrome-bridge/src/extension/capture-buffer.ts",
+      "implication": "Byte-size measurement should happen AFTER the count-based `.read()` returns (i.e. in `readCapture` in page-actions.ts, or as a new thin wrapper step in capture-store.ts), by JSON-stringifying the returned `entries` array (or summing serialized per-entry lengths) and comparing against the new constant via `checkSizeLimit`. Changing the ring buffer itself is not required and would entangle an unrelated, already-tested layer; keeping the byte check downstream of the ring (in the read-tool handler, mirroring where executeScript/evaluatePage do their check) is the lower-risk, most-reuse-consistent location."
+    }
+  ],
+  "requiredMaterials": [
+    {
+      "name": "Live Chrome session with the extension loaded and nest-host relay running",
+      "kind": "tool",
+      "whyNeeded": "To pick real MAX_CONSOLE_READ_RESULT_BYTES / MAX_NETWORK_READ_RESULT_BYTES ceiling values with confidence, a real-world serialized size for a full (or near-MAX_READ_LIMIT) console/network capture window must be measured, not guessed. stage1-analysis.json's risks section explicitly calls this out: setting the ceiling without a live measurement risks the same problem horizon 13 hit with captureTab (had to replan after measuring real bytes), and confirms whether the count-based limit=500 already keeps results well under any reasonable byte ceiling (which would make the new guard rarely/never exercised).",
+      "acquisitionNote": "Start the relay + workflow engine from the repo root (`npm start`), load tools/chrome-bridge's extension unpacked in a real Chrome profile, open a page that generates a substantial console/network volume, then use the devtools bridge (ext_command / chrome-bridge MCP tools, e.g. readConsoleMessages/readNetworkRequests with a large `limit`) to capture and JSON.stringify-measure a realistic entries payload before fixing the two new byte constants."
+    }
+  ],
+  "phases": [
+    {
+      "id": "measure-live-capture-read-sizes",
+      "order": 0,
+      "name": "Measure real console and network read sizes",
+      "goal": "Using a live Chrome session with the extension loaded and the nest-host relay running, capture a near-MAX_READ_LIMIT (500-entry) console read and network read from a page that produces heavy console/network volume, JSON.stringify the returned `entries` array for each, and record the measured character counts so the next phase can fix real byte-ceiling constants instead of guessed ones.",
+      "rationale": "stage1-analysis.json's risks section and this project's binding decisions.md precedent (horizon 13 had to replan captureTab after guessing a ceiling) both require a real measurement before any byte-size constant is written into code \u2014 this phase produces that evidence.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/extension/page-actions.ts"
+      ],
+      "changes": [
+        "Start the relay + workflow engine (`npm start` from repo root) and load tools/chrome-bridge's extension unpacked in Chrome",
+        "Navigate the sandbox tab to a page that generates substantial console output and network traffic (e.g. a console-heavy demo page or a network-heavy site)",
+        "Via the devtools/chrome-bridge MCP tools, call readConsoleMessages and readNetworkRequests with limit=500 (the existing MAX_READ_LIMIT) against that page",
+        "JSON.stringify the returned `entries` array for each response and record its `.length` alongside the entry count and per-entry cap context (MAX_CONSOLE_TEXT_BYTES=8192, MAX_BODY_PREVIEW_BYTES=4096) as the evidence the next phase's constants are grounded on",
+        "Append one binding-decision line to docs/roadmaps/agent-agnostic-browser-bridge/decisions.md (following the file's existing `- YYYY-MM-DD | horizon N | <decision> \u2014 because <reason>` convention, at most 240 chars) recording the measured console and network character counts as the grounding fact for the next phase's byte-ceiling constants"
+      ],
+      "boundedContext": "chrome-bridge-extension",
+      "layer": "infrastructure",
+      "blastRadius": "small",
+      "inputs": [
+        "Live Chrome session with the extension loaded and nest-host relay running (required material)",
+        "size-limits.ts's existing SizeCeilingOutcome/checkSizeLimit/buildOversizeResult contract",
+        "MAX_READ_LIMIT / per-entry cap constants already in page-actions.ts and protocol/capture.ts"
+      ],
+      "expectedResult": "A recorded measurement (character-length of JSON.stringify(entries) for a 500-entry console read and a 500-entry network read against a real page), landed as a one-line binding-decision entry in docs/roadmaps/agent-agnostic-browser-bridge/decisions.md, that the next phase cites when choosing MAX_CONSOLE_READ_RESULT_CHARS / MAX_NETWORK_READ_RESULT_CHARS.",
+      "dependsOn": [],
+      "rubric": [
+        {
+          "id": "measurement-evidence-recorded",
+          "label": "Both read-type measurements recorded at near-MAX_READ_LIMIT scale",
+          "ruleStatement": "decisions.md must carry a new line stating the measured JSON.stringify(entries).length for BOTH a console read and a network read, each captured with limit=500 against a page producing genuinely heavy volume; 10 means both counts are exact figures with entry counts stated and both entry counts are at or near 500, 8 is the expected competent result (both figures present, entry counts clearly above 400), and a plausible careful attempt still misses the bar if it captures a quiet page.",
+          "passCriteria": [
+            "decisions.md contains a newly appended line (not an edit to an existing line) with two distinct numeric character-count figures, one clearly labeled console and one clearly labeled network",
+            "the line or its immediate context states the entry count returned for each read (not just the character count)",
+            "both stated entry counts are at least 400 (near the 500-entry MAX_READ_LIMIT), confirming the page actually produced heavy volume rather than a handful of log lines"
+          ],
+          "failureExamples": [
+            "the line reports only the network figure and omits console entirely, leaving half the grounding fact missing",
+            "a careful developer tests against a mostly-idle page and honestly records real numbers, but entry counts come back at 15 console / 40 network \u2014 technically real evidence but useless for grounding a near-500-entry ceiling"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "per-entry-cap-context-cited",
+          "label": "Measurement is tied to the existing per-entry byte caps",
+          "ruleStatement": "the decision line or its evidence must reference the per-entry caps already active during measurement (MAX_CONSOLE_TEXT_BYTES=8192, MAX_BODY_PREVIEW_BYTES=4096) so the next phase can reason about entries-times-caps rather than an opaque total; 10 means both cap names and values are cited and match the source constants exactly, 8 is citing both caps by name even if values are paraphrased, and a failure is recording totals with no mention of what per-entry truncation, if any, was in effect.",
+          "passCriteria": [
+            "the decisions.md line or accompanying evidence names at least one of MAX_CONSOLE_TEXT_BYTES / MAX_BODY_PREVIEW_BYTES",
+            "any numeric value cited for those caps matches the actual constant value in tools/chrome-bridge/src/extension/page-actions.ts or protocol/capture.ts at the time of measurement"
+          ],
+          "failureExamples": [
+            "the line states '512340 chars for console, 398120 for network' with no mention of the per-entry text/body caps, so the next phase cannot tell whether entries were already truncated during measurement",
+            "a developer cites MAX_CONSOLE_TEXT_BYTES from memory as 4096 instead of the actual 8192 value in source, silently corrupting the grounding fact"
+          ],
+          "minScore": 6
+        },
+        {
+          "id": "no-scope-creep-into-fix",
+          "label": "Phase stays measurement-only; no ceiling constants or wiring added yet",
+          "ruleStatement": "this phase's file changes must be limited to decisions.md (plus any read-only evidence artifacts); readConsoleMessages/readNetworkRequests bodies and size-limits.ts must be untouched, since defining MAX_CONSOLE_READ_RESULT_CHARS/MAX_NETWORK_READ_RESULT_CHARS and wiring SizeCeilingOutcome is the next phase's job. 10 means the diff touches only decisions.md, 8 means no production logic changed even if a throwaway measurement script was added and removed, and a failure is any new ceiling constant or checkSizeLimit/buildOversizeResult call landing in page-actions.ts during this phase.",
+          "passCriteria": [
+            "git diff for this phase's commit(s) shows no new constant definitions (e.g. MAX_CONSOLE_READ_RESULT_CHARS, MAX_NETWORK_READ_RESULT_CHARS) in page-actions.ts or size-limits.ts",
+            "readConsoleMessages and readNetworkRequests function bodies in page-actions.ts are byte-for-byte unchanged from before this phase",
+            "no new checkSizeLimit/buildOversizeResult call sites appear for console or network reads"
+          ],
+          "failureExamples": [
+            "a developer eager to finish in one pass adds the two new MAX_*_READ_RESULT_CHARS constants and wires checkSizeLimit into both readers in the same commit as the decisions.md line, collapsing the measurement and fix phases together",
+            "the diff adds a temporary console.log-based measurement helper directly inside readNetworkRequests and leaves it in place instead of removing it after capturing the numbers"
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "measurement-methodology-soundness",
+          "label": "Numbers are traceable to a real live-session capture, not estimated",
+          "ruleStatement": "the decisions.md entry or its evidence must make clear the figures came from actually invoking readConsoleMessages/readNetworkRequests with limit=500 against a real Chrome session via the live bridge, on an identifiable page with heavy volume; 10 means the method, limit, and source page are all named, 8 means at least the method and limit are stated, and a failure is presenting numbers with no way to tell how or against what they were produced.",
+          "passCriteria": [
+            "decisions.md text or a referenced evidence note names the tool calls used (readConsoleMessages / readNetworkRequests) and states limit=500",
+            "the page or site used to generate console/network volume is named or described (e.g. a specific URL or a description of what made it heavy), not left implicit"
+          ],
+          "failureExamples": [
+            "the line states two character counts with no indication of what page, tool call, or limit produced them, making the figures unreproducible and unverifiable by the next phase's author",
+            "a developer estimates the numbers by reasoning about entry-count times per-entry cap instead of actually driving the live session, then records them as if measured"
+          ],
+          "minScore": 6
+        },
+        {
+          "id": "decisions-file-format-compliance",
+          "label": "Appended line matches decisions.md's existing convention",
+          "ruleStatement": "the new line must match the file's established single-line, \u2264240-char, dated-entry format used by prior binding decisions (e.g. the horizon 13 captureTab precedent); 10 means it is indistinguishable in style from surrounding entries and exactly conforms to the 240-char cap, 8 means it is a single line under the cap but formatted slightly differently from neighbors, and a failure is a multi-line note or missing the file's structural convention.",
+          "passCriteria": [
+            "the new entry is a single line, not a multi-line paragraph or new subsection",
+            "the line is at most 240 characters",
+            "the line's prefix/structure (date or id marker, phrasing style) visually matches at least two neighboring existing entries in the file"
+          ],
+          "failureExamples": [
+            "the developer appends a short paragraph with a header instead of one bullet-style line, breaking the file's scanability even though the content is accurate and well-cited",
+            "the line is technically one line but 280 characters long, exceeding the file's stated 240-char convention"
+          ],
+          "minScore": 7
+        }
+      ],
+      "healerHint": "The most likely failure is scope creep \u2014 while capturing evidence it's tempting to also add MAX_CONSOLE_READ_RESULT_CHARS/MAX_NETWORK_READ_RESULT_CHARS and wire checkSizeLimit into the readers in the same pass; fix by reverting all page-actions.ts/size-limits.ts changes and keeping this phase's diff to the single decisions.md line."
+    },
+    {
+      "id": "add-read-capture-oversize-ceiling",
+      "order": 1,
+      "name": "Add byte-size ceiling to console and network reads",
+      "goal": "Add new, measurement-grounded byte-size constants for readConsoleMessages/readNetworkRequests and make the shared `readCapture` closure in page-actions.ts measure the serialised size of the entries it is about to return, replacing the whole result with `buildOversizeResult` (via the existing `checkSizeLimit`/`buildOversizeResult` helpers from size-limits.ts) when it exceeds the ceiling \u2014 exactly mirroring how `coerceExecuteScriptOutcome` already handles executeScript's oversize case.",
+      "rationale": "Today `readCapture` (page-actions.ts) has no byte-size check at all, only the count-based `limit`/`since` clamp \u2014 an unbounded console/network read can return an arbitrarily large payload. size-limits.ts's helpers are already tool-agnostic per their doc comments and must be reused as-is, not re-implemented, per the horizon's explicit constraint.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/extension/page-actions.ts",
+        "tools/chrome-bridge/src/extension/page-actions.unit.test.ts"
+      ],
+      "changes": [
+        "Add MAX_CONSOLE_READ_RESULT_CHARS and MAX_NETWORK_READ_RESULT_CHARS constants near MAX_EXECUTE_SCRIPT_RESULT_CHARS/MAX_SCREENSHOT_BASE64_CHARS, each with a doc comment stating the measured basis from the prior phase and that it bounds the whole serialised CaptureRead result, not a per-entry value",
+        "In the `readCapture(channel)` closure, after `captureStore.readConsole`/`readNetwork` returns its CaptureRead, JSON.stringify the result, run it through `checkSizeLimit(json.length, ceilingForChannel)`, and on `!withinLimit` return `{ result: buildOversizeResult(ceiling) }` instead of `{ result }` \u2014 leaving the count-based `limit`/`since`/`nextSince`/`dropped`/`truncated` clamp that already ran untouched",
+        "Add unit tests in page-actions.unit.test.ts covering: an under-cap read for both channels returns the normal CaptureReadResult unchanged, and an over-cap read for both channels returns the OversizeResult shape instead"
+      ],
+      "boundedContext": "chrome-bridge-extension",
+      "layer": "infrastructure",
+      "blastRadius": "medium",
+      "inputs": [
+        "Measured character counts from the live-Chrome measurement phase",
+        "size-limits.ts's checkSizeLimit/buildOversizeResult (reused as-is)",
+        "coerceExecuteScriptOutcome's existing oversize branch (page-actions.ts) as the pattern to mirror",
+        "readCapture's current implementation (page-actions.ts, `pageActionHandlers`)"
+      ],
+      "expectedResult": "readCapture returns a structured OversizeResult (in place of the normal CaptureReadResult) for both readConsoleMessages and readNetworkRequests when the serialised result exceeds its new byte ceiling, covered by new unit tests, with the existing count-based limit/since tests unaffected.",
+      "dependsOn": [
+        "measure-live-capture-read-sizes"
+      ],
+      "rubric": [
+        {
+          "id": "shared-helpers-reused-not-reimplemented",
+          "label": "Oversize check reuses size-limits.ts helpers verbatim",
+          "ruleStatement": "readCapture's oversize branch must call the existing checkSizeLimit/buildOversizeResult exports from size-limits.ts with no new comparison, threshold math, or duplicate OversizeResult-shaping logic written in page-actions.ts. 10 means the branch is a one-to-one structural mirror of coerceExecuteScriptOutcome's existing oversize branch (same call shape, same two-line pattern); 8 is the expected score for a correct call to both helpers that achieves the same effect with minor stylistic divergence (e.g. an extra local variable); a diff introducing any manual `>` / `.length >` comparison against a ceiling constant, or a hand-built `{ tooLarge, actualBytes, limitBytes }` object literal anywhere in page-actions.ts, fails this dimension outright.",
+          "passCriteria": [
+            "grep page-actions.ts for the new oversize branch and confirm it calls `checkSizeLimit(...)` and passes the result to `buildOversizeResult(...)`, not a hand-rolled comparison",
+            "confirm no new object literal with keys `tooLarge`/`actualBytes`/`limitBytes` is constructed anywhere outside size-limits.ts",
+            "confirm size-limits.ts itself is unmodified in the diff (git diff shows no changes to that file)"
+          ],
+          "failureExamples": [
+            "a developer writes `if (json.length > MAX_CONSOLE_READ_RESULT_CHARS) return { result: { tooLarge: true, actualBytes: json.length, limitBytes: MAX_CONSOLE_READ_RESULT_CHARS } }` instead of calling checkSizeLimit/buildOversizeResult \u2014 functionally equivalent but duplicates policy the phase explicitly says must be reused as-is",
+            "checkSizeLimit is called but its SizeCeilingOutcome is manually destructured and re-assembled into a differently-shaped object instead of being passed straight to buildOversizeResult"
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "oversize-branch-covers-both-channels",
+          "label": "Both readConsoleMessages and readNetworkRequests get the ceiling",
+          "ruleStatement": "The size check must run for both the 'console' and 'network' branches of the shared readCapture closure, each measured against its own distinct constant (MAX_CONSOLE_READ_RESULT_CHARS vs MAX_NETWORK_READ_RESULT_CHARS), not a single shared ceiling applied to both channels. 10 means both channels are unmistakably wired to their own named constant and this is visible from a single read of the closure; 8 is the expected score when both channels are correctly gated even if the ceiling-selection logic is a plain ternary rather than something more elegant; a diff that adds the check for only one channel, or that applies one constant to both channels, fails.",
+          "passCriteria": [
+            "grep for MAX_CONSOLE_READ_RESULT_CHARS and MAX_NETWORK_READ_RESULT_CHARS in page-actions.ts and confirm each name appears exactly once as the ceiling argument used by its matching channel inside readCapture",
+            "read the readCapture closure body and confirm the ceiling selected depends on the `channel` parameter (e.g. a ternary or lookup keyed on 'console'/'network'), not a single constant used unconditionally",
+            "confirm readConsoleMessages and readNetworkRequests (lines invoking readCapture('console') / readCapture('network')) still pass through the same closure \u2014 no channel-specific handler was forked out of readCapture to add the check"
+          ],
+          "failureExamples": [
+            "the developer adds the size check but only inside the 'console' branch of an if/else that got introduced, leaving readNetworkRequests still returning an unbounded result on the 'network' path",
+            "a single MAX_READ_RESULT_CHARS constant is reused for both channels because the developer judged them 'close enough', silently dropping the per-channel ceiling the phase specifies"
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "count-clamp-preserved-and-check-runs-after-clamp",
+          "label": "Existing since/limit clamp is untouched and size check runs on the already-clamped result",
+          "ruleStatement": "The pre-existing count-based since/limit/nextSince/dropped/truncated clamp logic in readCapture must be unmodified, and the new byte-size check must measure the JSON.stringify of the CaptureRead result that clamp already produced \u2014 not the full unbounded store contents before clamping. 10 means the diff shows zero lines changed in the resolveSince/resolveReadLimit/query-building code and the stringify call clearly operates on the clamp's own return value; 8 is the expected score for a correct ordering with a slightly different variable-naming choice; failing this dimension means the size check either runs on unclamped data or the clamp behavior changed.",
+          "passCriteria": [
+            "diff the file and confirm resolveSince, resolveReadLimit, and the `since`/`limit`/`query` construction lines above the captureStore.readConsole/readNetwork call are unchanged",
+            "confirm the value passed to JSON.stringify for the size check is the same `result` variable returned by captureStore.readConsole/readNetwork (the already since/limit-clamped CaptureRead), not a separate unclamped read",
+            "run the existing since/limit unit tests (pre-phase tests covering nextSince/dropped/truncated) and confirm they still pass unmodified"
+          ],
+          "failureExamples": [
+            "the developer restructures resolveSince/resolveReadLimit while adding the size check 'for symmetry', changing an edge-case default and silently breaking an existing since-cursor test",
+            "the size measurement is taken from the raw captureStore buffer contents before the since/limit clamp is applied, so a large ring buffer trips the oversize path even when the clamped page the caller actually asked for would have fit"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "constants-documented-with-measured-basis",
+          "label": "New ceiling constants carry a doc comment stating their measured basis and scope",
+          "ruleStatement": "MAX_CONSOLE_READ_RESULT_CHARS and MAX_NETWORK_READ_RESULT_CHARS must each have a doc comment (JSDoc-style, matching the existing style above MAX_EXECUTE_SCRIPT_RESULT_CHARS/MAX_SCREENSHOT_BASE64_CHARS) stating the measured character-count basis from the prior measurement phase and explicitly noting the constant bounds the whole serialised CaptureRead result rather than a per-entry value. 10 means both comments state a concrete number/source and the whole-result-not-per-entry scope in the same sentence style as the existing constants; 8 is the expected score when the doc comment is present and accurate but slightly terser than the existing ones; a bare constant with no comment, or a comment that doesn't distinguish whole-result vs per-entry scope, fails.",
+          "passCriteria": [
+            "read the doc comment immediately above each new constant and confirm it names a measured basis (a number or explicit reference to the measurement phase's findings) rather than a made-up round number with no justification",
+            "confirm each comment states, in words, that the ceiling applies to the whole serialised CaptureRead result and not to any single console/network entry",
+            "confirm the comment placement and style (JSDoc block directly above the export) matches the existing MAX_EXECUTE_SCRIPT_RESULT_CHARS/MAX_SCREENSHOT_BASE64_CHARS constants for consistency"
+          ],
+          "failureExamples": [
+            "MAX_CONSOLE_READ_RESULT_CHARS = 500_000 is added with only a one-line comment '// console read cap' that gives no measured basis and doesn't clarify whether it's per-entry or whole-result \u2014 a plausible shortcut under time pressure that leaves a future reader unable to tell if the number is grounded or guessed",
+            "the constant is copy-pasted from MAX_EXECUTE_SCRIPT_RESULT_CHARS's exact value with no adjustment or justification for why console/network reads share executeScript's ceiling"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "unit-test-coverage-both-channels-both-branches",
+          "label": "New unit tests cover under-cap and over-cap for both channels",
+          "ruleStatement": "page-actions.unit.test.ts must contain tests demonstrating: (a) an under-cap console read returns the normal CaptureReadResult shape unchanged, (b) an over-cap console read returns the OversizeResult shape (tooLarge: true plus actualBytes/limitBytes), and the same pair (c)/(d) for network reads \u2014 four distinct assertions minimum, each driving a real over-cap condition (e.g. via a small injected/mocked ceiling or a genuinely large synthesized capture buffer) rather than asserting against a hardcoded ceiling the test never actually crosses. 10 means all four cases are present, each oversize test provably crosses the real ceiling used in production code (not a re-implemented smaller test-only threshold), and assertions check exact result shape (tooLarge/actualBytes/limitBytes present, normal fields absent) rather than just truthiness; 8 is the expected score for all four cases present and correctly triggering their branch with slightly looser shape assertions; missing any of the four cases, or an oversize test that can pass even when the size check is deleted, fails.",
+          "passCriteria": [
+            "search page-actions.unit.test.ts for at least one test asserting a normal (non-oversize) result for readCapture('console') and one for readCapture('network')",
+            "search for at least one test asserting the oversize result for each channel \u2014 assertion checks `result.tooLarge === true` (or equivalent) and that actualBytes/limitBytes are present and actualBytes exceeds limitBytes",
+            "confirm each oversize test actually forces the JSON.stringify'd result past the real ceiling (e.g. by stubbing captureStore to return enough entries/large payload, or by using a test seam that exercises the same code path as production) rather than mocking checkSizeLimit itself to always return withinLimit:false, which would prove nothing about the wiring",
+            "run `pnpm vitest run src/extension/page-actions.unit.test.ts` and confirm all four new tests pass alongside the pre-existing since/limit tests"
+          ],
+          "failureExamples": [
+            "the developer writes an oversize test that mocks checkSizeLimit to unconditionally return withinLimit:false, so the test passes even if the real JSON.stringify measurement is never wired into readCapture \u2014 a plausible shortcut that gives false confidence",
+            "only the console channel gets an oversize test 'as a representative case' with a comment implying network is symmetric, leaving the network path's wiring unverified by any test"
+          ],
+          "minScore": 7
+        }
+      ],
+      "healerHint": "The most likely failure is measuring the wrong thing at the wrong time \u2014 either stringifying the unclamped store contents instead of the already since/limit-clamped CaptureRead, or forgetting to give readNetworkRequests its own ceiling constant and check; fix by stringifying exactly the `result` value returned from captureStore.readConsole/readNetwork after the existing clamp, gated by a channel-keyed ternary selecting MAX_CONSOLE_READ_RESULT_CHARS vs MAX_NETWORK_READ_RESULT_CHARS."
+    },
+    {
+      "id": "widen-mcp-oversize-error-branch",
+      "order": 2,
+      "name": "Flag oversize console/network reads as MCP errors",
+      "goal": "Widen the `toolName === \"executeScript\" || toolName === \"evaluatePage\"` guard around the `isOversizeResult` check in mcp/server.ts to also cover readConsoleMessages and readNetworkRequests, so an oversize read now surfaces to the calling AI tool as `isError: true`, and update the stale code comment that currently disclaims read tools.",
+      "rationale": "isOversizeResult itself is a generic structural check with no tool-name awareness; the scoping lives entirely in the toolName condition at mcp/server.ts line ~184, and its adjacent comment explicitly (and now incorrectly) says 'the check never runs for captureTab/findElement/read tools' \u2014 without this phase, phase 1's new OversizeResult would reach the MCP client as a silent, non-error success payload instead of a flagged error.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/mcp/server.ts",
+        "tools/chrome-bridge/src/mcp/server.unit.test.ts"
+      ],
+      "changes": [
+        "Extend the toolName condition to also match \"readConsoleMessages\" and \"readNetworkRequests\"",
+        "Update the adjacent comment (currently 'Scoped to these two tools only \u2014 the check never runs for captureTab/findElement/read tools') to reflect that read tools are now included",
+        "Add unit tests proving an oversize-shaped result from readConsoleMessages/readNetworkRequests is now surfaced as isError:true, alongside the existing executeScript/evaluatePage cases",
+        "Confirm the existing 'does not flag a tooLarge-shaped result on a tool outside executeScript/evaluatePage' test (using getPageText as the outside example) still passes unchanged, since getPageText stays outside the branch"
+      ],
+      "boundedContext": "chrome-bridge-mcp",
+      "layer": "interface",
+      "blastRadius": "small",
+      "inputs": [
+        "The OversizeResult shape now returned by readCapture from the previous phase",
+        "mcp/server.ts's existing isOversizeResult check and toolName guard",
+        "The existing server.unit.test.ts oversize describe block as the pattern to extend"
+      ],
+      "expectedResult": "mcp/server.ts's isError/isOversizeResult branch covers readConsoleMessages and readNetworkRequests (comment updated to match), verified by new unit tests.",
+      "dependsOn": [
+        "add-read-capture-oversize-ceiling"
+      ],
+      "rubric": [
+        {
+          "id": "toolname-guard-widened",
+          "label": "toolName guard covers all four oversize-eligible tools",
+          "ruleStatement": "The condition gating the isOversizeResult check in mcp/server.ts must evaluate true for executeScript, evaluatePage, readConsoleMessages, and readNetworkRequests, and false for every other tool name. 10 means the condition is expressed as a single readable check (e.g. an array/Set membership test or an equivalent boolean expression) covering exactly these four names with no drift possible between the check and a separate list; 8 is a correct four-way `||` chain that a careful reviewer can verify covers all four by eye; anything that misses one of the four or leaves a fifth tool improperly in/out scores below minScore.",
+          "passCriteria": [
+            "Reading mcp/server.ts, the boolean condition immediately guarding the isOversizeResult check lists toolName === \"executeScript\", \"evaluatePage\", \"readConsoleMessages\", and \"readNetworkRequests\" (or an equivalent set/array .includes check enumerating exactly those four strings)",
+            "No other toolName string appears in that condition",
+            "The condition is a single guard reused for all four tools, not four separately duplicated if-blocks each re-implementing the isOversizeResult call"
+          ],
+          "failureExamples": [
+            "The developer added readConsoleMessages but forgot readNetworkRequests (or vice versa), so one of the two new read tools still returns oversize payloads as silent success",
+            "The developer duplicated the whole `if (toolName === ... ) { if (isOversizeResult...) }` block four times instead of widening one shared condition, so a future fifth tool addition requires editing four separate blocks and is likely to miss one"
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "comment-accuracy",
+          "label": "Adjacent comment matches the widened behavior",
+          "ruleStatement": "The code comment adjacent to the oversize check must accurately describe which tools are covered after the change; no comment in the file may still assert that read tools are excluded. 10 means the comment names all four covered tools (or names the covering mechanism precisely) and gives no false impression about what remains excluded; 8 means the stale 'never runs for captureTab/findElement/read tools' sentence is removed or corrected but the replacement wording is only serviceable, not polished; below minScore if any stale claim about read-tool exclusion survives anywhere in the file.",
+          "passCriteria": [
+            "The original sentence 'the check never runs for captureTab/findElement/read tools' (or any equivalent claim that readConsoleMessages/readNetworkRequests are excluded) no longer appears verbatim or in substance in mcp/server.ts",
+            "The updated comment text, read on its own, correctly states that readConsoleMessages and readNetworkRequests are now included in the oversize check",
+            "grep for the string \"read tools\" or \"never runs\" in mcp/server.ts turns up no leftover contradictory claim"
+          ],
+          "failureExamples": [
+            "The developer widened the toolName condition correctly but left the old comment sentence untouched above it, so the code and its own adjacent documentation now contradict each other",
+            "The comment is updated to mention readConsoleMessages/readNetworkRequests but still separately claims captureTab is excluded from 'the check' in a way that conflates it with the different captureTab-specific structured-result branch already present in the file, confusing a future reader about which branch does what"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "new-tool-oversize-tests-present",
+          "label": "Unit tests prove isError:true for oversize readConsoleMessages/readNetworkRequests results",
+          "ruleStatement": "server.unit.test.ts must contain tests that feed an oversize-shaped result through handleToolCall for both readConsoleMessages and readNetworkRequests and assert the returned CallToolResult has isError true and a JSON text body carrying the oversize fields. 10 means both tools are covered with assertions checking isError, that the text body is the JSON-serialized oversize result (not just its presence), and the tests fail if the toolName guard is reverted; 8 means both tools are covered with an isError assertion and a non-trivial content check, run and passing under pnpm vitest. Below minScore if only one of the two tools is tested or the test only checks that a response was returned without checking isError/content.",
+          "passCriteria": [
+            "There are at least two new test cases (or one parameterized test iterating both tool names) in server.unit.test.ts, one exercising readConsoleMessages and one exercising readNetworkRequests, each mocking sendCommand to resolve with an oversize-shaped result (tooLarge true, actualBytes/limitBytes numeric)",
+            "Each test asserts res.isError === true",
+            "Each test asserts the JSON content of res.content[0].text reflects the oversize payload (e.g. parses it and checks tooLarge/actualBytes/limitBytes, or checks the text contains those field values), not merely that content is non-empty",
+            "Running `pnpm vitest run src/mcp/server.unit.test.ts` from tools/chrome-bridge (or the repo's equivalent test command) passes with these new tests included"
+          ],
+          "failureExamples": [
+            "A developer added one test for readConsoleMessages using a copy-pasted oversize fixture but forgot the symmetric readNetworkRequests case, so the widened condition's second half is unverified by any test",
+            "The new tests mock sendCommand to return the oversize shape and assert isError is true, but never assert anything about the returned text body, so a regression that flips isError correctly but drops the JSON payload (returning an empty or generic error string instead) would still pass"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "existing-outside-branch-test-preserved",
+          "label": "getPageText-outside-branch regression test still passes unmodified",
+          "ruleStatement": "The pre-existing test proving a tooLarge-shaped result on a tool outside the guarded set (using getPageText) is not flagged as isError must still exist, still use getPageText (or another tool intentionally outside the four-tool set) as its example, and still pass. 10 means the test is untouched apart from incidental surrounding diffs and is confirmed passing; 8 means the test still exists and passes but was lightly reworded without changing its assertion; below minScore if the test was deleted, weakened, or its outside-tool example was swapped for one of the four newly-included tools (which would make the test trivially vacuous).",
+          "passCriteria": [
+            "server.unit.test.ts still contains a test asserting that a tooLarge-shaped result returned for getPageText (or another tool outside {executeScript, evaluatePage, readConsoleMessages, readNetworkRequests}) produces isError: false / undefined, i.e. is NOT flagged",
+            "That test's example tool name is not one of the four now-covered tools",
+            "The test passes when run"
+          ],
+          "failureExamples": [
+            "The developer, while widening the guard, also changed the outside-branch test's example tool from getPageText to readConsoleMessages by mistake during a find-and-replace, silently turning the regression test into a duplicate of the new inclusion test rather than a test of exclusion",
+            "The outside-branch test was deleted because it 'seemed redundant' after adding the new tests, losing coverage that the guard is still scoped and not accidentally matching every tool name"
+          ],
+          "minScore": 8
+        }
+      ],
+      "healerHint": "The most likely failure is a partial widen \u2014 adding readConsoleMessages or readNetworkRequests to the toolName condition but not both, or updating the condition without touching the adjacent stale comment; fix by re-reading the single guard clause at mcp/server.ts line ~184 and making the four-name list and its comment match in one edit."
+    },
+    {
+      "id": "document-read-tool-size-cap",
+      "order": 3,
+      "name": "Document the read-tool size cap in catalog and README",
+      "goal": "Document the new console/network byte-size ceiling and its non-throwing too-large behavior in both the MCP tool descriptions (tool-catalog.ts) and the project README (README.md), matching the phrasing convention already used for executeScript/evaluatePage's own oversize documentation in each of those files.",
+      "rationale": "tool-catalog.ts is the description an MCP caller actually reads before invoking a tool, and README.md is this project's user-facing reference; today both describe the read tools' since/nextSince cursor semantics and buffer caps but say nothing about the new byte-size ceiling or that an oversize read now comes back as an error rather than a value \u2014 leaving either undocumented would contradict the already-established convention (and the horizon's success definition) that executeScript/evaluatePage's oversize behavior is called out in both places.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/mcp/tool-catalog.ts",
+        "tools/chrome-bridge/src/mcp/tool-catalog.unit.test.ts",
+        "tools/chrome-bridge/README.md"
+      ],
+      "changes": [
+        "Append one sentence to readConsoleMessages' description in tool-catalog.ts noting that an over-large result comes back as an error, not a value, per its new byte ceiling",
+        "Append the equivalent sentence to readNetworkRequests' description in tool-catalog.ts; no inputSchema change, mirroring executeScript/evaluatePage which also added no new caller-tunable input parameter for their cap",
+        "Update/add a tool-catalog.unit.test.ts assertion that the two descriptions mention the oversize/too-large behavior, mirroring any existing description-content assertions for executeScript/evaluatePage",
+        "In README.md's existing 'readConsoleMessages / readNetworkRequests' section (around the 'Buffer caps' paragraph), add the two new byte-size ceiling constants and their measured values, and document that an over-large read result is not partially trimmed but replaced wholesale by the non-throwing too-large outcome, surfaced at the MCP layer as isError:true with `{ tooLarge: true, actualBytes, limitBytes }`, mirroring the executeScript/evaluatePage paragraph's phrasing"
+      ],
+      "boundedContext": "chrome-bridge-mcp",
+      "layer": "interface",
+      "blastRadius": "small",
+      "inputs": [
+        "executeScript/evaluatePage's existing description sentence in tool-catalog.ts and README.md as the phrasing template",
+        "The byte-ceiling constants and behavior added in the read-capture-oversize-ceiling phase",
+        "The isError branch added in the widen-mcp-oversize-error-branch phase"
+      ],
+      "expectedResult": "tool-catalog.ts's readConsoleMessages/readNetworkRequests descriptions (verified by a tool-catalog.unit.test.ts assertion) and README.md's readConsoleMessages/readNetworkRequests section both document the new byte-size ceiling and the too-large/isError behavior.",
+      "dependsOn": [
+        "add-read-capture-oversize-ceiling",
+        "widen-mcp-oversize-error-branch"
+      ],
+      "rubric": [
+        {
+          "id": "catalog-describes-byte-ceiling-and-error-behavior",
+          "label": "Tool-catalog descriptions name the ceiling and the non-throwing too-large behavior",
+          "ruleStatement": "10: readConsoleMessages' and readNetworkRequests' description strings in tool-catalog.ts each state, in the same sentence-level detail as executeScript/evaluatePage's oversize sentence, that an over-large result is not a thrown error but a structured too-large outcome, and name the concrete field shape ({ tooLarge, actualBytes, limitBytes }) or an equally specific pointer to it. 8 (expected/competent bar): both descriptions clearly state the result comes back as an error/non-value rather than an unbounded body, using language a caller could act on, even if the exact field names are only implied rather than spelled out per-tool. Below minScore: either description omits the too-large behavior, or states it vaguely enough that a caller can't tell whether an oversize read throws, returns partial data, or returns something else.",
+          "passCriteria": [
+            "grep tool-catalog.ts for the literal strings readConsoleMessages and readNetworkRequests and read each tool's description field",
+            "each description contains a clause equivalent to 'an over-large result is returned as a structured too-large outcome/error, not a value' \u2014 not merely 'results may be capped' or 'buffer caps apply'",
+            "the added clause is appended without deleting or contradicting the existing since/limit/nextSince cursor-semantics prose already in that description",
+            "the phrasing pattern (non-throwing, isError-surfaced, distinguishable from a genuine failure) matches how executeScript/evaluatePage's own oversize sentence is worded in the same file, not a differently-shaped ad hoc phrase"
+          ],
+          "failureExamples": [
+            "the description says 'results are capped for performance' with no mention that oversize now surfaces as an error rather than a truncated/partial value",
+            "a careful author wrote the too-large sentence only for readConsoleMessages and forgot to mirror it onto readNetworkRequests, which still reads exactly as it did before this phase",
+            "the sentence describes the byte ceiling but implies the response is silently truncated to fit, contradicting the actual 'replaced wholesale by a too-large outcome' behavior"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "catalog-test-asserts-oversize-mentions",
+          "label": "tool-catalog.unit.test.ts asserts both descriptions mention oversize behavior",
+          "ruleStatement": "10: tool-catalog.unit.test.ts contains a test that reads the actual exported catalog object (not a hardcoded copy of the string) and asserts, for both readConsoleMessages and readNetworkRequests, that the description contains oversize/too-large-behavior language, structured so the assertion fails if the sentence is later deleted. 8: a passing test exists for both tools asserting on a substring tied to the too-large behavior (e.g. matching /too large/i or /tooLarge/), even if it doesn't also check the field-shape detail. Below minScore: no new/updated assertion exists, or the assertion only checks description length/existence without checking oversize content.",
+          "passCriteria": [
+            "open tool-catalog.unit.test.ts and locate a test block for readConsoleMessages and one for readNetworkRequests (or a shared parametrized test covering both) that checks the description string",
+            "the assertion pattern targets oversize-specific language (e.g. a regex or .toContain on 'too large' / 'tooLarge' / 'isError'), not a generic non-empty-string check",
+            "the test reads the description from the actual imported catalog/module export, so editing the real description without updating the test breaks the test",
+            "running the test file (pnpm vitest run tool-catalog.unit.test.ts) passes against the current tool-catalog.ts"
+          ],
+          "failureExamples": [
+            "a new test asserts description.length > 0 or that the description contains the tool name, which would still pass even if the oversize sentence were reverted",
+            "the test hardcodes the full expected description string as a literal and compares equality, so it's really testing that the string matches itself rather than checking a specific, isolable claim \u2014 brittle and not clearly checking the oversize property",
+            "an assertion was added for readConsoleMessages only; readNetworkRequests has no corresponding check, so a regression there wouldn't be caught"
+          ],
+          "minScore": 6
+        },
+        {
+          "id": "readme-documents-new-byte-ceiling-constants",
+          "label": "README documents the two new byte-ceiling constants with measured values",
+          "ruleStatement": "10: the README's readConsoleMessages/readNetworkRequests section (near the existing Buffer caps paragraph) names both new byte-size ceiling constants by their actual exported identifiers, states their numeric values, and cites the source file(s) they live in, matching the precision of the existing Buffer caps paragraph (constant name = value, file path). 8: both constants are named with correct values, even if the source-file citation is folded into prose rather than a precise file path. Below minScore: the README mentions a ceiling exists in general terms without naming both constants and their values, or states a wrong value.",
+          "passCriteria": [
+            "open README.md and locate the Buffer caps paragraph (or its immediate vicinity) in the readConsoleMessages/readNetworkRequests section",
+            "the paragraph or an adjacent one names the console-read byte ceiling constant and the network-read byte ceiling constant by identifier, each followed by '=' and its numeric byte value",
+            "cross-check each stated numeric value against the actual constant definition in the source file added by the add-read-capture-oversize-ceiling phase \u2014 the values must match exactly, not be rounded or approximate",
+            "the new sentence sits adjacent to, and doesn't duplicate or contradict, the existing DEFAULT_MAX_ENTRIES / MAX_CONSOLE_TEXT_BYTES / MAX_BODY_PREVIEW_BYTES line already in that paragraph"
+          ],
+          "failureExamples": [
+            "README says 'a new size ceiling was added to prevent oversized reads' without naming the constant or its byte value, leaving a reader unable to reason about whether their workload will trip it",
+            "a developer copies the constant name correctly but pastes a stale value from an earlier draft of the implementation (e.g. rounds 1_048_576 down to '1MB' when the actual guard uses a different exact figure), which reads as authoritative but is wrong",
+            "the constants are documented in a new, disconnected section far from the existing Buffer caps paragraph, so a reader scanning the established location for size limits never finds them"
+          ],
+          "minScore": 6
+        },
+        {
+          "id": "readme-describes-wholesale-replacement-and-mcp-error-shape",
+          "label": "README states the too-large result replaces the payload wholesale and its MCP isError shape",
+          "ruleStatement": "10: README explicitly contrasts the too-large behavior with truncation \u2014 stating the oversized capture is not partially trimmed but replaced wholesale by the non-throwing outcome \u2014 and gives the exact MCP-surfaced shape `isError: true` with `{ tooLarge: true, actualBytes, limitBytes }`, in prose that parallels the existing executeScript/evaluatePage isError paragraph closely enough that a reader can tell the two features share one convention. 8: README states the wholesale-replacement behavior and that it surfaces as isError:true with a too-large-shaped payload, even if field names are summarized rather than quoted verbatim. Below minScore: README is silent on whether the result is trimmed vs. replaced, or omits the isError/MCP-layer detail entirely, or claims a partial/best-effort read is still returned.",
+          "passCriteria": [
+            "search README.md for a sentence in the readConsoleMessages/readNetworkRequests section stating the too-large case is not trimmed/truncated but returned as a distinct non-throwing outcome",
+            "the same sentence or the one following it names isError: true and lists the payload's fields (tooLarge, actualBytes, limitBytes) \u2014 either verbatim or with equivalent field-by-field detail",
+            "compare this paragraph's structure to the executeScript/evaluatePage isError paragraph already in README.md (around the 'is the one distinct case' sentence) \u2014 the new paragraph should read as the same convention applied to a second read path, not an unrelated one-off description",
+            "the paragraph does not claim or imply a since/nextSince partial page is still returned when the too-large outcome fires \u2014 it should be clear no console/network entries are returned in that case"
+          ],
+          "failureExamples": [
+            "README says 'oversized reads return an error' but never clarifies whether some entries are still returned alongside the error, leaving ambiguous whether callers should expect partial data (a real, easy-to-make omission for someone focused on the ceiling constants and less on the exact error contract)",
+            "the isError shape is described only for readConsoleMessages; readNetworkRequests' paragraph just says 'similar behavior applies' without repeating the field shape, so a reader has to infer whether actualBytes/limitBytes semantics differ per read type",
+            "the paragraph reuses executeScript's field names (actualChars/limitChars) instead of the byte-based names actually used by the read-capture ceiling (actualBytes/limitBytes), silently misdocumenting the contract"
+          ],
+          "minScore": 6
+        }
+      ],
+      "healerHint": "Most likely failure is documenting only one of readConsoleMessages/readNetworkRequests (or only tool-catalog.ts and not README, or vice versa) \u2014 grep both files for both tool names and confirm each has the oversize sentence plus a matching test assertion before calling the phase done."
+    }
+  ],
+  "successCriteria": [
+    "Done and correct means: (1) readConsoleMessages and readNetworkRequests each measure the serialised size of the CaptureReadResult they are about to return and, when it exceeds a defined byte/char ceiling, return a non-throwing structured oversize outcome built from the existing checkSizeLimit/buildOversizeResult helpers in tools/chrome-bridge/src/extension/size-limits.ts (reused as-is, not re-implemented) carrying actualBytes and limitBytes, exactly mirroring how executeScript/evaluatePage already behave; (2) a normal within-ceiling read is unaffected \u2014 same CaptureReadResult shape, same since/limit/nextSince/dropped/truncated semantics as today; (3) tools/chrome-bridge/src/mcp/server.ts's isOversizeResult/isError branch (currently scoped to executeScript/evaluatePage only, per the comment on line ~190) is extended to also cover readConsoleMessages/readNetworkRequests, so an oversize read surfaces as an MCP isError:true JSON text block, not a silently-huge success payload; (4) new/adjusted unit tests cover both the within-limit and over-limit paths for both tools (page-actions.unit.test.ts and server.unit.test.ts), and existing tests for the count-based `limit`/`since`/`nextSince`/`dropped`/`truncated` fields keep passing unchanged; (5) tsc --noEmit, eslint --max-warnings 0, and vitest (unit-level, per .testguard.json placement) pass for tools/chrome-bridge; (6) README.md's readConsoleMessages/readNetworkRequests sections document the new byte-size ceiling and the too-large outcome shape, matching how executeScript/evaluatePage/captureTab are already documented.",
+    "Measure real console and network read sizes: A recorded measurement (character-length of JSON.stringify(entries) for a 500-entry console read and a 500-entry network read against a real page), landed as a one-line binding-decision entry in docs/roadmaps/agent-agnostic-browser-bridge/decisions.md, that the next phase cites when choosing MAX_CONSOLE_READ_RESULT_CHARS / MAX_NETWORK_READ_RESULT_CHARS.",
+    "Add byte-size ceiling to console and network reads: readCapture returns a structured OversizeResult (in place of the normal CaptureReadResult) for both readConsoleMessages and readNetworkRequests when the serialised result exceeds its new byte ceiling, covered by new unit tests, with the existing count-based limit/since tests unaffected.",
+    "Flag oversize console/network reads as MCP errors: mcp/server.ts's isError/isOversizeResult branch covers readConsoleMessages and readNetworkRequests (comment updated to match), verified by new unit tests.",
+    "Document the read-tool size cap in catalog and README: tool-catalog.ts's readConsoleMessages/readNetworkRequests descriptions (verified by a tool-catalog.unit.test.ts assertion) and README.md's readConsoleMessages/readNetworkRequests section both document the new byte-size ceiling and the too-large/isError behavior."
+  ],
+  "deferred": [
+    "Trimming the entries array down to fit under the byte ceiling instead of wholesale-replacing the result with OversizeResult \u2014 Fails the YAGNI 'simplest thing that could work' gate for this horizon: the task explicitly requires reusing the horizon-16 pattern exactly (full-replace sentinel), and any partial-trim/pagination behavior would be a new, unrequested read-protocol feature layered on top of the existing since/limit/nextSince cursor \u2014 out of scope per stage1-analysis.json's outOfScope list.",
+    "A single shared MAX_CAPTURE_READ_RESULT_CHARS constant instead of separate console/network constants \u2014 Deferred pending the live measurement in phase 0 \u2014 console and network payload shapes differ enough (text-heavy vs. URL/status/body-preview-heavy) that collapsing them into one constant before measuring both would be guessing ahead of evidence; if measurement shows near-identical real-world sizes, a future horizon can consolidate them, but doing so speculatively now fails the 'don't build for an imagined future need' gate.",
+    "Removing the dead active-tab code surface (queryActiveTab/captureVisibleTab/NO_ACTIVE_TAB/activeTab permission) \u2014 Explicitly out of scope per stage1-analysis.json \u2014 a previously-rejected alternative from a different horizon's scoping round, unrelated to this task's byte-cap objective.",
+    "Any pagination/continuation retrieval mechanism for an oversize read (e.g. auto-retry with a smaller limit) \u2014 Explicitly out of scope per stage1-analysis.json \u2014 the established flat, non-retrying ceiling precedent from executeScript/evaluatePage is what this horizon must mirror, not captureTab's ladder/retry behavior.",
+    "Any change to the count-based `since`/`limit`/`nextSince`/`dropped`/`truncated` cursor semantics of the ring-buffer read protocol (decisions.md 2026-09-02 horizon 2) \u2014 this horizon adds a byte guard alongside them, it does not redesign the read protocol.",
+    "Per-entry content truncation changes (MAX_CONSOLE_TEXT_BYTES, MAX_BODY_PREVIEW_BYTES) \u2014 those already bound individual entries and are untouched.",
+    "Any downscale/retry-ladder behavior for oversize reads (e.g. auto-retrying with a smaller `limit`) \u2014 the established precedent for executeScript/evaluatePage is a flat non-retrying ceiling, and readConsoleMessages/readNetworkRequests follow the same flat pattern, not captureTab's ladder.",
+    "Streaming/observation-frame delivery of console/network entries \u2014 the wire protocol's unused `observation` frame stays unused (decisions.md 2026-09-02 horizon 2); this horizon stays pull-only.",
+    "Persistent-CDP-session redesign, JPEG/quality downscale rungs for captureTab, or a second render-primitive consumer \u2014 these are other deferred items from next-horizon-brief.md's decision list that belong to different horizons.",
+    "Changes to boky's own extension/bridge/nest-host code \u2014 this project never touches boky itself (decisions.md 2026-09-02 horizon 1).",
+    "Project-memory housekeeping (discoveries.md/state.md/blockers.md/next-horizon-brief.md updates, closing the horizon-16 deferred item) \u2014 this is the PLAN pipeline's own mechanical per-horizon bookkeeping step (see SKILL.md 'PLAN output'), performed by the orchestrator after the gate passes, not a phase deliverable; only the phase-1 decisions.md line (a grounding fact a phase produces) is an actual phase artifact."
+  ],
+  "revision": 0
+}

@@ -1,0 +1,184 @@
+{
+  "roadmapFile": "docs/roadmaps/agent-agnostic-browser-bridge/horizons/horizon-12-find-element-returns-elements-roadmap.json",
+  "createdAt": "2026-09-04T07:45:00Z",
+  "updatedAt": "2026-09-04T09:05:00Z",
+  "phases": [
+    {
+      "id": "return-matched-elements-from-find-element",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-09-04T07:45:00Z",
+      "completedAt": "2026-09-04T08:20:00Z",
+      "gateRun": {
+        "typecheck": "passed",
+        "lint": "passed (--max-warnings 0)",
+        "unitTests": "321/321 passed (incl. 9 findElement tests + injected-fn block + adversarial-selector test)",
+        "manifestDiffVsHead": "empty",
+        "manifestDiffSourceVsDist": "identical",
+        "pageActionsCount": "20 (both Record<PageAction,…> mapped types + 3 PAGE_ACTIONS count assertions still green)"
+      },
+      "gradeResult": {
+        "overallPass": true,
+        "dimensions": [
+          {
+            "dimensionId": "csp-safe-isolated-read",
+            "score": 9,
+            "evidence": "page-actions.ts:481-568 passes a function-value to ports.executeScript; selector reaches the injected body only via the args array; injected function references only DOM globals; adversarial test at page-actions.unit.test.ts proves hostile string reaches querySelectorAll as a serialised arg, not interpolated.",
+            "passesMinScore": true
+          },
+          {
+            "dimensionId": "result-cap-before-clone-boundary",
+            "score": 9,
+            "evidence": "MAX_FIND_ELEMENT_MATCHES=50 and MAX_ELEMENT_TEXT_CHARS=500 declared once at module level (page-actions.ts:51,58) and inlined into the injected function (line 484-485) since chrome structured-clones the fn. Tests at unit.test.ts prove both caps fire in-page before the clone boundary.",
+            "passesMinScore": true
+          },
+          {
+            "dimensionId": "element-ref-selfcontained-locator",
+            "score": 8,
+            "evidence": "buildRef produces only CSS (no XPath, no CDP/backend id). Unique-id short-circuit and :nth-of-type fallback both verified by unit tests, but no test explicitly feeds a returned ref back through querySelectorAll and asserts the original element resolves — the round-trip assertion the rubric calls for. Implementation is correct; test coverage of the round-trip is the gap.",
+            "passesMinScore": true
+          },
+          {
+            "dimensionId": "parity-surface-atomic-completeness",
+            "score": 9,
+            "evidence": "FindElementResult replaced at types.ts:275; FindElementMatch + FindElementKeyAttributes adjacent. Both Record<PageAction,…> mapped types reference by name and need no edit. Raw + guarded findElement updated. TOOL_CATALOG description updated, inputSchema byte-identical. README prose + step 13 added, prior waitFor/stop-relay renumbered. PAGE_ACTIONS still 20.",
+            "passesMinScore": true
+          },
+          {
+            "dimensionId": "nullable-convention-and-adversarial-coercion",
+            "score": 9,
+            "evidence": "Every key-attr field is string|null (types.ts:240-248). coerceFindElementOutcome reconstructs each descriptor from primitives (page-actions.ts:141-184); empty match yields {matches:[],total:0,truncated:false}. Hostile selector swallowed by injected fn try/catch (line 525), proven by unit.test.ts:703-719.",
+            "passesMinScore": true
+          }
+        ],
+        "summary": "All five dimensions clear minScore 7. Four scored 9 with concrete file:line + test evidence. element-ref-selfcontained-locator scored 8 because no test asserts the explicit round-trip of a returned ref through querySelectorAll. Implementation is correct; test gap is the only thing holding this below 9."
+      },
+      "notes": [
+        "FindElementResult replaced with {matches: readonly FindElementMatch[], total: number, truncated: boolean}; added FindElementKeyAttributes + FindElementMatch adjacent interfaces.",
+        "raw.findElement's in-page function (chrome.scripting.executeScript, ISOLATED world by omission) now slices NodeList to MAX_FIND_ELEMENT_MATCHES=50 in-page, caps innerText at MAX_ELEMENT_TEXT_CHARS=500 per element in-page, builds a self-contained CSS-locator ref (recursive buildRef preferring unique-id short-circuit via CSS.escape, then :nth-of-type chain capped at MAX_REF_DEPTH=8), and copies the fixed key-attribute map with absent attrs as null.",
+        "coerceFindElementOutcome rebuilds every descriptor from primitives (asString the ref/text, asStringOrNull every attr — empty strings normalised to null), returns the empty outcome for a legitimately empty match list, and the same CSP error sentinel as coercePointerOutcome for malformed/empty injection output.",
+        "Three original findElement tests rewritten to new result shape (toHaveBeenCalledWith(7, expect.any(Function), ['.x']) assertion still holds, queryActiveTab-not-called still asserted, selector-empty/missing rejection still tested). Added: injected-function test (6 cases — unique-id short-circuit, :nth-of-type fallback, MAX_MATCHES cap, MAX_TEXT_CHARS cap, null-attribute emission) + adversarial-selector test (hostile string reaches querySelectorAll only as a serialised arg, returns empty via in-page try/catch, no throw).",
+        "TOOL_CATALOG findElement description rewritten to describe the extraction output + caps; inputSchema unchanged (selector-only).",
+        "README prose updated (new 'findElement returns the matched elements themselves — not just a count' paragraph + the 50/500 cap numbers) and a new manual-e2e step inserted as step 13 (after evaluatePage, before scrollPage), pushing the prior waitFor/stop-relay steps to 15/16. 'twenty'/'20' counts unchanged.",
+        "manifest.json vs HEAD diff empty; built dist/extension/manifest.json identical to extension/manifest.json. PAGE_ACTIONS still 20 entries (the 3 PAGE_ACTIONS-length assertions in actions.unit.test.ts:34, tool-catalog.unit.test.ts still green; findElement stayed at index 4).",
+        "Grader (subagent, not self-graded) marked phase overallPass:true. All five dimensions pass minScore 7. The element-ref-selfcontained-locator dimension is 8 instead of 9 because no test explicitly asserts feeding a returned ref back through querySelectorAll resolves the original element — implementation is correct, test gap noted."
+      ]
+    },
+    {
+      "id": "verify-find-element-elements-live-in-chrome",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-09-04T08:50:00Z",
+      "completedAt": "2026-09-04T09:05:00Z",
+      "gateRun": {
+        "verify": "npm run verify (tools/chrome-bridge) — tsc --noEmit clean, eslint . --max-warnings 0 clean, vitest 321/321 passed across 23 files",
+        "rebuild": "npm run build:extension — dist/extension/service-worker.js reproduced byte-identically at 47662 bytes",
+        "manifestDiffVsHead": "git -C tools/chrome-bridge diff HEAD -- extension/manifest.json → empty (no output)",
+        "manifestDiffSourceVsDist": "diff extension/manifest.json dist/extension/manifest.json → exit 0, no output (identical, against freshly rebuilt dist)",
+        "liveChrome": "chrome-bridge MCP session, sandbox tab 1799010670 (sandboxTabActive:false), https://en.wikipedia.org/wiki/Chromium_(web_browser)"
+      },
+      "amendments": [
+        {
+          "at": "2026-09-04T08:55:00Z",
+          "by": "execute",
+          "reason": "The contract named claude-in-chrome's `find` as the corroborating implementation for the head-to-head. That tool does not exist in this environment: the repo's .mcp.json configures only `extension-bridge` and `chrome-bridge`, and no claude-in-chrome tool is exposed to sessions here. Raised before writing any deliverable; the user chose a cross-mechanism CDP corroboration rather than blocking. The substitution is disclosed in the README block and blockers.md, never presented as the planned check.",
+          "grounding": "Repo .mcp.json contains exactly two mcpServers (extension-bridge, chrome-bridge); no claude-in-chrome tool surfaced in the session. Recorded as discoveries.md entry '2026-09-04 | horizon 12 | claude-in-chrome absent'.",
+          "before": {
+            "inputs": [
+              "Phase 0 deliverable (changed findElement across the parity surface)",
+              "claude-in-chrome find MCP tool",
+              "blockers.md item #6 and the h11 manifest-diff verification method",
+              "README dated-verification-block convention (h09/h10)"
+            ],
+            "changes": [
+              "Rebuild and reload the extension, open a fresh chrome-bridge MCP session (use --retry if the tool catalog is stale from a prior session).",
+              "Run findElement on a real-page CSS selector and confirm real element refs, non-empty non-collapsed innerText, and a populated key-attribute map; run a no-match selector and confirm an empty matches list (not an error); run a high-cardinality selector and confirm the element-count cap and truncated flag; run the adversarial selector string and confirm no code execution.",
+              "Run claude-in-chrome's find on the same page and record the head-to-head comparison of the two results.",
+              "Confirm git -C tools/chrome-bridge diff HEAD -- extension/manifest.json is empty and diff extension/manifest.json dist/extension/manifest.json stays identical.",
+              "Append a dated 'Verified 2026-09-04 (horizon 12)' head-to-head block to the README, mark blockers.md item #6 resolved, and update the roadmap state/discoveries memory files."
+            ]
+          },
+          "after": {
+            "inputs": [
+              "Phase 0 deliverable (changed findElement across the parity surface)",
+              "chrome-bridge evaluatePage (chrome.debugger/CDP Runtime.evaluate) as cross-mechanism corroborator — claude-in-chrome MCP is not available in this repo",
+              "blockers.md item #6 and the h11 manifest-diff verification method",
+              "README dated-verification-block convention (h09/h10)"
+            ],
+            "changes": [
+              "Rebuild and reload the extension, open a fresh chrome-bridge MCP session (use --retry if the tool catalog is stale from a prior session).",
+              "Run findElement on a real-page CSS selector and confirm real element refs, non-empty non-collapsed innerText, and a populated key-attribute map; run a no-match selector and confirm an empty matches list (not an error); run a high-cardinality selector and confirm the element-count cap and truncated flag; run the adversarial selector string and confirm no code execution.",
+              "Run chrome-bridge evaluatePage (CDP path, a different mechanism from the chrome.scripting ISOLATED-world read under test) against the same page and targets, and record the field-by-field comparison, disclosing in the README that this substitutes for the planned claude-in-chrome find.",
+              "Confirm git -C tools/chrome-bridge diff HEAD -- extension/manifest.json is empty and diff extension/manifest.json dist/extension/manifest.json stays identical.",
+              "Append a dated 'Verified 2026-09-04 (horizon 12)' head-to-head block to the README, mark blockers.md item #6 resolved, and update the roadmap state/discoveries memory files."
+            ]
+          }
+        }
+      ],
+      "gradeResult": {
+        "phaseId": "verify-find-element-elements-live-in-chrome",
+        "overallPass": false,
+        "dimensionScores": [
+          {
+            "dimensionId": "fresh-session-provenance",
+            "score": 9,
+            "pass": true,
+            "evidence": "README 'Verified 2026-09-04 (horizon 12)' block names the rebuild step (build:extension reproduced service-worker.js byte-identically at 47662 bytes), gives a concrete freshness signal (getTabState round-trip, sandbox tab 1799010670, sandboxTabActive:false), and the first quoted findElement output carries the new extraction shape the pre-h12 build could not emit. Short of 10: no explicit session id / tool-catalog hash."
+          },
+          {
+            "dimensionId": "all-branches-exercised-live",
+            "score": 10,
+            "pass": true,
+            "evidence": "All four scenarios quoted live on a named URL: normal match (ref #firstHeading, real text, full attr map with nulls), no-match (empty matches, success not error), high-cardinality (50 capped, total 2170, truncated true), adversarial (empty shape, no throw, evaluatePage confirms SyntaxError from the CSS parser). What a 10 has over a 9: two corroborations beyond the four required — the per-element text cap checked against independent uncapped reads (716→500, 737→500, 351 whole) and a returned ref round-tripping to exactly one element with identical text and href."
+          },
+          {
+            "dimensionId": "independent-head-to-head-corroboration",
+            "score": 5,
+            "pass": false,
+            "evidence": "README discloses claude-in-chrome could not be run and that the user-approved substitute was cross-mechanism corroboration via evaluatePage (CDP). The field-by-field comparison is real (link count 2170 == total; h1 innerText byte-identical; ref text/href matching the round-trip; p count 46 == total; no divergence found). But against passCriteria as written: criterion 1 fails (no claude-in-chrome output quoted) and criterion 4 fails (parity concluded against the CDP path, not against claude-in-chrome find). 2 of 4 criteria met."
+          },
+          {
+            "dimensionId": "manifest-permission-unchanged-diff",
+            "score": 9,
+            "pass": true,
+            "evidence": "README quotes both required commands with actual results inline: git diff HEAD -- extension/manifest.json produced no output (empty), and diff extension/manifest.json dist/extension/manifest.json exited 0 with no output (identical) against the freshly rebuilt dist. The dist-was-rebuilt note is explicit, avoiding the stale-artifact failure example."
+          },
+          {
+            "dimensionId": "honest-status-and-memory-updates",
+            "score": 9,
+            "pass": true,
+            "evidence": "README carries the block dated exactly 'Verified 2026-09-04 (horizon 12)' with evidence inline. blockers.md #6 marked RESOLVED with a pointer to that block plus the substitution and innerText-visibility caveats. discoveries.md carries the dated horizon-12 entries including the relay-down-not-stale-catalog finding, the claude-in-chrome-absent finding, and the visibility-hidden caveat. No numeric self-score asserted; claims backed by quoted output, not paraphrase."
+          }
+        ]
+      },
+      "override": {
+        "authorizedBy": "user",
+        "at": "2026-09-04T09:05:00Z",
+        "dimensionIds": ["independent-head-to-head-corroboration"],
+        "reason": "The user was shown the failing score (5 against a bar of 6) and its exact cause — claude-in-chrome is not connectable in this repo, so the two passCriteria naming that tool cannot be met by any amount of rework — and chose to accept the phase with the override on the record rather than leave it blocked or revert the docs. The corroboration that WAS performed is cross-mechanism (CDP Runtime.evaluate vs the chrome.scripting ISOLATED-world read under test) and found zero divergence across match counts, ordering, text, and attributes. Compensation was therefore not invoked: the README block and the blockers.md #6 resolution stand, both carrying the substitution disclosure.",
+        "gradeResultBefore": {
+          "phaseId": "verify-find-element-elements-live-in-chrome",
+          "overallPass": false,
+          "dimensionScores": [
+            { "dimensionId": "fresh-session-provenance", "score": 9, "pass": true, "evidence": "Rebuild named, getTabState freshness signal, new extraction shape in the first quoted output. No session id / catalog hash keeps it off 10." },
+            { "dimensionId": "all-branches-exercised-live", "score": 10, "pass": true, "evidence": "All four scenarios quoted live on a named URL, plus two extra corroborations (text-cap against independent uncapped reads, and a ref round-trip)." },
+            { "dimensionId": "independent-head-to-head-corroboration", "score": 5, "pass": false, "evidence": "Real field-by-field cross-mechanism comparison with no divergence, but 2 of 4 passCriteria fail because they name claude-in-chrome specifically: no claude-in-chrome output quoted, and parity concluded against the CDP path instead." },
+            { "dimensionId": "manifest-permission-unchanged-diff", "score": 9, "pass": true, "evidence": "Both commands quoted with actual results; dist explicitly noted as freshly rebuilt." },
+            { "dimensionId": "honest-status-and-memory-updates", "score": 9, "pass": true, "evidence": "Dated README block, blockers.md #6 resolved with pointer and caveats, discoveries.md updated, no self-scoring, claims backed by quoted output." }
+          ]
+        }
+      },
+      "compensationInvoked": false,
+      "notes": [
+        "DONE WITH AN OVERRIDE — not a plain pass. Four of five rubric dimensions cleared their bar (9/10/9/9); independent-head-to-head-corroboration scored 5 against a bar of 6 and was overridden by explicit user authorization, recorded above with the failing grade sheet kept verbatim.",
+        "The prior block is cleared: last session both pings returned 'Controller/Bridge not connected'. This session mcp__chrome-bridge__ping returned {ok:true}. The h9/h11 stale-MCP-catalog symptom did NOT recur — the session's catalog already carried the horizon-12 findElement description, so no catalog --retry was needed. The block was relay-down, a different failure than h9/h11.",
+        "Freshness evidenced by output shape, not asserted: the running extension returned {matches,total,truncated} with per-match ref/text/attributes, which the pre-h12 build could not emit. npm run build:extension reproduced service-worker.js byte-identically (47662 bytes), so the loaded build matches source.",
+        "Live results on https://en.wikipedia.org/wiki/Chromium_(web_browser): normal match h1#firstHeading → ref '#firstHeading' (unique-id short-circuit), text 'Chromium (web browser)', attrs populated with nulls for absent. No-match → {matches:[],total:0,truncated:false}, success not error. 'a' → exactly 50 matches, total 2170, truncated true. Adversarial '>>>not css<<< \"]);alert(1);//' → empty result, no throw; evaluatePage confirms querySelectorAll on the same string throws SyntaxError, so it was parsed as a selector and never executed.",
+        "Per-element text cap proven independently: '#mw-content-text p' returned total 46 with truncated:true even though 46 < the 50 cap — the flag was set solely by MAX_ELEMENT_TEXT_CHARS. Uncapped lengths read via evaluatePage: #mwAZ0 716→500, #mwAg0 737→500, #mwLw 351 returned whole.",
+        "Ref round-trip verified live, closing the test gap that held phase 0's element-ref-selfcontained-locator dimension at 8: the ref '#toc-Licensing > a:nth-of-type(1)' re-fed to findElement resolved to exactly one element with identical text ('Licensing') and href ('#Licensing'), and independently via CDP querySelector.",
+        "Caveat found and recorded in README + discoveries.md: text is innerText, so visibility:hidden elements still match and still get a working ref but return text ''. Verified on #n-mainpage-description > a — computed visibility:hidden, rect 186x28, textContent 'Main page', innerText ''. This also settles roadmap risk #7: innerText semantics genuinely survive the unfocused sandbox tab; every visible element returned full real text.",
+        "One contract amendment applied (claude-in-chrome → CDP evaluatePage cross-check), within the budget of 2 per phase / 3 per horizon. Horizon 12 total: 1 amendment, 1 override."
+      ]
+    }
+  ]
+}

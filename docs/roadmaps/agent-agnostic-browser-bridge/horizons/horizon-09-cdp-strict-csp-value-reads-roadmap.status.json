@@ -1,0 +1,229 @@
+{
+  "roadmapFile": "docs/roadmaps/agent-agnostic-browser-bridge/horizons/horizon-09-cdp-strict-csp-value-reads-roadmap.json",
+  "roadmapTask": "Horizon 09 of agent-agnostic-browser-bridge. Horizon 08 added an evalIsolated chrome-bridge action to read values on strict-CSP sites via an isolated-world string eval; live testing proved this impossible (MV3's extension CSP forbids eval in every world). The only route to strict-CSP value reads is CDP Runtime.evaluate, previously barred by decisions.md (h6 + h8). The user has decided to lift that ban for read-only page evaluation (and greenlight the broader CDP pivot for later horizons) and to remove the dead evalIsolated action. This horizon: remove evalIsolated, add a CDP Runtime.evaluate port, wire a new evaluatePage action end to end, and verify strict-CSP value reads in live Chrome.",
+  "createdAt": "2026-09-03T16:40:00.000Z",
+  "updatedAt": "2026-09-03T18:30:00.000Z",
+  "roadmapRevision": 0,
+  "phases": [
+    {
+      "phaseId": "remove-eval-isolated-action",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-09-03T16:42:00.000Z",
+      "completedAt": "2026-09-03T16:50:00.000Z",
+      "amendments": [
+        {
+          "at": "2026-09-03T16:42:00.000Z",
+          "by": "execute",
+          "reason": "The roadmap's filesAffected for remove-eval-isolated-action lists 8 files, but the repo has a 9th evalIsolated reference in tools/chrome-bridge/blockers.md (a git-tracked package-local note whose fix suggestion at line 7 says 'expose a separate evalIsolated tool'). The phase's expectedResult requires grep over tools/chrome-bridge to return zero matches, so blockers.md is genuinely in scope; the discovery that produced the roadmap's enumeration missed it.",
+          "grounding": "grep -rinE 'evalIsolated|EvalIsolated|eval-isolated' tools/chrome-bridge/ -> tools/chrome-bridge/blockers.md:7; `git ls-files tools/chrome-bridge/blockers.md` confirms it is a tracked file",
+          "before": {
+            "filesAffected": [
+              "tools/chrome-bridge/src/protocol/actions.ts",
+              "tools/chrome-bridge/src/protocol/actions.unit.test.ts",
+              "tools/chrome-bridge/src/protocol/types.ts",
+              "tools/chrome-bridge/src/extension/page-actions.ts",
+              "tools/chrome-bridge/src/extension/page-actions.unit.test.ts",
+              "tools/chrome-bridge/src/mcp/tool-catalog.ts",
+              "tools/chrome-bridge/src/mcp/tool-catalog.unit.test.ts",
+              "tools/chrome-bridge/README.md"
+            ],
+            "changes": [
+              "Remove \"evalIsolated\" from the PAGE_ACTIONS tuple in actions.ts.",
+              "Delete the EvalIsolatedParams and EvalIsolatedResult interfaces in types.ts and their entries in the PageActionParams and PageActionResults mapped types.",
+              "Delete the evalIsolated raw handler in page-actions.ts and its entry in the guarded return map.",
+              "Delete the evalIsolated entry from TOOL_CATALOG in tool-catalog.ts.",
+              "Delete the 'pageActionHandlers - evalIsolated' describe block from page-actions.unit.test.ts.",
+              "Update the ordered-tuple assertion and the hardcoded count (18 -> 17) in actions.unit.test.ts and tool-catalog.unit.test.ts.",
+              "Remove evalIsolated from the README action enumeration (two spots) and its manual e2e step; change the 'eighteen page actions' / 'connected with 18 tools' counts to seventeen / 17."
+            ]
+          },
+          "after": {
+            "filesAffected": [
+              "tools/chrome-bridge/src/protocol/actions.ts",
+              "tools/chrome-bridge/src/protocol/actions.unit.test.ts",
+              "tools/chrome-bridge/src/protocol/types.ts",
+              "tools/chrome-bridge/src/extension/page-actions.ts",
+              "tools/chrome-bridge/src/extension/page-actions.unit.test.ts",
+              "tools/chrome-bridge/src/mcp/tool-catalog.ts",
+              "tools/chrome-bridge/src/mcp/tool-catalog.unit.test.ts",
+              "tools/chrome-bridge/README.md",
+              "tools/chrome-bridge/blockers.md"
+            ],
+            "changes": [
+              "Remove \"evalIsolated\" from the PAGE_ACTIONS tuple in actions.ts.",
+              "Delete the EvalIsolatedParams and EvalIsolatedResult interfaces in types.ts and their entries in the PageActionParams and PageActionResults mapped types.",
+              "Delete the evalIsolated raw handler in page-actions.ts and its entry in the guarded return map.",
+              "Delete the evalIsolated entry from TOOL_CATALOG in tool-catalog.ts.",
+              "Delete the 'pageActionHandlers - evalIsolated' describe block from page-actions.unit.test.ts.",
+              "Update the ordered-tuple assertion and the hardcoded count (18 -> 17) in actions.unit.test.ts and tool-catalog.unit.test.ts.",
+              "Remove evalIsolated from the README action enumeration (two spots) and its manual e2e step; change the 'eighteen page actions' / 'connected with 18 tools' counts to seventeen / 17.",
+              "Update the tools/chrome-bridge/blockers.md fix note that proposes 'expose a separate evalIsolated tool' to reference the CDP-based evaluatePage resolution instead, removing the now-dead tool's name."
+            ]
+          }
+        }
+      ],
+      "gradeResult": {
+        "phaseId": "remove-eval-isolated-action",
+        "dimensionScores": [
+          {
+            "dimensionId": "complete-removal",
+            "score": 9,
+            "pass": true,
+            "evidence": "grep over tools/chrome-bridge returned zero matches; PAGE_ACTIONS.length===17; both count tests assert 17; README updated to seventeen/17; EvalIsolatedParams/Result + mapped types deleted; evalIsolated describe block (7 tests) fully deleted."
+          },
+          {
+            "dimensionId": "green-gate-no-shortcuts",
+            "score": 9,
+            "pass": true,
+            "evidence": "npm run verify exits 0 (tsc clean, eslint --max-warnings 0 clean, vitest 259 passed/22 files); no new suppression/skip; Record<PageAction,...> maps compile with 17 keys."
+          },
+          {
+            "dimensionId": "removal-only-scope",
+            "score": 10,
+            "pass": true,
+            "evidence": "Exactly the amended 9-file set changed; executeScript handler and guarded map entry are context (unchanged) lines; no new runtime behaviour; the adjacent executeScript handler sharing the same (0,eval) closure pattern was left untouched."
+          }
+        ],
+        "overallPass": true
+      },
+      "notes": "Amended filesAffected/changes to include tools/chrome-bridge/blockers.md. Compensation = restore the deleted surface from git history (a git revert of these 9 files; not invoked). Also fixed the stale 'exactly eighteen tools' it() label in tool-catalog.unit.test.ts to 'seventeen' after grading passed."
+    },
+    {
+      "phaseId": "add-cdp-evaluate-port",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-09-03T13:56:10.000Z",
+      "completedAt": "2026-09-03T17:05:00.000Z",
+      "gradeResult": {
+        "phaseId": "add-cdp-evaluate-port",
+        "dimensionScores": [
+          {
+            "dimensionId": "csp-exempt-read-path",
+            "score": 9,
+            "pass": true,
+            "evidence": "evaluateTab issues chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }), and debugger-ports.unit.test.ts:207-215 asserts that exact method name and params object (both flags present); no chrome.scripting.executeScript, eval, or new Function appears in the method. Both failureExamples are guarded by the precise params assertion, but nothing beyond the stated criteria is added, so it is a solid 9 rather than a 10."
+          },
+          {
+            "dimensionId": "outcome-and-cap-parity",
+            "score": 9,
+            "pass": true,
+            "evidence": "cdpEvalOutcome returns the shared exported InPageScriptOutcome shape (so coerceExecuteScriptOutcome needs no adaptation); exceptionDetails -> { ok: false, error } drawn from exception.description with exceptionDetails.text fallback; over-large value -> the exact 'executeScript result is too large (...; limit ...)' wording built from the imported MAX_EXECUTE_SCRIPT_RESULT_CHARS constant (not re-hardcoded), and the test computes the expected cap from JSON.stringify length. Both failureExamples avoided; no observable quality beyond the criteria."
+          },
+          {
+            "dimensionId": "screenshot-behaviour-preserved",
+            "score": 9,
+            "pass": true,
+            "evidence": "withDebuggerSession registers the onDetach listener exactly once at construction (not per call) and detaches in finally on every path including error; the original captureScreenshot unit tests still pass and the 'registers the onDetach listener exactly once across captures' test asserts addListener called once; evaluate's error path still detaches and the onDetach rejection carries the per-method 'capturing'/'evaluating' label. Both failureExamples avoided; no extra observable quality beyond criteria."
+          },
+          {
+            "dimensionId": "port-test-coverage",
+            "score": 9,
+            "pass": true,
+            "evidence": "describe('evaluate') has 8 co-located tests stubbing chrome.debugger via installStubDebugger (vi.stubGlobal) and never touching a real browser: success value read, exception description error, exceptionDetails.text fallback, undefined value, over-large cap wording, no-result-value, re-attach cleanly after a sendCommand rejection, and detach-interruption mid-evaluate with the 'evaluating' label — every required path has an assertion and the exact CDP command + params is asserted, not just that the method was called."
+          }
+        ],
+        "overallPass": true
+      },
+      "amendments": [
+        {
+          "at": "2026-09-03T13:56:10.000Z",
+          "by": "execute",
+          "reason": "The roadmap's change 1 says the interface rename has a 'single importer in page-actions.ts' and filesAffected lists only 2 files, but CaptureDebuggerPorts is consumed (as a type) by page-actions.ts, service-worker.ts, page-actions.unit.test.ts, and service-worker.unit.test.ts, and the production factory chromeCaptureDebuggerPorts is also imported by service-worker.ts. Adding evaluate as a required interface method breaks the two fake-implementers (fakeDebugger() in page-actions.unit.test.ts and fakeDebuggerPorts() in service-worker.unit.test.ts). npm run verify cannot be green without editing all six.",
+          "grounding": "grep -rn 'CaptureDebuggerPorts' tools/chrome-bridge/src -> page-actions.ts:26, service-worker.ts:25+42, page-actions.unit.test.ts:5+115-117, service-worker.unit.test.ts:5+87; `git ls-files` confirms all are tracked; the interface gains evaluate() so every object typed as the port (the two fakes) must now provide it.",
+          "before": {
+            "filesAffected": [
+              "tools/chrome-bridge/src/extension/debugger-ports.ts",
+              "tools/chrome-bridge/src/extension/debugger-ports.unit.test.ts"
+            ],
+            "changes": [
+              "Rename the CaptureDebuggerPorts interface to DebuggerPorts (it is no longer capture-only) and update its single importer in page-actions.ts; keep captureScreenshot and add evaluate(tabId: number, expression: string): Promise<InPageScriptOutcome>.",
+              "Factor the shared attach / inFlight-registration / onDetach / detach-in-finally machinery out of captureScreenshot into a private helper both methods call, so captureScreenshot's observable behaviour does not change.",
+              "Implement evaluate: attach, sendCommand({ tabId }, \"Runtime.evaluate\", { expression, returnByValue: true, awaitPromise: true }), detach in finally.",
+              "Map the CDP reply to InPageScriptOutcome: exceptionDetails present -> { ok: false, error: exceptionDetails.exception?.description ?? exceptionDetails.text }; otherwise JSON.stringify(result.value), apply the same MAX_EXECUTE_SCRIPT_RESULT_CHARS cap the executeScript handler uses (export the constant from page-actions.ts or move it to a shared module), and return { ok: true, json }; undefined / non-serialisable value -> the same error strings executeScript returns.",
+              "Add co-located unit tests with a stubbed chrome.debugger: successful value read, exceptionDetails -> error, over-large value -> cap error, detach runs on the error path, no attachment leak after either path."
+            ]
+          },
+          "after": {
+            "filesAffected": [
+              "tools/chrome-bridge/src/extension/debugger-ports.ts",
+              "tools/chrome-bridge/src/extension/debugger-ports.unit.test.ts",
+              "tools/chrome-bridge/src/extension/page-actions.ts",
+              "tools/chrome-bridge/src/extension/service-worker.ts",
+              "tools/chrome-bridge/src/extension/page-actions.unit.test.ts",
+              "tools/chrome-bridge/src/extension/service-worker.unit.test.ts"
+            ],
+            "changes": [
+              "Rename the CaptureDebuggerPorts interface to DebuggerPorts and update its importers (page-actions.ts, service-worker.ts, and the two unit tests that fake the port); keep captureScreenshot and add evaluate(tabId: number, expression: string): Promise<InPageScriptOutcome>.",
+              "Factor the shared attach / inFlight-registration / onDetach / detach-in-finally machinery out of captureScreenshot into a private helper both methods call, so captureScreenshot's observable behaviour does not change.",
+              "Implement evaluate: attach, sendCommand({ tabId }, \"Runtime.evaluate\", { expression, returnByValue: true, awaitPromise: true }), detach in finally.",
+              "Map the CDP reply to InPageScriptOutcome: exceptionDetails present -> { ok: false, error: exceptionDetails.exception?.description ?? exceptionDetails.text }; otherwise JSON.stringify(result.value), apply the same MAX_EXECUTE_SCRIPT_RESULT_CHARS cap the executeScript handler uses (the constant is exported from page-actions.ts), and return { ok: true, json }; undefined / non-serialisable value -> the same error strings executeScript returns.",
+              "Add co-located unit tests with a stubbed chrome.debugger: successful value read, exceptionDetails -> error, over-large value -> cap error, detach runs on the error path, no attachment leak after either path."
+            ]
+          }
+        }
+      ],
+      "notes": "Amended filesAffected/changes: the port interface is renamed (CaptureDebuggerPorts -> DebuggerPorts) and gains a required evaluate method, which ripples to service-worker.ts and the two unit-test fakes. Compensation is a no-op (additive infrastructure; revert the phase's commit to remove it). Graded 9/9/9/9 by a subagent (no self-grade), overallPass true; 0 overrides, 1 amendment this phase."
+    },
+    {
+      "phaseId": "add-evaluate-page-action",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-09-03T17:15:00.000Z",
+      "completedAt": "2026-09-03T17:35:00.000Z",
+      "gradeResult": {
+        "phaseId": "add-evaluate-page-action",
+        "dimensionScores": [
+          {
+            "dimensionId": "type-locked-parity-surface",
+            "score": 10,
+            "pass": true,
+            "evidence": "All six coordinated places verified in the working tree: PAGE_ACTIONS adds 'evaluatePage' after 'executeScript' (18 entries; actions.unit.test.ts count 17→18 and names it in the ordered tuple), types.ts adds the two named interfaces + both mapped types, page-actions.ts has the raw handler AND the guarded 'evaluatePage: guard(raw.evaluatePage)' entry, tool-catalog.ts adds evaluatePage with required:['code']. TOOL_CATALOG is Record<PageAction, ToolCatalogEntry> and pageActionHandlers returns Record<PageAction, Handler>, so a missing place is a tsc error. Grep found zero @ts-ignore/@ts-expect-error/as any/as unknown. npm run verify clean (tsc, eslint --max-warnings 0, vitest 272 passed/22 files). 10 over a 9: parity enforced twice — exhaustive Record types force all 18 keys AND the ordered-tuple test pins wire position; neither proof alone is load-bearing."
+          },
+          {
+            "dimensionId": "handler-delegates-correctly",
+            "score": 10,
+            "pass": true,
+            "evidence": "Raw handler validates code is a non-empty string and returns { error } BEFORE resolveTabId/any evaluate call; resolves sandbox tab; calls captureDebugger.evaluate(tabId, code); returns coerceExecuteScriptOutcome with zero new coercion logic. Guarded entry is exactly evaluatePage: guard(raw.evaluatePage). Five new unit tests pin the failure matrix (value read, empty/missing code with evaluate AND ports.executeScript NOT called, {ok:false,error} passthrough, over-large cap, resolver-throws). 10 over a 9: the failure-mode ordering is positively asserted — a test proves no MAIN-world executeScript fallback is reached and validation fires before any port call, covering both failureExamples with explicit regression tests."
+          },
+          {
+            "dimensionId": "executeScript-untouched",
+            "score": 10,
+            "pass": true,
+            "evidence": "Working-tree git diff is purely additive: executeScript's handler + guarded entry appear only as unchanged context; coerceExecuteScriptOutcome and MAX_EXECUTE_SCRIPT_RESULT_CHARS are untouched (context/calls only); executeScript unit block intact (line still asserts { world: 'MAIN' }, no +/- delta); tool-catalog executeScript description unchanged. 10 over a 9: 'untouched' is proven byte-for-byte with every surface the rubric enumerates checked individually for invariance."
+          },
+          {
+            "dimensionId": "catalog-description-honest",
+            "score": 10,
+            "pass": true,
+            "evidence": "Description names Chrome DevTools Protocol + Runtime.evaluate, states it is 'not subject to the page's Content-Security-Policy', names strict-CSP sites (github.com, reddit.com, LinkedIn), contrasts with executeScript whose chrome.scripting eval is blocked there, and disclaims mutation ('It reads page state; it does not reliably mutate it'). inputSchema {code:string}, required:['code']. README: count 'eighteen'/'18 tools', both enumerations, an evaluatePage prose paragraph, and a new manual e2e step running executeScript for contrast. 10 over a 9: names specific sites AND positively disclaims mutation, corroborated by both the README prose and a contrast walkthrough step."
+          }
+        ],
+        "overallPass": true
+      },
+      "notes": "Compensation known + recorded (not invoked): a git revert of this phase's commit removes the evaluatePage surface if the CDP approach is abandoned. Graded 4/4 dimensions at 10 by a subagent (no self-grade); the all-10s sheet was re-confirmed genuinely-identical-in-strength per v5.7. 0 overrides, 0 amendments this phase."
+    },
+    {
+      "phaseId": "verify-strict-csp-read-live",
+      "status": "done",
+      "attempts": 2,
+      "compensationInvoked": false,
+      "startedAt": "2026-09-03T15:03:15.000Z",
+      "completedAt": "2026-09-03T18:30:00.000Z",
+      "gateRun": "n/a (verification-only phase; the deliverable is a live transcript, not a repo change). Live checks via the chrome-bridge MCP in a fresh post-horizon-09 session: ping ok; getTabState (extension alive, sandbox tab anchored at github.com, unfocused); head-to-head evaluatePage vs executeScript on github.com and reddit.com. Docs-only edits (README, discoveries.md, blockers.md) carry no TS gate.",
+      "gradeResult": {
+        "phaseId": "verify-strict-csp-read-live",
+        "dimensionScores": [
+          { "dimensionId": "head-to-head-evidence", "score": 9, "pass": true, "evidence": "Both required sites, identical code string per site: github.com document.querySelector('h1')?.innerText -> evaluatePage {value:'The future of building happens together'}, executeScript -> verbatim CSP error (script-src github.githubassets.com); reddit.com document.title + ' | ' + location.hostname -> evaluatePage {value:'Reddit - The heart of the internet | www.reddit.com'}, executeScript -> verbatim CSP error (nonce script-src). Real page values, not {}/null. 9 not 10: exactly the minimum two sites; LinkedIn untested." },
+          { "dimensionId": "fresh-build-confirmed", "score": 8, "pass": true, "evidence": "evaluatePage was a callable, advertised tool in this session's MCP server and returned real DOM values from two sites — only possible against a service worker carrying the horizon-09 handler (the documented stale-build signature is a timeout, not a result); no call timed out; dist/extension/service-worker.js built 18:08 contains evaluatePage. 8 not higher: no dist rebuild / MCP restart notation / extension remove+re-add this session — freshness inherited from the prior attempt plus the empirical success here." },
+          { "dimensionId": "outcome-recorded", "score": 9, "pass": true, "evidence": "discoveries.md: two dated horizon-9 lines (stale-MCP-session mechanism; measured head-to-head on github.com + reddit.com with a README pointer). README manual-verification step 12: 'Verified 2026-09-03 (horizon 09)' paragraph quoting both evaluatePage values and both executeScript CSP errors verbatim. blockers.md: the two h08 evalIsolated blockers carry resolved suffixes; the h9 CDP-eval-per-target blocker suffixed '— resolved for github.com + reddit.com 2026-09-03 ... LinkedIn untested'. 9 not 10: LinkedIn gap noted without spelled-out retry steps." }
+        ],
+        "overallPass": true
+      },
+      "notes": "Attempt 1 blocked MANUAL_CHROME_CHECK_PENDING (pre-horizon-09 MCP session did not advertise evaluatePage). Attempt 2 (this --retry, fresh session): head-to-head passed on github.com + reddit.com — evaluatePage returned real values, executeScript returned each site's verbatim page-CSP error on the identical expression. No rebuild/reload needed — only the MCP session was stale; the live extension was already on the 18:08 build. Graded 9/8/9 by a subagent (no self-grade), overallPass true. 0 amendments, 0 overrides this phase. Compensation: none (verification only)."
+    }
+  ]
+}

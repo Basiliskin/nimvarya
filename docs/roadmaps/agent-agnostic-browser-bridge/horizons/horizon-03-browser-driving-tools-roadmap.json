@@ -1,0 +1,885 @@
+{
+  "task": "Plan horizon 3 of the agent-agnostic-browser-bridge project (tools/chrome-bridge/). Horizons 1-2 shipped the standalone package and the page-capture read tools. This horizon extends toward full claude-in-browser parity by adding the browser-driving tools that are missing: execute arbitrary JavaScript in the page's MAIN world, go back/forward in history, reload the active tab, and click/hover at page coordinates (screenshots already ship as captureTab).",
+  "analysis": {
+    "objective": "Extend the standalone chrome-bridge MCP tool set toward full claude-in-browser parity by adding the browser-driving tools that are missing: execute arbitrary JavaScript in the page, go back/forward in history, reload the active tab, and click/hover at page coordinates (screenshots already ship as captureTab).",
+    "successDefinition": "After this horizon the MCP server advertises 16 tools (the existing 10 plus executeScript, navigateBack, navigateForward, reloadTab, clickAt, hover), each wired end-to-end: a new PAGE_ACTIONS entry, a typed param/result in the protocol, an extension handler over the ChromePorts abstraction, a TOOL_CATALOG entry, and a co-located unit test; tsc --noEmit, eslint --max-warnings 0 and vitest are green for the package; the existing 10 tools are unchanged and still passing; and the new coordinates/pointer handlers are exercised by the hand-authored ports test",
+    "assumptions": [
+      "This horizon stays on the existing executeScript + chrome.tabs substrate (no chrome.debugger/CDP session): no chrome.debugger or CDP module exists anywhere in the package, and the established pattern for page action is a serialized func passed to ports.executeScript. Full CDP-fidelity input is a deferred decision, not this horizon's work.",
+      "The existing decision 'one discrete MCP tool per page action (no single enum tool)' still holds, so the computer-family additions (clickAt/hover, and later key/scroll/wait) are discrete tools, not a single computer sub-action enum.",
+      "Screenshots are already satisfied by the shipped captureTab tool; this horizon adds no new screenshot tool. The remaining screenshot-adjacent work (CDP page/element screenshot) is deferred with the computer-parity decision.",
+      "The active-tab targeting model is unchanged (no tabId params yet): every new action still resolves the active tab of the current window, exactly as the existing ten do. Tab management is deferred.",
+      "The browser bridge must remain self-contained and boky-free: nothing here touches the repo root or boky's own extension/bridge/verify pipeline."
+    ],
+    "risks": [
+      "Synthetic mouse events (document.elementFromPoint + dispatchEvent) are not trusted-isTrusted events; some SPA/framework handlers (React, Vue, pointer-capture edge cases) may not fire, so a coordinate click can appear to succeed while the page ignores it.",
+      "chrome.tabs.goBack / goForward can throw or be a no-op when the tab has no history, and navigating mid-session changes the page state under the capture page-script (a reload resets the MAIN-world wrapper and its ring buffer).",
+      "Adding three navigation chrome-port methods (goBack, goForward, reload) requires updating the ChromePorts interface, the fake-ports fixtures in the unit tests, and the service-worker wiring in lockstep; missing one is a tsc or failing-test red.",
+      "Two phases bundle sibling actions (navigateBack+navigateForward; clickAt+hover) as one 'capability' deliverable, which risks tripping the one-deliverable mechanical check and the stage-5 phase-blast-radius dimension if the gate reads it as multiple artifacts.",
+      "The in-page pointer/executeScript handlers return page-controlled data that must be validated by the caller (never trusted by shape); an executeScript return value that is not JSON-serializable must be coerced or reported, not sent raw across the wire."
+    ],
+    "outOfScope": [
+      "Full computer fidelity via chrome.debugger/CDP (true Input.dispatchMouseEvent/KeyEvent, Page.captureScreenshot, element screenshots) \u2014 a deliberate deferred architectural decision, not this horizon's work",
+      "The rest of the computer family \u2014 key press, scroll, wait-for-condition, double-click \u2014 deferred to a computer-parity horizon",
+      "Tab management (list/create/switch/close tabs, tabs_context/tabs_create parity) \u2014 requires a cross-cutting change from active-tab-only to explicit tabId targeting, deferred",
+      "Form filling for checkbox/select/radio and ref-based form_input \u2014 typeText already covers text inputs; deferred",
+      "File upload and image upload (file_upload/upload_image parity) \u2014 needs a file-input substrate, deferred",
+      "Window resize (resize_window parity) \u2014 a chrome.windows update, deferred as a small standalone item",
+      "Accessibility-tree read_page parity (returns element refs) and semantic find (natural-language match) \u2014 deferred; this horizon keeps readPage (HTML) and findElement (CSS count) as-is",
+      "Claude-app-only tools (update_plan, gif_creator, shortcuts_list/execute, turn_answer_start) \u2014 not browser-control capabilities an agent-agnostic bridge should expose, out of scope",
+      "Multi-client README MCP config verification and result-size-cap tuning \u2014 the previous horizon's brief recommended these but they are not this horizon's ask; deferred to a verification horizon",
+      "touch on boky's own extension, bridge, relay or verify pipeline \u2014 the bridge stays self-contained"
+    ],
+    "domainShape": "technical",
+    "domainShapeReason": "This is developer tooling machinery \u2014 extending a Chrome extension, a relay and an MCP server with new browser-control tools \u2014 with no business entities or rules a domain expert would recognize.",
+    "ubiquitousLanguage": [
+      {
+        "term": "page action",
+        "meaning": "One named capability the bridge can perform on the browser (e.g. navigateTo, executeScript); the unit of the PAGE_ACTIONS protocol tuple."
+      },
+      {
+        "term": "MCP tool",
+        "meaning": "A discrete tool advertised by the stdio MCP server; one tool per page action, so a client calls it directly."
+      },
+      {
+        "term": "active tab",
+        "meaning": "The tab of the current window that a command targets; every existing handler resolves it via ports.queryActiveTab()."
+      },
+      {
+        "term": "executeScript",
+        "meaning": "chrome.scripting.executeScript, the mechanism that runs a serialized function in the page; the ChromePorts abstraction over it."
+      },
+      {
+        "term": "coordinate",
+        "meaning": "An x/y page coordinate used by the pointer actions to locate an element via document.elementFromPoint."
+      },
+      {
+        "term": "history navigation",
+        "meaning": "Going back or forward through the tab's browser history via chrome.tabs.goBack/goForward."
+      },
+      {
+        "term": "chrome port",
+        "meaning": "A method on the ChromePorts interface, the narrow slice of the chrome.* API handlers depend on and the seam that makes them unit-testable."
+      },
+      {
+        "term": "tool catalog",
+        "meaning": "The TOOL_CATALOG Record<PageAction, ToolCatalogEntry> that pairs each action with its MCP description and JSON-Schema input."
+      },
+      {
+        "term": "page-driving-tools",
+        "meaning": "The bounded context / subsystem name for the browser-driving tool set that extends claude-in-browser parity (executeScript, history navigation, reload, coordinate pointer)."
+      }
+    ]
+  },
+  "discoveryFindings": [
+    {
+      "area": "PAGE_ACTIONS / single source of truth",
+      "finding": "src/protocol/actions.ts:10-21 defines the PAGE_ACTIONS tuple of exactly 10 actions (ping, navigateTo, getPageText, readPage, findElement, clickElement, typeText, captureTab, readConsoleMessages, readNetworkRequests) with type PageAction and an isPageAction guard. Every consumer types itself Record<PageAction, ...> so a tsc error enforces parity.",
+      "filePath": "tools/chrome-bridge/src/protocol/actions.ts:10",
+      "implication": "Adding executeScript/navigateBack/navigateForward/reloadTab/clickAt/hover starts by extending this tuple; no new action can compile unless every derived consumer is updated in the same change."
+    },
+    {
+      "area": "ChromePorts interface",
+      "finding": "src/extension/ports.ts:26-39 exposes exactly four methods: queryActiveTab, executeScript(tabId, func:(...args:never[])=>unknown, args):Promise<unknown>, updateTab(tabId,{url}), captureVisibleTab(windowId). The impl chromeCommandPorts() (42-66) backs them with chrome.tabs.query, chrome.scripting.executeScript, chrome.tabs.update, chrome.tabs.captureVisibleTab. No goBack/goForward/reload, no tab-listing, no window, no debugger. manifest.json permissions are only tabs, activeTab, scripting, storage, alarms.",
+      "filePath": "tools/chrome-bridge/src/extension/ports.ts:26",
+      "implication": "navigateBack/navigateForward/reloadTab need NEW ChromePorts methods (chrome.tabs.goBack/goForward/reload, all covered by the existing 'tabs' permission). clickAt/hover can be built over the existing executeScript port. Tab-listing/window/debugger methods are net-new and absent."
+    },
+    {
+      "area": "End-to-end action flow",
+      "finding": "Handlers live in pageActionHandlers(ports, captureStore): Record<PageAction, Handler> (page-actions.ts:117), which builds a `raw` map (139-278) then returns a guarded map (280-291) wrapping each in guard() (107-115). createCommandDispatcher (command-dispatch.ts:40-62) consumes that map; service-worker.ts:60-62 wires createCommandDispatcher(pageActionHandlers(deps.ports, captureStore)) and supplies ports: chromeCommandPorts() at :84.",
+      "filePath": "tools/chrome-bridge/src/extension/service-worker.ts:60",
+      "implication": "A new action must be added to BOTH the `raw` map and the returned guarded map in page-actions.ts; wiring through the dispatcher and service worker is otherwise automatic."
+    },
+    {
+      "area": "Exact seam to add a new action",
+      "finding": "Six concrete touch points: (1) PAGE_ACTIONS tuple (actions.ts:10-21); (2) param interface + registration in PageActionParams (types.ts:71-82); (3) result interface + registration in PageActionResults (types.ts:145-156); (4) handler in the `raw` map (page-actions.ts:139-278) and guard-wrapped entry (280-291); (5) ToolCatalogEntry in TOOL_CATALOG (tool-catalog.ts:74-181); (6) tests: ordered list/count (actions.unit.test.ts:8-25), count/required (tool-catalog.unit.test.ts:27-64), handler + fakePorts (page-actions.unit.test.ts, service-worker.unit.test.ts).",
+      "filePath": "tools/chrome-bridge/src/protocol/types.ts:71",
+      "implication": "A new action is a tsc-forced cross-cutting change across protocol, extension, mcp and their tests, not a single additive edit."
+    },
+    {
+      "area": "executeScript typing & non-serializable results",
+      "finding": "The port signature is executeScript(tabId, func:(...args:never[])=>unknown, args):Promise<unknown>; impl casts func and calls chrome.scripting.executeScript<unknown[],unknown> returning injected[0]?.result (ports.ts:52-59). The only result coercion is asString/asCount/asBool in page-actions.ts; there is NO handling of a non-JSON-serializable page return \u2014 the MCP side later does JSON.stringify(response.result, null, 2) (server.ts:101).",
+      "filePath": "tools/chrome-bridge/src/extension/ports.ts:52",
+      "implication": "For executeScript the plan must decide serialization of an arbitrary page value; chrome.scripting structured-clones the result so non-cloneable returns (functions, DOM nodes, cyclic) can be undefined or throw, so the handler must clamp/coerce and the MCP tool must not assume a JSON-serializable payload."
+    },
+    {
+      "area": "Unit-test fake ChromePorts",
+      "finding": "page-actions.unit.test.ts:45-61 builds fakePorts(overrides) as a base ChromePorts literal with four vi.fn() methods (queryActiveTab :47-49, executeScript :50, updateTab :51, captureVisibleTab :52-54), re-spying overrides via Reflect.set (:57-59). service-worker.unit.test.ts:52-59 builds its own inline fakePorts literal with the same four methods. Both must satisfy the full ChromePorts interface.",
+      "filePath": "tools/chrome-bridge/src/extension/page-actions.unit.test.ts:45",
+      "implication": "Any new port method must be added to BOTH fake ChromePorts literals or typecheck/lint fails."
+    },
+    {
+      "area": "testguard / dead-export / as-const conventions",
+      "finding": ".testguard.json catch-all rule requires a co-located .unit.test.ts (requireSymbolMentions: true) covering every export; ignore list exempts /types\\.ts$ and /ports\\.ts$ so ports.ts needs no test but any NEW .ts needs one. The repo dead-export hook only scans extension/src, so chrome-bridge keeps no-dead-exports by hand (every export needs an importer). eslint.config.mjs uses strictTypeChecked with no-explicit-any/no-non-null-assertion/consistent-type-imports/JSON.parse-cast bans; code uses `as const` on constant tuples/objects (PAGE_ACTIONS, SINCE_LIMIT_PROPERTIES, MAX_CHARS_PROPERTY).",
+      "filePath": "tools/chrome-bridge/.testguard.json:7",
+      "implication": "Any new module (e.g. a coordinate/pointer helper) must ship with a co-located .unit.test.ts naming every export, have an importer, and declare constant schemas `as const`."
+    },
+    {
+      "area": "MCP result shaping & tool schema",
+      "finding": "server.ts handleToolCall (:82-106) has a hardcoded captureTab image branch (:98-100) stripping the data:/;base64, prefix, and every other action falls through to textResult(JSON.stringify(response.result, null, 2)) (:101). tool-catalog.ts defines JsonSchemaObject with additionalProperties: false (:31-37) and shared NO_ARGS/SINCE_LIMIT_PROPERTIES/MAX_CHARS_PROPERTY helpers.",
+      "filePath": "tools/chrome-bridge/src/mcp/server.ts:98",
+      "implication": "All six new tools use the generic JSON text branch; no server.ts change is needed unless a rich/image type is intended. Each new tool's inputSchema must set additionalProperties: false."
+    },
+    {
+      "area": "Root .mcp.json & client config",
+      "finding": "Root .mcp.json registers `chrome-bridge` with type stdio, command node, relative args path tools/chrome-bridge/bin/mcp.mjs (:11-18), while `extension-bridge` uses an absolute path (:3-10). README :81-98 documents the same JSON snippet. No installed MCP client config for chrome-bridge was found under ~/.config, .gemini or .cursor, so the tools flow through the existing bin/mcp.mjs entry unchanged.",
+      "filePath": "tools/chrome-bridge/.mcp.json:11",
+      "implication": "No config change is needed for the six new tools; the README tool-count and manual-check text will need updating."
+    },
+    {
+      "area": "Absence of debugger/CDP/windows/history/pointer code",
+      "finding": "A repo-wide grep under tools/chrome-bridge for chrome.debugger, chrome.windows, tabs.goBack, tabs.goForward, tabs.reload, elementFromPoint, new MouseEvent, new PointerEvent, page-input found none. The only event synthesis is el.dispatchEvent(new Event('input'/'change')) in the typeText handler (page-actions.ts:250-251,256); clickElement uses the DOM el.click() (:215).",
+      "filePath": "tools/chrome-bridge/src/extension/page-actions.ts:215",
+      "implication": "clickAt/hover must be built from scratch \u2014 no coordinate/elementFromPoint/pointer-event machinery exists, and there is no chrome.debugger/CDP plumbing to reuse."
+    },
+    {
+      "area": "In-page module & event-synthesis helper",
+      "finding": "The only MAIN-world in-page script is src/extension/page-script.ts, a console/fetch/XHR capture wrapper; no DOM event synthesis, elementFromPoint, or coordinate input. executeScript handlers pass func bodies as stringified closures over chrome.scripting.executeScript (ports.ts:53-58), so coordinate/pointer logic would be a new in-page function body.",
+      "filePath": "tools/chrome-bridge/src/extension/page-script.ts:1",
+      "implication": "clickAt/hover likely need a new in-page func (or a small co-located module) doing elementFromPoint + MouseEvent/PointerEvent dispatch; per convention it needs a co-located test and an importer if it becomes its own module."
+    }
+  ],
+  "requiredMaterials": [],
+  "phases": [
+    {
+      "id": "execute-script",
+      "order": 0,
+      "name": "Add an Execute JavaScript tool",
+      "goal": "Expose the active tab's page as a scripting target so a caller can run an arbitrary JavaScript expression and read a serializable result back.",
+      "rationale": "claude-in-browser exposes a javascript_tool that runs code in the page, and it is the most flexible primitive the bridge lacks: an agent can inspect page state, call a page-window API, or read a value no DOM selector reaches. This is the first and simplest of this horizon's browser-driving tools because it rides the already-shipped executeScript port, with one important correction: the expression must run in the page's own (MAIN) JS world so it can see page globals and libraries, which the current executeScript port does not do (it injects into the isolated world).",
+      "filesAffected": [
+        "tools/chrome-bridge/src/protocol/actions.ts",
+        "tools/chrome-bridge/src/protocol/types.ts",
+        "tools/chrome-bridge/src/extension/ports.ts",
+        "tools/chrome-bridge/src/extension/page-actions.ts",
+        "tools/chrome-bridge/src/mcp/tool-catalog.ts",
+        "tools/chrome-bridge/README.md",
+        "tools/chrome-bridge/src/protocol/actions.unit.test.ts",
+        "tools/chrome-bridge/src/mcp/tool-catalog.unit.test.ts",
+        "tools/chrome-bridge/src/extension/page-actions.unit.test.ts"
+      ],
+      "changes": [
+        "Add an executeScript entry to the PAGE_ACTIONS tuple so every Record<PageAction, ...> consumer must handle it.",
+        "Add ExecuteScriptParams { code: string } and ExecuteScriptResult { value: unknown; error?: string } to the protocol types and register them in PageActionParams/PageActionResults.",
+        "Extend ChromePorts.executeScript (or add a dedicated main-world entrypoint) to run the injected function in the page's MAIN world via chrome.scripting.executeScript(..., { world: 'MAIN' }), so the caller's expression sees page globals and libraries rather than the isolated world.",
+        "Add an executeScript handler that injects `(code: string) => (0, eval)(code)` in MAIN world and returns a serializable { value }; JSON-serialise the result with a replacer and return { error } for a non-serialisable value (undefined, function, DOM node, circular structure) or an over-large result.",
+        "Register an executeScript ToolCatalogEntry with a single `code: string` property and additionalProperties: false, extend the actions/tool-catalog unit tests for the new ordered action, and update the README's advertised tool count."
+      ],
+      "boundedContext": "page-driving-tools",
+      "layer": "cross-cutting",
+      "blastRadius": "medium",
+      "inputs": [
+        "The executeScript ChromePort, extended to run in the page's MAIN world",
+        "The single-source-of-truth PAGE_ACTIONS tuple",
+        "The existing tool-catalog Record<PageAction, ToolCatalogEntry>"
+      ],
+      "expectedResult": "An executeScript page action that runs a caller-supplied JS expression in the active tab's MAIN world and returns a JSON-serializable { value } or an { error } for a non-serializable/oversized result, wired through PAGE_ACTIONS, the protocol types, the extension handler and the MCP tool catalog, with a co-located unit test that drives the handler through a fake ChromePorts and asserts the MAIN-world run and the serialization/coerce path.",
+      "dependsOn": [],
+      "rubric": [
+        {
+          "id": "action-parity-seam",
+          "label": "Action parity seam stays a compile error",
+          "ruleStatement": "Adding executeScript to PAGE_ACTIONS propagates through every Record<PageAction, ...> consumer so drifting one is a tsc error.",
+          "passCriteria": [
+            "executeScript is a member of the PAGE_ACTIONS tuple",
+            "npm run typecheck reports no missing-property error against any Record<PageAction, ...>",
+            "executeScript appears as a literal key in PageActionParams, PageActionResults, the pageActionHandlers return map, and TOOL_CATALOG",
+            "the seam is genuinely enforced: deleting any one key now fails tsc, not papered over with a cast or a widened Record<string, ...> type"
+          ],
+          "failureExamples": [
+            "added executeScript to PAGE_ACTIONS and TOOL_CATALOG but forgot PageActionResults; tsc passes because the handler maps are typed Record<string, Handler> or cast",
+            "the dev widened the handler return to Record<string, Handler> to clear a compile error so a missing map entry is a silent runtime undefined"
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "main-world-execution",
+          "label": "ExecuteScript runs in the page MAIN world",
+          "ruleStatement": "The executeScript injection runs in the page MAIN world (world: 'MAIN'), not the isolated world, so a caller-supplied expression sees page globals and libraries.",
+          "passCriteria": [
+            "the chrome.scripting.executeScript call for this action passes world: 'MAIN'",
+            "no code path forces the isolated world for this action",
+            "a page global reachable only in the MAIN world is what gets evaluated, not an isolated-world mirror"
+          ],
+          "failureExamples": [
+            "everything tsc-passes and returns values but world is left at the default isolated world; executeScript({ code: 'window.jQuery' }) returns undefined",
+            "the port sets world: 'MAIN' but the handler's injected (code) => (0, eval)(code) is executed through a path that re-enters the isolated world"
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "serialization-guard",
+          "label": "Serializable result and non-serializable error path",
+          "ruleStatement": "The handler returns { result: { value } } with a JSON-serialisable value, and returns { error } (resolving, not throwing) when the expression yields undefined, a function, a DOM node, a circular structure, or an over-large result.",
+          "passCriteria": [
+            "the success path round-trips the value through JSON so value is serialisable",
+            "an undefined expression result returns { error }",
+            "a function / DOM node / circular value returns { error }",
+            "an over-large result returns { error } or is explicitly capped/truncated and reported",
+            "the handler never throws on a serialisation failure"
+          ],
+          "failureExamples": [
+            "the dev sampled only string/number results so a circular or DOM-node result throws TypeError: Converting circular structure to JSON at the MCP layer",
+            "an undefined result is resolved as { result: { value: undefined } } so the { error } branch is never reached"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "protocol-contract",
+          "label": "Params/result and MCP schema contract",
+          "ruleStatement": "The protocol types and MCP catalog advertise the tool exactly as ExecuteScriptParams { code: string } and ExecuteScriptResult { value: unknown; error?: string }, with code required and additionalProperties: false.",
+          "passCriteria": [
+            "ExecuteScriptParams declares a required readonly code: string",
+            "ExecuteScriptResult declares readonly value: unknown and optional error?: string",
+            "both are registered under the executeScript key in PageActionParams/PageActionResults",
+            "TOOL_CATALOG.executeScript.inputSchema declares code as string, required: ['code'], additionalProperties: false"
+          ],
+          "failureExamples": [
+            "code is typed optional so a code-less call compiles and evals an empty expression",
+            "the catalog declares code but omits additionalProperties: false, diverging from the strict-schema pattern"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "co-located-unit-test",
+          "label": "Behavior asserted by the co-located unit test",
+          "ruleStatement": "The co-located page-actions.unit.test.ts exercises the handler's runtime behavior (active-tab resolution, the injected eval function receiving the caller's code, and the value/error contract) rather than only testing catalog membership.",
+          "passCriteria": [
+            "the test calls pageActionHandlers(fakePorts, fakeStore()).executeScript({ code }) and asserts queryActiveTab was called",
+            "the test asserts ports.executeScript was called with (tab.id, expect.any(Function), [code])",
+            "the test asserts a serialisable expression resolves to { result: { value } }",
+            "the test asserts a non-serialisable/undefined expression resolves to { error }",
+            "actions.unit.test.ts and tool-catalog.unit.test.ts cover the new membership"
+          ],
+          "failureExamples": [
+            "the only new test asserts TOOL_CATALOG has an executeScript entry and listTools().length incremented, so the handler behavior is never exercised",
+            "the test stubs ports.executeScript to resolve a fixed value and asserts only the returned { value }, without asserting the injected function received the caller's code"
+          ],
+          "minScore": 7
+        }
+      ],
+      "healerHint": "Most likely executeScript is wired so it compiles but the port still runs in the isolated world (or returns a raw non-serializable value), so real calls return undefined or throw - set world: 'MAIN' and force the { error } branch with a circular/undefined result, then re-run npm run verify."
+    },
+    {
+      "id": "navigate-back",
+      "order": 1,
+      "name": "Add Back navigation",
+      "goal": "Let a caller move the active tab back through its browser history, matching claude-in-browser's navigate capability beyond a single URL.",
+      "rationale": "The bridge can only point a tab at one URL (navigateTo); claude-in-browser's navigate tool can also go back through history. Driving a multi-step web session needs history moves that navigateTo cannot express, and returning to a previous screen is how an agent recovers from a wrong click.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/extension/ports.ts",
+        "tools/chrome-bridge/src/extension/page-actions.ts",
+        "tools/chrome-bridge/src/protocol/actions.ts",
+        "tools/chrome-bridge/src/protocol/types.ts",
+        "tools/chrome-bridge/src/mcp/tool-catalog.ts",
+        "tools/chrome-bridge/README.md",
+        "tools/chrome-bridge/src/extension/page-actions.unit.test.ts",
+        "tools/chrome-bridge/src/extension/service-worker.unit.test.ts"
+      ],
+      "changes": [
+        "Add goBack(tabId) to the ChromePorts interface, backed by chrome.tabs.goBack, and add it to the fake ChromePorts fixtures in page-actions.unit.test.ts and service-worker.unit.test.ts.",
+        "Add navigateBack to PAGE_ACTIONS with a no-args param/result, and register it in PageActionParams/PageActionResults.",
+        "Add a navigateBack handler that resolves the active tab and calls the new port method, returning a simple { moved: true } or an { error } sentinel when the tab has no history entry.",
+        "Register a navigateBack ToolCatalogEntry with additionalProperties: false and no required args, extend the actions/tool-catalog unit tests, and update the README's advertised tool count."
+      ],
+      "boundedContext": "page-driving-tools",
+      "layer": "cross-cutting",
+      "blastRadius": "medium",
+      "inputs": [
+        "The ChromePorts abstraction (must gain goBack)",
+        "The active tab resolution via ports.queryActiveTab()",
+        "The single-source-of-truth PAGE_ACTIONS tuple"
+      ],
+      "expectedResult": "A navigateBack page action that moves the active tab back through browser history, wired through PAGE_ACTIONS, the protocol types, the ChromePorts goBack method (with both fake-port fixtures updated), the extension handler and the MCP tool catalog, with a co-located unit test asserting the port call and the no-history error path.",
+      "dependsOn": [],
+      "rubric": [
+        {
+          "id": "chrome-port-wiring",
+          "label": "ChromePorts goBack/goBack wired to chrome.tabs",
+          "ruleStatement": "ChromePorts gains goBack(tabId) and both fake fixtures expose it.",
+          "passCriteria": [
+            "ports.ts declares goBack(tabId: number): Promise<void>",
+            "chromeCommandPorts() implements goBack as chrome.tabs.goBack(tabId)",
+            "page-actions.unit.test.ts fakePorts() supplies goBack",
+            "service-worker.unit.test.ts fakePorts() supplies goBack"
+          ],
+          "failureExamples": [
+            "the real port drops the tabId and calls chrome.tabs.goBack() with no args",
+            "goBack is on the interface but only the page-actions fake was updated so the service-worker fake no longer typechecks",
+            "the handler or port instead calls chrome.tabs.goForward"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "parity-seam-drift",
+          "label": "tsc-enforced propagation through every PageAction consumer",
+          "ruleStatement": "navigateBack/navigateBack are added to PAGE_ACTIONS and propagate into every Record<PageAction, ...> consumer so dropping one is a tsc error.",
+          "passCriteria": [
+            "PAGE_ACTIONS includes navigateBack and navigateBack",
+            "pageActionHandlers raw map and returned Record<PageAction, Handler> each include both",
+            "TOOL_CATALOG includes both",
+            "PageActionParams includes both so the Command mapped type stays total",
+            "tsc --noEmit reports no errors with no @ts-ignore / as unknown as / partial as cast"
+          ],
+          "failureExamples": [
+            "navigateBack is added to TOOL_CATALOG but omitted from hand-written PageActionResults so nothing fails to compile",
+            "the new actions are added only to the raw map while the returned map is left at 10 behind an as cast",
+            "navigateBack is in PAGE_ACTIONS but not PageActionParams so the Command mapped type fails to compile"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "no-history-error-path",
+          "label": "Co-located unit test asserts the right port and the no-history sentinel",
+          "ruleStatement": "The test asserts each handler resolves the active tab, calls the correct port with that tab id, returns { result: { moved: true } } on success, and the no-history { error } sentinel when there is no entry.",
+          "passCriteria": [
+            "an assertion that navigateBack success returns { result: { moved: true } } and calls ports.goBack (not goBack) with active tab 7",
+            "an assertion that navigateBack success calls ports.goBack (not goBack) with active tab 7",
+            "an assertion that drives goBack/goBack to signal no history and checks the no-history { error } outcome",
+            "an assertion that the no-active-tab path returns the NO_ACTIVE_TAB sentinel"
+          ],
+          "failureExamples": [
+            "the test asserts only the success branch and never exercises the no-history branch",
+            "navigateBack's assertion checks ports.goBack was called - a mirrored copy-paste",
+            "the no-history case is simulated by rejecting the port so guard()'s generic path satisfies it and a handler that returns { moved: true } on no-history is never caught"
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "protocol-types-shape",
+          "label": "No-args params and moved:true result wired into PageActionParams/Results",
+          "ruleStatement": "types.ts defines a no-args param (matching the readonly _?: never convention) and a moved: true result, wired into PageActionParams/PageActionResults.",
+          "passCriteria": [
+            "NavigateBackParams matches the no-args convention (readonly _?: never)",
+            "NavigateBackResult carries a readonly moved: true literal",
+            "PageActionParams is extended with navigateBack",
+            "PageActionResults is extended with navigateBack"
+          ],
+          "failureExamples": [
+            "NavigateBackParams is declared with a real property like url?: string copied from NavigateToParams",
+            "the result type is { readonly moved: boolean } instead of the moved: true literal",
+            "navigateBack is wired into PageActionParams but its result interface is omitted from PageActionResults"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "mcp-catalog-and-docs",
+          "label": "Tool catalog entries, counts, and README stay in sync",
+          "ruleStatement": "TOOL_CATALOG registers navigateBack/navigateBack with additionalProperties: false and no required args, and hard-coded expected counts/tuple/README are updated.",
+          "passCriteria": [
+            "navigateBack/navigateBack each have a non-empty description, inputSchema.type === 'object', additionalProperties === false, and no required array",
+            "each inputSchema.properties is empty and required absent/empty",
+            "action/ tool-catalog unit tests' exact-tuple and length assertions are updated to the new count",
+            "README's advertised tool list and 'N page actions' statement is updated"
+          ],
+          "failureExamples": [
+            "navigateBack is registered with inputSchema.required: ['url'] copied from navigateTo",
+            "the catalog entry is added but tool-catalog.unit.test.ts still asserts listTools() length is 10",
+            "the README still advertises the old count while the catalog returns more"
+          ],
+          "minScore": 6
+        }
+      ],
+      "healerHint": "Because this change is cross-cutting, the likely miss is a consumer tsc does not force - the hand-written PageActionResults interface or a hard-coded count/length assertion (and the README) - so run tsc --noEmit and the unit suite, then patch the exact file/assertion each error names and bump the count."
+    },
+    {
+      "id": "navigate-forward",
+      "order": 2,
+      "name": "Add Forward navigation",
+      "goal": "Let a caller move the active tab forward through its browser history, matching claude-in-browser's navigate capability beyond a single URL.",
+      "rationale": "The bridge can only point a tab at one URL (navigateTo); claude-in-browser's navigate tool can also go forward through history. Re-advancing after a back is how an agent re-does a step it undid.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/extension/ports.ts",
+        "tools/chrome-bridge/src/extension/page-actions.ts",
+        "tools/chrome-bridge/src/protocol/actions.ts",
+        "tools/chrome-bridge/src/protocol/types.ts",
+        "tools/chrome-bridge/src/mcp/tool-catalog.ts",
+        "tools/chrome-bridge/README.md",
+        "tools/chrome-bridge/src/extension/page-actions.unit.test.ts",
+        "tools/chrome-bridge/src/extension/service-worker.unit.test.ts"
+      ],
+      "changes": [
+        "Add goForward(tabId) to the ChromePorts interface, backed by chrome.tabs.goForward, and add it to the fake ChromePorts fixtures in page-actions.unit.test.ts and service-worker.unit.test.ts.",
+        "Add navigateForward to PAGE_ACTIONS with a no-args param/result, and register it in PageActionParams/PageActionResults.",
+        "Add a navigateForward handler that resolves the active tab and calls the new port method, returning a simple { moved: true } or an { error } sentinel when the tab has no history entry.",
+        "Register a navigateForward ToolCatalogEntry with additionalProperties: false and no required args, extend the actions/tool-catalog unit tests, and update the README's advertised tool count."
+      ],
+      "boundedContext": "page-driving-tools",
+      "layer": "cross-cutting",
+      "blastRadius": "medium",
+      "inputs": [
+        "The ChromePorts abstraction (must gain goForward)",
+        "The active tab resolution via ports.queryActiveTab()",
+        "The single-source-of-truth PAGE_ACTIONS tuple"
+      ],
+      "expectedResult": "A navigateForward page action that moves the active tab forward through browser history, wired through PAGE_ACTIONS, the protocol types, the ChromePorts goForward method (with both fake-port fixtures updated), the extension handler and the MCP tool catalog, with a co-located unit test asserting the port call and the no-history error path.",
+      "dependsOn": [],
+      "rubric": [
+        {
+          "id": "chrome-port-wiring",
+          "label": "ChromePorts goForward/goForward wired to chrome.tabs",
+          "ruleStatement": "ChromePorts gains goForward(tabId) and both fake fixtures expose it.",
+          "passCriteria": [
+            "ports.ts declares goForward(tabId: number): Promise<void>",
+            "chromeCommandPorts() implements goForward as chrome.tabs.goForward(tabId)",
+            "page-actions.unit.test.ts fakePorts() supplies goForward",
+            "service-worker.unit.test.ts fakePorts() supplies goForward"
+          ],
+          "failureExamples": [
+            "the real port drops the tabId and calls chrome.tabs.goForward() with no args",
+            "goForward is on the interface but only the page-actions fake was updated so the service-worker fake no longer typechecks",
+            "the handler or port instead calls chrome.tabs.goBack"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "parity-seam-drift",
+          "label": "tsc-enforced propagation through every PageAction consumer",
+          "ruleStatement": "navigateForward/navigateForward are added to PAGE_ACTIONS and propagate into every Record<PageAction, ...> consumer so dropping one is a tsc error.",
+          "passCriteria": [
+            "PAGE_ACTIONS includes navigateForward and navigateForward",
+            "pageActionHandlers raw map and returned Record<PageAction, Handler> each include both",
+            "TOOL_CATALOG includes both",
+            "PageActionParams includes both so the Command mapped type stays total",
+            "tsc --noEmit reports no errors with no @ts-ignore / as unknown as / partial as cast"
+          ],
+          "failureExamples": [
+            "navigateForward is added to TOOL_CATALOG but omitted from hand-written PageActionResults so nothing fails to compile",
+            "the new actions are added only to the raw map while the returned map is left at 10 behind an as cast",
+            "navigateForward is in PAGE_ACTIONS but not PageActionParams so the Command mapped type fails to compile"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "no-history-error-path",
+          "label": "Co-located unit test asserts the right port and the no-history sentinel",
+          "ruleStatement": "The test asserts each handler resolves the active tab, calls the correct port with that tab id, returns { result: { moved: true } } on success, and the no-history { error } sentinel when there is no entry.",
+          "passCriteria": [
+            "an assertion that navigateForward success returns { result: { moved: true } } and calls ports.goForward (not goForward) with active tab 7",
+            "an assertion that navigateForward success calls ports.goForward (not goForward) with active tab 7",
+            "an assertion that drives goForward/goForward to signal no history and checks the no-history { error } outcome",
+            "an assertion that the no-active-tab path returns the NO_ACTIVE_TAB sentinel"
+          ],
+          "failureExamples": [
+            "the test asserts only the success branch and never exercises the no-history branch",
+            "navigateForward's assertion checks ports.goForward was called - a mirrored copy-paste",
+            "the no-history case is simulated by rejecting the port so guard()'s generic path satisfies it and a handler that returns { moved: true } on no-history is never caught"
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "protocol-types-shape",
+          "label": "No-args params and moved:true result wired into PageActionParams/Results",
+          "ruleStatement": "types.ts defines a no-args param (matching the readonly _?: never convention) and a moved: true result, wired into PageActionParams/PageActionResults.",
+          "passCriteria": [
+            "NavigateForwardParams matches the no-args convention (readonly _?: never)",
+            "NavigateForwardResult carries a readonly moved: true literal",
+            "PageActionParams is extended with navigateForward",
+            "PageActionResults is extended with navigateForward"
+          ],
+          "failureExamples": [
+            "NavigateForwardParams is declared with a real property like url?: string copied from NavigateToParams",
+            "the result type is { readonly moved: boolean } instead of the moved: true literal",
+            "navigateForward is wired into PageActionParams but its result interface is omitted from PageActionResults"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "mcp-catalog-and-docs",
+          "label": "Tool catalog entries, counts, and README stay in sync",
+          "ruleStatement": "TOOL_CATALOG registers navigateForward/navigateForward with additionalProperties: false and no required args, and hard-coded expected counts/tuple/README are updated.",
+          "passCriteria": [
+            "navigateForward/navigateForward each have a non-empty description, inputSchema.type === 'object', additionalProperties === false, and no required array",
+            "each inputSchema.properties is empty and required absent/empty",
+            "action/ tool-catalog unit tests' exact-tuple and length assertions are updated to the new count",
+            "README's advertised tool list and 'N page actions' statement is updated"
+          ],
+          "failureExamples": [
+            "navigateForward is registered with inputSchema.required: ['url'] copied from navigateTo",
+            "the catalog entry is added but tool-catalog.unit.test.ts still asserts listTools() length is 10",
+            "the README still advertises the old count while the catalog returns more"
+          ],
+          "minScore": 6
+        }
+      ],
+      "healerHint": "Because this change is cross-cutting, the likely miss is a consumer tsc does not force - the hand-written PageActionResults interface or a hard-coded count/length assertion (and the README) - so run tsc --noEmit and the unit suite, then patch the exact file/assertion each error names and bump the count."
+    },
+    {
+      "id": "reload-tab",
+      "order": 3,
+      "name": "Add Reload the active tab",
+      "goal": "Let a caller reload the active tab, so a page can be re-served cleanly (a refresh that navigation, forward and back cannot express).",
+      "rationale": "claude-in-browser's navigate tool and every browser dev tool offer reload; an agent driving a web UI needs to force a fresh page load to pick up a change or clear a stuck state. It is a single, small chrome.tabs.reload call, deliberately its own phase because it adds a distinct port method and a distinct tool rather than being bundled into history navigation.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/extension/ports.ts",
+        "tools/chrome-bridge/src/extension/page-actions.ts",
+        "tools/chrome-bridge/src/protocol/actions.ts",
+        "tools/chrome-bridge/src/protocol/types.ts",
+        "tools/chrome-bridge/src/mcp/tool-catalog.ts",
+        "tools/chrome-bridge/README.md",
+        "tools/chrome-bridge/src/extension/page-actions.unit.test.ts",
+        "tools/chrome-bridge/src/extension/service-worker.unit.test.ts"
+      ],
+      "changes": [
+        "Add reload(tabId) to the ChromePorts interface, backed by chrome.tabs.reload, and add it to both fake ChromePorts fixtures.",
+        "Add reloadTab to PAGE_ACTIONS with a no-args param/result, registered in PageActionParams/PageActionResults.",
+        "Add a reloadTab handler that resolves the active tab and calls the new port method, returning { reloaded: true } or an { error } sentinel.",
+        "Register a reloadTab ToolCatalogEntry with additionalProperties: false, extend the ordered-action unit tests, and update the README's advertised tool count and manual-check step for the new total."
+      ],
+      "boundedContext": "page-driving-tools",
+      "layer": "cross-cutting",
+      "blastRadius": "small",
+      "inputs": [
+        "The ChromePorts abstraction (must gain reload)",
+        "The active tab resolution via ports.queryActiveTab()",
+        "The single-source-of-truth PAGE_ACTIONS tuple"
+      ],
+      "expectedResult": "A reloadTab page action that reloads the active tab, wired through PAGE_ACTIONS, the protocol types, the ChromePorts reload method (with both fake-port fixtures updated), the extension handler and the MCP tool catalog, plus the README tool-count/manual-check text brought in line with the new total.",
+      "dependsOn": [],
+      "rubric": [
+        {
+          "id": "tsc-parity-seam",
+          "label": "Compile-time parity seam",
+          "ruleStatement": "Adding reloadTab to PAGE_ACTIONS is reflected in every Record<PageAction, ...> consumer and the project still typechecks.",
+          "passCriteria": [
+            "PAGE_ACTIONS includes reloadTab so Command/CommandResponse can express it",
+            "the handler map, TOOL_CATALOG, PageActionParams and PageActionResults each contain reloadTab",
+            "tsc exits 0 with reloadTab wired; no consumer is coerced with as or @ts-ignore",
+            "the ordered-action and tool-catalog count tests reflect reloadTab"
+          ],
+          "failureExamples": [
+            "reloadTab was added to PAGE_ACTIONS and the handler map but PageActionResults.reloadTab was omitted and a cast silenced it",
+            "the ordered-action/count tests were bumped without adding reloadTab to TOOL_CATALOG"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "reload-calls-chrome-port",
+          "label": "Reload handler drives the port and returns the sentinel",
+          "ruleStatement": "The reloadTab handler resolves the active tab and triggers the reload exclusively through ports.reload(tab.id), returning { result: { reloaded: true } } on success and the shared { error } sentinel on no-active-tab or a rejected port.",
+          "passCriteria": [
+            "the handler calls ports.queryActiveTab() first and returns the NO_ACTIVE_TAB sentinel when it resolves undefined",
+            "it calls ports.reload(tab.id) and returns { result: { reloaded: true } }; it does not call updateTab/executeScript/captureVisibleTab",
+            "the co-located test asserts ports.reload called with 7 and the success outcome, and covers no-active-tab and rejecting-port cases",
+            "the chrome-port-rejection test includes reloadTab"
+          ],
+          "failureExamples": [
+            "the handler reloaded via ports.updateTab(tab.id, { url }) or ports.reload(tab.windowId) because the test only asserted the happy-path shape",
+            "on no active tab the handler returned { result: { reloaded: false } } instead of the NO_ACTIVE_TAB sentinel"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "readme-tool-count",
+          "label": "README tool count and manual check",
+          "ruleStatement": "The README's advertised tool set, enumerated action lists, and manual end-to-end step all reflect reloadTab and add a manual-check step exercising it.",
+          "passCriteria": [
+            "the prose 'advertises the N page actions' reads the new count and the inline list includes reloadTab",
+            "the manual-check 'connected with N tools' reads the new count",
+            "the service-worker command enumeration includes reloadTab",
+            "a manual-check step instructs calling reloadTab and verifying the tab refreshes"
+          ],
+          "failureExamples": [
+            "only the 'N tools' string was bumped while the prose, inline list and command enumeration were left stale",
+            "reloadTab was added to the inline list but the manual check still ends at the old step"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "chrome-port-method-and-fakes",
+          "label": "ChromePorts.reload in the real implementation and both fakes",
+          "ruleStatement": "ChromePorts declares reload(tabId), chromeCommandPorts() implements it with chrome.tabs.reload(tabId), and both fake fixtures implement it without a cast.",
+          "passCriteria": [
+            "ChromePorts declares reload(tabId: number): Promise<void> and chromeCommandPorts() implements it as chrome.tabs.reload(tabId)",
+            "both fake Ports add a reload stub so both satisfy ChromePorts without a type error",
+            "no remaining object literal is missing reload or coerced with as ChromePorts"
+          ],
+          "failureExamples": [
+            "the production reload was implemented and the page-actions fixture updated but the service-worker fake was left without reload and cast as ChromePorts",
+            "chromeCommandPorts() implemented reload via chrome.tabs.reload(tabId, { url }) or chrome.tabs.update(tabId, { reload: true }) and no test asserts the underlying chrome.* call"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "catalog-schema-strictness",
+          "label": "reloadTab catalog schema is strict no-args",
+          "ruleStatement": "The reloadTab ToolCatalogEntry is a strict no-args tool: an empty properties block, additionalProperties: false, no required array, and a non-empty description.",
+          "passCriteria": [
+            "TOOL_CATALOG.reloadTab.inputSchema has type object, properties {}, additionalProperties === false, no required array",
+            "description is a non-empty string naming the action and its active-tab target",
+            "listTools() advertises reloadTab, and the catalog strictness test covers it"
+          ],
+          "failureExamples": [
+            "reloadTab was modelled on the read/navigate tools with a spurious url property or required: []",
+            "additionalProperties was left at the SDK default true so a client can pass junk arguments"
+          ],
+          "minScore": 6
+        }
+      ],
+      "healerHint": "Add reloadTab to every derived consumer at once - PAGE_ACTIONS, PageActionParams/Results, the handler map, TOOL_CATALOG, both fake ChromePorts fixtures, the README - then let tsc plus the barrel unit tests flag the one missed seam, most often the README tool count or one of the two fakes."
+    },
+    {
+      "id": "click-at",
+      "order": 4,
+      "name": "Add Click-at coordinate tool",
+      "goal": "Let a caller click at a page coordinate, the start of claude-in-browser's computer-style pointer control, without needing a CSS selector.",
+      "rationale": "claude-in-browser's computer tool drives the page by coordinates, which an agent needs when there is no stable selector (a canvas, an overlay, a dynamic list item) or to activate a point selectors cannot reach. Success is defined as dispatching the pointer/click events on the element under the coordinate, not as 'a framework handler fired' \u2014 synthetic events are untrusted and some frameworks ignore them.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/extension/page-actions.ts",
+        "tools/chrome-bridge/src/protocol/actions.ts",
+        "tools/chrome-bridge/src/protocol/types.ts",
+        "tools/chrome-bridge/src/mcp/tool-catalog.ts",
+        "tools/chrome-bridge/README.md",
+        "tools/chrome-bridge/src/extension/page-actions.unit.test.ts",
+        "tools/chrome-bridge/src/mcp/tool-catalog.unit.test.ts"
+      ],
+      "changes": [
+        "Add ClickAtParams { x: number; y: number } for clickAt, plus result types reporting whether the target element was found and the events dispatched.",
+        "Add clickAt to PAGE_ACTIONS, registered in PageActionParams/PageActionResults.",
+        "Add a clickAt handler that injects an in-page function which calls document.elementFromPoint(x, y) and dispatches synthesized MouseEvent/PointerEvent sequences (pointerdown/pointerup/click) on the found element, returning a JSON-safe result describing whether the element was found and how many events it dispatched.",
+        "Add an asJsonValue-style helper so the handler returns a JSON-safe result, register a clickAt ToolCatalogEntry with x/y integer properties and additionalProperties: false, extend the actions/tool-catalog/page-actions unit tests, and update the README's advertised tool count."
+      ],
+      "boundedContext": "page-driving-tools",
+      "layer": "cross-cutting",
+      "blastRadius": "medium",
+      "inputs": [
+        "The existing executeScript ChromePort (runs the in-page coordinate/click function)",
+        "The active tab resolution via ports.queryActiveTab()",
+        "The single-source-of-truth PAGE_ACTIONS tuple"
+      ],
+      "expectedResult": "A clickAt page action that dispatches synthesized mouse/pointer events on the element at a given x/y coordinate, wired through PAGE_ACTIONS, the protocol types, the extension handler and the MCP tool catalog, with a co-located unit test asserting the elementFromPoint/dispatch path (success defined as the events being dispatched on the element under the coordinate, plus the not-found error sentinel).",
+      "dependsOn": [],
+      "rubric": [
+        {
+          "id": "coordinate-dispatch-path",
+          "label": "Element-under-coordinate dispatch path and not-found sentinel",
+          "ruleStatement": "The co-located unit test proves clickAt dispatch events on the element returned by document.elementFromPoint(x, y), and a missing element yields the not-found sentinel without dispatching.",
+          "passCriteria": [
+            "the handler drives document.elementFromPoint(x, y) with the explicit x/y",
+            "the test asserts the synthesized events were recorded on the element under the coordinate (a spy on the elementFromPoint return node), not merely that the wrapper resolved",
+            "the not-found branch is exercised: when elementFromPoint returns null, the result carries the sentinel and the dispatched-event count is 0",
+            "the result reports whether the element was found and how many events were dispatched"
+          ],
+          "failureExamples": [
+            "the test asserts the handler resolved but never checks the events landed on the element under the coordinate, so a click captured by a bubbling listener on document/body passes",
+            "a dev stubs elementFromPoint and asserts it was called but only verifies the injected function ran without throwing",
+            "the not-found path returns undefined/null with no assertion on the sentinel"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "parity-seam-tsc",
+          "label": "tsc-enforced page-action parity seam",
+          "ruleStatement": "clickAt are added to PAGE_ACTIONS and registered in PageActionParams/PageActionResults so the discriminated union keeps params and results in lockstep, enforced at compile time without unsafe casts.",
+          "passCriteria": [
+            "clickAt are members of the PAGE_ACTIONS tuple",
+            "CoordinatePointerParams is a variant of PageActionParams and the clickAt result types are variants of PageActionResults",
+            "tsc --noEmit passes and a mismatched action is a type error",
+            "no as unknown as / any casts are used and the action-tag switch is exhaustive",
+            "the protocol types are the single source consumed by the handler"
+          ],
+          "failureExamples": [
+            "clickAt is registered but the handler reads params via a cast so tsc no longer guards param/result pairing",
+            "CoordinatePointerParams is added for only one action, leaving clickAt on a generic Record"
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "coordinate-param-validation",
+          "label": "x/y parameter validation (non-negative integers)",
+          "ruleStatement": "clickAt only accept x and y as non-negative integers; negative, fractional, non-numeric, or unexpected properties are rejected before dispatch.",
+          "passCriteria": [
+            "the tool-catalog schema declares x and y as integer with minimum: 0 and additionalProperties: false",
+            "negative, fractional, string, NaN/Infinity, and extra unknown properties are rejected",
+            "rejection happens before the in-page dispatch runs",
+            "a unit test asserts at least one representative rejection"
+          ],
+          "failureExamples": [
+            "properties use type number so floats and negatives pass through and dispatch to a fractional/off-screen coordinate",
+            "additionalProperties is left unset so a typo like { x: 10, y: 20, z: 30 } is forwarded"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "synthetic-event-dispatch-sequence",
+          "label": "Synthesized event sequence on the coordinate target",
+          "ruleStatement": "Because synthetic events are untrusted, success is defined by the events being dispatched on the element under the coordinate - clickAt dispatches pointerdown, then pointerup, then click on that element.",
+          "passCriteria": [
+            "the injected function dispatches events via element.dispatchEvent on the found element",
+            "clickAt dispatches pointerdown, then pointerup, then click in order",
+            "the sequence contains only click events (pointerdown/pointerup/click); no pointerover/mouseover are dispatched for clickAt",
+            "events carry clientX/clientY and target the elementFromPoint return, not document or body"
+          ],
+          "failureExamples": [
+            "the helper dispatches on document.body/window instead of the element under the coordinate",
+            "a dev wires only the MouseEvent path and omits PointerEvent, so real Chrome pointer interactions still do not fire"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "tool-catalog-and-result-contract",
+          "label": "Tool catalog registration and JSON-safe result contract",
+          "ruleStatement": "clickAt each have a ToolCatalogEntry with integer x/y properties and additionalProperties: false, and their results are JSON-safe objects reporting whether the element was found and the number of dispatched events; the README tool count is updated.",
+          "passCriteria": [
+            "clickAt each appear as a named entry in TOOL_CATALOG",
+            "the result object contains a found boolean and a dispatched-event count and JSON-serializes without DOM nodes/functions/circular refs",
+            "README tool count matches the new catalog size",
+            "each tool name maps to its PAGE_ACTIONS key"
+          ],
+          "failureExamples": [
+            "clickAt is registered under a name that does not match its PAGE_ACTIONS key",
+            "the result payload includes the raw Element from elementFromPoint, which is not JSON-safe and throws on serialization"
+          ],
+          "minScore": 6
+        }
+      ],
+      "healerHint": "The co-located test likely asserts the injected function ran but not that the synthesized events landed on the element under the coordinate - attach a listener directly to the elementFromPoint stub's returned node and assert pointerdown/pointerup/click (or pointerover/mouseover) plus the not-found sentinel on it."
+    },
+    {
+      "id": "hover",
+      "order": 5,
+      "name": "Add Hover coordinate tool",
+      "goal": "Let a caller hover at a page coordinate, the start of claude-in-browser's computer-style pointer control, without needing a CSS selector.",
+      "rationale": "claude-in-browser's computer tool drives the page by coordinates, which an agent needs when there is no stable selector or to hover before reading a tooltip. Success is defined as dispatching the pointer/mouseover events on the element under the coordinate, not as 'a framework handler fired' \u2014 synthetic events are untrusted.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/extension/page-actions.ts",
+        "tools/chrome-bridge/src/protocol/actions.ts",
+        "tools/chrome-bridge/src/protocol/types.ts",
+        "tools/chrome-bridge/src/mcp/tool-catalog.ts",
+        "tools/chrome-bridge/README.md",
+        "tools/chrome-bridge/src/extension/page-actions.unit.test.ts",
+        "tools/chrome-bridge/src/mcp/tool-catalog.unit.test.ts"
+      ],
+      "changes": [
+        "Add HoverParams { x: number; y: number } for hover, plus result types reporting whether the target element was found and the events dispatched.",
+        "Add hover to PAGE_ACTIONS, registered in PageActionParams/PageActionResults.",
+        "Add a hover handler that injects an in-page function which calls document.elementFromPoint(x, y) and dispatches synthesized MouseEvent/PointerEvent sequences (pointerover/mouseover) on the found element, returning a JSON-safe result describing whether the element was found and how many events it dispatched.",
+        "Add an asJsonValue-style helper so the handler returns a JSON-safe result, register a hover ToolCatalogEntry with x/y integer properties and additionalProperties: false, extend the actions/tool-catalog/page-actions unit tests, and update the README's advertised tool count."
+      ],
+      "boundedContext": "page-driving-tools",
+      "layer": "cross-cutting",
+      "blastRadius": "medium",
+      "inputs": [
+        "The existing executeScript ChromePort (runs the in-page coordinate/hover function)",
+        "The active tab resolution via ports.queryActiveTab()",
+        "The single-source-of-truth PAGE_ACTIONS tuple"
+      ],
+      "expectedResult": "A hover page action that dispatches synthesized mouse/pointer events on the element at a given x/y coordinate, wired through PAGE_ACTIONS, the protocol types, the extension handler and the MCP tool catalog, with a co-located unit test asserting the elementFromPoint/dispatch path (success defined as the events being dispatched on the element under the coordinate, plus the not-found error sentinel).",
+      "dependsOn": [],
+      "rubric": [
+        {
+          "id": "coordinate-dispatch-path",
+          "label": "Element-under-coordinate dispatch path and not-found sentinel",
+          "ruleStatement": "The co-located unit test proves hover dispatch events on the element returned by document.elementFromPoint(x, y), and a missing element yields the not-found sentinel without dispatching.",
+          "passCriteria": [
+            "the handler drives document.elementFromPoint(x, y) with the explicit x/y",
+            "the test asserts the synthesized events were recorded on the element under the coordinate (a spy on the elementFromPoint return node), not merely that the wrapper resolved",
+            "the not-found branch is exercised: when elementFromPoint returns null, the result carries the sentinel and the dispatched-event count is 0",
+            "the result reports whether the element was found and how many events were dispatched"
+          ],
+          "failureExamples": [
+            "the test asserts the handler resolved but never checks the events landed on the element under the coordinate, so a click captured by a bubbling listener on document/body passes",
+            "a dev stubs elementFromPoint and asserts it was called but only verifies the injected function ran without throwing",
+            "the not-found path returns undefined/null with no assertion on the sentinel"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "parity-seam-tsc",
+          "label": "tsc-enforced page-action parity seam",
+          "ruleStatement": "hover are added to PAGE_ACTIONS and registered in PageActionParams/PageActionResults so the discriminated union keeps params and results in lockstep, enforced at compile time without unsafe casts.",
+          "passCriteria": [
+            "hover are members of the PAGE_ACTIONS tuple",
+            "CoordinatePointerParams is a variant of PageActionParams and the hover result types are variants of PageActionResults",
+            "tsc --noEmit passes and a mismatched action is a type error",
+            "no as unknown as / any casts are used and the action-tag switch is exhaustive",
+            "the protocol types are the single source consumed by the handler"
+          ],
+          "failureExamples": [
+            "hover is registered but the handler reads params via a cast so tsc no longer guards param/result pairing",
+            "CoordinatePointerParams is added for only one action, leaving hover on a generic Record"
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "coordinate-param-validation",
+          "label": "x/y parameter validation (non-negative integers)",
+          "ruleStatement": "hover only accept x and y as non-negative integers; negative, fractional, non-numeric, or unexpected properties are rejected before dispatch.",
+          "passCriteria": [
+            "the tool-catalog schema declares x and y as integer with minimum: 0 and additionalProperties: false",
+            "negative, fractional, string, NaN/Infinity, and extra unknown properties are rejected",
+            "rejection happens before the in-page dispatch runs",
+            "a unit test asserts at least one representative rejection"
+          ],
+          "failureExamples": [
+            "properties use type number so floats and negatives pass through and dispatch to a fractional/off-screen coordinate",
+            "additionalProperties is left unset so a typo like { x: 10, y: 20, z: 30 } is forwarded"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "synthetic-event-dispatch-sequence",
+          "label": "Synthesized event sequence on the coordinate target",
+          "ruleStatement": "Because synthetic events are untrusted, success is defined by the events being dispatched on the element under the coordinate - hover dispatches pointerover, then mouseover on that element.",
+          "passCriteria": [
+            "the injected function dispatches events via element.dispatchEvent on the found element",
+            "hover dispatches pointerover, then mouseover in order",
+            "the sequence contains only hover events (pointerover/mouseover); no pointerdown/pointerup/click are dispatched for hover",
+            "events carry clientX/clientY and target the elementFromPoint return, not document or body"
+          ],
+          "failureExamples": [
+            "the helper dispatches on document.body/window instead of the element under the coordinate",
+            "a dev wires only the MouseEvent path and omits PointerEvent, so real Chrome pointer interactions still do not fire"
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "tool-catalog-and-result-contract",
+          "label": "Tool catalog registration and JSON-safe result contract",
+          "ruleStatement": "hover each have a ToolCatalogEntry with integer x/y properties and additionalProperties: false, and their results are JSON-safe objects reporting whether the element was found and the number of dispatched events; the README tool count is updated.",
+          "passCriteria": [
+            "hover each appear as a named entry in TOOL_CATALOG",
+            "the result object contains a found boolean and a dispatched-event count and JSON-serializes without DOM nodes/functions/circular refs",
+            "README tool count matches the new catalog size",
+            "each tool name maps to its PAGE_ACTIONS key"
+          ],
+          "failureExamples": [
+            "hover is registered under a name that does not match its PAGE_ACTIONS key",
+            "the result payload includes the raw Element from elementFromPoint, which is not JSON-safe and throws on serialization"
+          ],
+          "minScore": 6
+        }
+      ],
+      "healerHint": "The co-located test likely asserts the injected function ran but not that the synthesized events landed on the element under the coordinate - attach a listener directly to the elementFromPoint stub's returned node and assert pointerdown/pointerup/click (or pointerover/mouseover) plus the not-found sentinel on it."
+    }
+  ],
+  "successCriteria": [
+    "After this horizon the MCP server advertises 16 tools (the existing 10 plus executeScript, navigateBack, navigateForward, reloadTab, clickAt, hover), each wired end-to-end: a new PAGE_ACTIONS entry, a typed param/result in the protocol, an extension handler over the ChromePorts abstraction, a TOOL_CATALOG entry, and a co-located unit test; tsc --noEmit, eslint --max-warnings 0 and vitest are green for the package; the existing 10 tools are unchanged and still passing; and the new coordinates/pointer handlers are exercised by the hand-authored ports test",
+    "Add an Execute JavaScript tool: An executeScript page action that runs a caller-supplied JS expression in the active tab's MAIN world and returns a JSON-serializable { value } or an { error } for a non-serializable/oversized result, wired through PAGE_ACTIONS, the protocol types, the extension handler and the MCP tool catalog, with a co-located unit test that drives the handler through a fake ChromePorts and asserts the MAIN-world run and the serialization/coerce path.",
+    "Add Back navigation: A navigateBack page action that moves the active tab back through browser history, wired through PAGE_ACTIONS, the protocol types, the ChromePorts goBack method (with both fake-port fixtures updated), the extension handler and the MCP tool catalog, with a co-located unit test asserting the port call and the no-history error path.",
+    "Add Forward navigation: A navigateForward page action that moves the active tab forward through browser history, wired through PAGE_ACTIONS, the protocol types, the ChromePorts goForward method (with both fake-port fixtures updated), the extension handler and the MCP tool catalog, with a co-located unit test asserting the port call and the no-history error path.",
+    "Add Reload the active tab: A reloadTab page action that reloads the active tab, wired through PAGE_ACTIONS, the protocol types, the ChromePorts reload method (with both fake-port fixtures updated), the extension handler and the MCP tool catalog, plus the README tool-count/manual-check text brought in line with the new total.",
+    "Add Click-at coordinate tool: A clickAt page action that dispatches synthesized mouse/pointer events on the element at a given x/y coordinate, wired through PAGE_ACTIONS, the protocol types, the extension handler and the MCP tool catalog, with a co-located unit test asserting the elementFromPoint/dispatch path (success defined as the events being dispatched on the element under the coordinate, plus the not-found error sentinel).",
+    "Add Hover coordinate tool: A hover page action that dispatches synthesized mouse/pointer events on the element at a given x/y coordinate, wired through PAGE_ACTIONS, the protocol types, the extension handler and the MCP tool catalog, with a co-located unit test asserting the elementFromPoint/dispatch path (success defined as the events being dispatched on the element under the coordinate, plus the not-found error sentinel)."
+  ],
+  "deferred": [
+    "outOfScope: Full computer fidelity via chrome.debugger/CDP (true Input.dispatchMouseEvent/KeyEvent, Page.captureScreenshot, element screenshots) \u2014 a deliberate deferred architectural decision, not this horizon's work",
+    "outOfScope: The rest of the computer family \u2014 key press, scroll, wait-for-condition, double-click \u2014 deferred to a computer-parity horizon",
+    "outOfScope: Tab management (list/create/switch/close tabs, tabs_context/tabs_create parity) \u2014 requires a cross-cutting change from active-tab-only to explicit tabId targeting, deferred",
+    "outOfScope: Form filling for checkbox/select/radio and ref-based form_input \u2014 typeText already covers text inputs; deferred",
+    "outOfScope: File upload and image upload (file_upload/upload_image parity) \u2014 needs a file-input substrate, deferred",
+    "outOfScope: Window resize (resize_window parity) \u2014 a chrome.windows update, deferred as a small standalone item",
+    "outOfScope: Accessibility-tree read_page parity (returns element refs) and semantic find (natural-language match) \u2014 deferred; this horizon keeps readPage (HTML) and findElement (CSS count) as-is",
+    "outOfScope: Claude-app-only tools (update_plan, gif_creator, shortcuts_list/execute, turn_answer_start) \u2014 not browser-control capabilities an agent-agnostic bridge should expose, out of scope",
+    "outOfScope: Multi-client README MCP config verification and result-size-cap tuning \u2014 the previous horizon's brief recommended these but they are not this horizon's ask; deferred to a verification horizon",
+    "outOfScope: touch on boky's own extension, bridge, relay or verify pipeline \u2014 the bridge stays self-contained",
+    "Full computer parity (key press, scroll, wait-for-condition, double-click) \u2014 deferred: needs a shared input substrate and the CDP-vs-DOM-event fidelity decision; holding for a dedicated computer-parity horizon",
+    "Tab management (list/create/switch/close tabs \u2014 tabs_context/tabs_create parity) \u2014 deferred: requires a cross-cutting change from active-tab-only to explicit tabId targeting across every handler; holding for a tab-targeting horizon",
+    "Form filling for checkbox/select/radio and ref-based form_input \u2014 deferred: typeText already covers text inputs; closed-form control coverage is a distinct small item",
+    "File and image upload (file_upload/upload_image parity) \u2014 deferred: needs a file-input substrate / CDP; not this horizon",
+    "Window resize (resize_window parity) \u2014 deferred: a standalone small chrome.windows item",
+    "Accessibility-tree read_page parity and semantic find parity \u2014 deferred: distinct capabilities; this horizon keeps readPage (HTML) and findElement (CSS count) as-is",
+    "Integration verification against real MCP clients (README snippet, result-size caps) \u2014 deferred to a verification horizon, per the previous horizon's brief",
+    "Claude-app-only tools (update_plan, gif_creator, shortcuts_list/execute, turn_answer_start) \u2014 out of scope, not browser-control capabilities"
+  ],
+  "revision": 0
+}

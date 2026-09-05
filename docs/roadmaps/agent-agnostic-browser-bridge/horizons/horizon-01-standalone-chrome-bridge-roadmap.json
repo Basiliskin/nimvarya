@@ -1,0 +1,922 @@
+{
+  "task": "Extract boky's existing extension↔WebSocket-relay↔MCP devtools bridge into a standalone, boky-free Chrome-control tool inside this repo, usable by any MCP-capable terminal AI coding tool (Codex CLI, Gemini CLI, Cursor, Claude Code) without a Claude account. First version: core page actions (navigate, getPageText, readPage, findElement, clickElement, typeText, captureTab) plus page console-log and network-request capture queryable from MCP tools. Works locally from this repo via a script + MCP config entry; not published. Boky itself keeps working unchanged.",
+  "analysis": {
+    "objective": "Extract boky's working extension↔WebSocket-relay↔MCP path into a standalone, boky-free Chrome-control tool in this repo that any MCP-capable terminal AI coding tool can point at to navigate, read, find, click, type, screenshot, and query page console logs and network requests of a real Chrome tab, with no Claude-account dependency.",
+    "successDefinition": "Done means all of the following hold locally: (1) a separate unpacked MV3 extension (own manifest, own name, no boky domain/provider/session code) loads in any Chrome profile with no sign-in and connects out to the relay; (2) a standalone relay process starts from a repo script (not requiring boky's nest-host WorkflowEngineModule) and routes command / command-response / observation frames between one extension and N controllers; (3) a stdio MCP server exposes a generic tool set — at minimum navigate, getPageText, readPage, findElement, clickElement, typeText, captureTab, plus readConsoleMessages and readNetworkRequests (queryable ring buffer, with a clear-since/limit parameter) — and none of boky's provider/session/storage probes; (4) a single MCP config snippet (command + args) documented in the tool's README works unchanged for Claude Code, Codex CLI, Gemini CLI and Cursor agent, verified by hand with at least two of them; (5) a mechanical parity check asserts MCP-advertised actions == extension command handler cases, mirroring today's check-command-parity; (6) tsc --noEmit, eslint --max-warnings 0, and vitest pass for the new code with unit tests for the frame protocol/ring buffers and integration tests for relay routing and the MCP tool dispatch; (7) boky's existing extension, bridge, and verify pipeline keep passing unchanged.",
+    "assumptions": [
+      "The tool lives in this repo as a new top-level package (e.g. tools/chrome-bridge/ with extension/, relay/, mcp/ subfolders), built with the same pnpm/vite/tsc/eslint/vitest toolchain, so the repo's existing gates apply without new CI plumbing.",
+      "'Extract' means copy-and-generalize into the new package; boky's own extension, BridgeRelayModule, and extension-mcp.mjs keep working as-is and are not migrated onto the new tool in this horizon.",
+      "The relay's existing 7-kind frame protocol (hello/role, command, command-response keyed by msg.data.id, observation broadcast to controllers, dashboard-* kinds) is already payload-opaque and boky-free; the extracted relay keeps command/command-response/observation and drops the dashboard-* kinds.",
+      "Page console logs are captured by a MAIN-world content script that wraps console.* and window error/unhandledrejection and relays entries to the service worker via chrome.runtime messaging (the same CSP-safe sink pattern log-forwarder.ts already uses); boky's current log-forwarder only captures the extension's own console, so page-console capture is new code modeled on it.",
+      "Network requests are captured by a MAIN-world fetch/XHR wrapper (the page-world-sniffer pattern) recording method, URL, status, timing and bounded body previews — not via chrome.debugger — because that path already exists in boky and does not trigger the 'extension is debugging this browser' banner.",
+      "Console and network entries are stored per tab in bounded in-memory ring buffers in the service worker and exposed as pull-style MCP tools (readConsoleMessages / readNetworkRequests with optional since/limit/filter); push streaming over MCP is not required for 'queryable by the calling tool'.",
+      "Commands target the currently active tab of the connected Chrome window, exactly as boky's commands do today; explicit tabId targeting is the deferred tab-management feature.",
+      "The relay listens on a configurable port defaulting to a port distinct from boky's 8765 so both can run simultaneously on the same machine.",
+      "One extension instance per relay is the supported topology; multiple Chrome profiles each need their own relay port (a documented limitation, not a feature).",
+      "Manifest permissions stay at tabs, activeTab, scripting, storage plus <all_urls> host permissions and MAIN/ISOLATED-world content scripts — the same set boky already ships."
+    ],
+    "risks": [
+      "Boky's command handler, bridge client, messaging types and devtools domain types are interleaved with story/provider/session code; a naive copy drags in domain imports and ESLint layer rules (import/no-restricted-paths, chrome.* zones) will reject them — extraction must cut at the messaging/command boundary, not at the file level.",
+      "MAIN-world console/fetch wrapping runs at document_start on every site; sites with strict CSP, frozen console objects, or their own fetch monkey-patching may silently miss entries — capture fidelity will be best-effort and must be documented, not assumed complete.",
+      "Body capture on network requests can be unbounded (streams, large JSON, binary); without hard size caps and per-tab buffer limits the service worker memory grows until MV3 kills it — buffers must be capped by count and bytes.",
+      "MV3 service workers are suspended after ~30s idle; the outbound WebSocket and in-memory ring buffers die with it — the extracted client must keep the keepalive (alarms) behavior boky already has, and callers must accept buffers are per-worker-lifetime.",
+      "Different MCP clients (Codex CLI, Gemini CLI, Cursor) vary in stdio handling, tool-schema strictness, and env propagation; a config verified only with Claude Code may fail elsewhere — success requires manual verification with at least two non-Claude clients.",
+      "The relay accepts any local WebSocket client as a controller with no auth; any local process can drive the user's browser — acceptable for a localhost dev tool but must bind to 127.0.0.1 only and be called out in the README rather than silently shipped.",
+      "readPage returns full outerHTML and captureTab returns a PNG; both can exceed MCP client message limits on large pages — responses need truncation/size parameters.",
+      "The dead-export gate and coverage guard (every export must be imported and named in a test) apply to the new package; scaffolding shared types without consumers will fail verify until the consuming phase lands."
+    ],
+    "outOfScope": [
+      "Tab and profile management (list/create/close/switch tabs, targeting a tab by id, multi-profile discovery) — the user explicitly deferred it; commands act on the active tab only.",
+      "Migrating boky itself onto the extracted tool or deleting boky's existing devtools bridge — reuse by copy is the goal; rewiring boky is a separate refactor with its own blast radius.",
+      "Publishing as an npm package or Chrome Web Store listing — quality bar is 'works locally from this repo via a script'.",
+      "Authentication/authorization on the relay or MCP server beyond localhost binding — local dev tool; adding tokens is a follow-up once a remote use-case exists.",
+      "Push/streaming of console and network events into MCP clients (notifications, SSE transport) — pull-style queryable buffers satisfy the stated need; MCP notification support across clients is inconsistent.",
+      "Advanced automation primitives (keyboard shortcuts, drag, file upload, form_input helpers, JavaScript eval, GIF recording, window resize) — beyond the core page actions the user listed.",
+      "Capturing network traffic via chrome.debugger / CDP or WebSocket frame capture — the fetch/XHR page-world wrapper covers the stated need without the debugger banner; CDP is a different architecture.",
+      "Persisting console/network history across service-worker restarts (IndexedDB) — in-memory ring buffers are sufficient for an interactive debugging loop.",
+      "Cross-browser support (Firefox, Safari, Edge-specific) — the extension is MV3 Chrome-first like boky.",
+      "A GUI/dashboard for the tool — consumers are terminal AI tools over MCP; no React UI is carried over."
+    ],
+    "domainShape": "technical",
+    "domainShapeReason": "The task is developer tooling machinery — extracting and generalizing a Chrome extension, a WebSocket relay, and an MCP stdio server — with no business entities or rules a domain expert would recognize.",
+    "ubiquitousLanguage": [
+      {
+        "term": "Extension",
+        "meaning": "The standalone MV3 Chrome extension (service worker + content scripts) that executes commands in the browser and captures page events; connects outbound to the Relay."
+      },
+      {
+        "term": "Relay",
+        "meaning": "The standalone local WebSocket server that routes frames between one connected Extension and any number of Controllers; opaque to payloads."
+      },
+      {
+        "term": "Controller",
+        "meaning": "Any process (the MCP server, a log tailer, a test) that connects to the Relay with role=controller to send Commands and receive Observations."
+      },
+      {
+        "term": "MCP server",
+        "meaning": "The stdio Model Context Protocol server that terminal AI coding tools launch; it is a Controller that exposes Commands and buffer queries as MCP tools."
+      },
+      {
+        "term": "Command / command-response",
+        "meaning": "A request frame {id, action, params} sent Controller→Extension and its matching reply frame keyed by the same id."
+      },
+      {
+        "term": "Observation",
+        "meaning": "A fire-and-forget frame Extension→Controllers carrying a captured event (console entry, network entry, extension log)."
+      },
+      {
+        "term": "Page capture",
+        "meaning": "MAIN-world content script that wraps console.* and fetch/XHR in the page and relays entries to the service worker."
+      },
+      {
+        "term": "Ring buffer",
+        "meaning": "Bounded per-tab in-memory store of console and network entries in the service worker, queried by readConsoleMessages / readNetworkRequests."
+      }
+    ]
+  },
+  "discoveryFindings": [
+    {
+      "area": "MCP server",
+      "finding": "The MCP server is a single 241-line plain-JS ESM file using @modelcontextprotocol/sdk low-level `Server` + `StdioServerTransport` with `ListToolsRequestSchema`/`CallToolRequestSchema` handlers (not the high-level McpServer/zod API). It exposes exactly ONE tool, `ext_command`, whose inputSchema is `{action: enum(ACTIONS), params: object}` — not one MCP tool per action. Server identity is hardcoded `name: \"book-story-extension\"`.",
+      "filePath": "extension/devtools/extension-mcp.mjs",
+      "implication": "The success criterion 'MCP server exposes a generic tool set — navigate, getPageText, …' is a NEW shape, not a copy: today's server is a single dispatcher tool. Plan a phase that decides one-tool-with-enum vs N-discrete-tools; N discrete tools is safer across Codex/Gemini/Cursor whose enum handling varies, but it breaks the existing parity-check shape (see parity finding)."
+    },
+    {
+      "area": "MCP server",
+      "finding": "`@modelcontextprotocol/sdk` (^1.0.0) and `ws` (^8.18.0) are declared in extension/package.json devDependencies, and extension/ is its own pnpm project (extension/pnpm-workspace.yaml, extension/pnpm-lock.yaml). The MCP file is `.mjs` — deliberately outside tsconfig and ESLint-typechecking (eslint.config.mjs has a `files: [\"devtools/**/*.mjs\"]` relaxed override) and excluded from vitest (`exclude: [\"devtools/**\"]`).",
+      "filePath": "extension/vitest.config.ts",
+      "implication": "Nothing in devtools/ is currently typechecked, linted-strictly, or tested. The task's gate requirement (tsc --noEmit + eslint --max-warnings 0 + vitest for the new code) means the new package cannot be a straight .mjs copy — it must be authored in TS with its own tsconfig/eslint/vitest, which is new plumbing, not inherited."
+    },
+    {
+      "area": "MCP↔relay correlation",
+      "finding": "BridgeClient in extension-mcp.mjs: hardcoded `const BRIDGE_URL = \"ws://localhost:8765\"` (no env override, unlike tail-logs.mjs which honors `BRIDGE_URL`), sends `{kind:\"hello\", role:\"controller\"}` on open, correlates by a monotonic integer `nextId` stored in a `pending` Map keyed by `msg.data.id`, hardcoded 30s per-command timeout, exponential reconnect 1s→15s cap, and rejects all pending on close with 'Bridge connection lost'.",
+      "filePath": "extension/devtools/extension-mcp.mjs",
+      "implication": "The correlation/timeout/reconnect logic is small and directly portable, but the URL must become env/arg-configurable (`--port`/`CHROME_BRIDGE_URL`) for the new default port. Integer ids from multiple controllers collide at the relay for `command` frames (see relay finding) — worth ids being uuid/prefixed in the extracted client."
+    },
+    {
+      "area": "Relay",
+      "finding": "BridgeRelayService is a Nest `@Injectable` with `OnApplicationBootstrap`/`OnModuleDestroy`, creating a raw `new WebSocketServer({ port })` from the `ws` package. It handles 7 frame kinds: hello, observation, command, command-response, dashboard-request, dashboard-response, dashboard-broadcast. Role is fixed on the first `hello` (`role === \"extension\" ? extensions : controllers`; anything not literally \"extension\" becomes a controller). Malformed JSON and unknown kinds are silently dropped.",
+      "filePath": "services/nest-host/src/bridge-relay/bridge-relay.service.ts",
+      "implication": "Confirms the stage1 assumption: routing is payload-opaque and boky-free. The extracted relay is a ~120-line dependency-free `ws` script (drop the 3 dashboard-* kinds and the pendingDashboardRequests/nextRelayRequestId machinery entirely) — no Nest, no ConfigService, no module extraction from nest-host needed."
+    },
+    {
+      "area": "Relay",
+      "finding": "`new WebSocketServer({ port: this.port })` passes NO `host`, so `ws` binds all interfaces (0.0.0.0), not 127.0.0.1. Port default is `DEFAULT_RELAY_PORT = 8765`, overridable only via the Nest ConfigService key `NEST_BRIDGE_PORT` (zod schema, `services/nest-host/src/config/env.schema.ts`, default 8765).",
+      "filePath": "services/nest-host/src/bridge-relay/bridge-relay.service.ts",
+      "implication": "The stage1 risk 'must bind to 127.0.0.1 only' is a real behavioral CHANGE, not a carry-over — the extracted relay must explicitly pass `{ host: \"127.0.0.1\", port }`. Also note boky's relay will keep occupying 8765 on all interfaces, so the new default port must differ (e.g. 8766)."
+    },
+    {
+      "area": "Relay coupling",
+      "finding": "BridgeRelayModule itself is trivial (`providers/exports: [BridgeRelayService]`, no imports) but the service constructor-injects `ConfigService`, and it is only ever started via `AppModule` → `main.ts` `bootstrap()`, which also boots WorkflowEngineModule, RedisStreamModule (ioredis), MongoModule (mongodb), InteractiveWorkflowModule and an Express HTTP listener on 3000. Root `npm start` = `npm --prefix services/nest-host run start` = the whole app.",
+      "filePath": "services/nest-host/src/main.ts",
+      "implication": "Confirms the assumption that the relay cannot be started today without the full Nest app (Redis/Mongo included). Reimplementing the relay standalone is correct and far cheaper than trying to boot BridgeRelayModule in isolation; no refactor of nest-host is needed."
+    },
+    {
+      "area": "Extension bridge client",
+      "finding": "The extension side is module-level singleton state (`let socket`, `outbox`, `commandHandler`) in bridge-client.ts, hardcoded `ws://localhost:8765`, 2000ms fixed reconnect, lazy dial-on-first-use, with an outbox that buffers observations until open. It imports its wire types from `../../../devtools/domain/types.js` (a relative reach OUT of src/ into devtools/) and imports `isBroadcastEnvelope`/`isMessageEnvelope` + `MessageTransport` from `../messaging/` for the dashboard-request path.",
+      "filePath": "extension/src/infrastructure/bridge/bridge-client.ts",
+      "implication": "Extraction cut line: keep hello/observation/command/command-response, delete the entire dashboard-request/dashboard-response/broadcast half — that half is the only thing pulling in boky's messaging layer. Port becomes configurable; wire types get co-located in the new package instead of a cross-tree relative import."
+    },
+    {
+      "area": "Extension keepalive",
+      "finding": "Keepalive is a separate module using `chrome.alarms.create(\"bridge-keepalive\", { periodInMinutes: 0.5 })` with a no-op listener; the alarm firing itself resets the MV3 idle timer and bridge-client's own timer reconnects. It has an `AlarmsPort` interface for injection and an idempotency guard + `resetBridgeKeepaliveForTests`.",
+      "filePath": "extension/src/infrastructure/bridge/keepalive.ts",
+      "implication": "Fully boky-free and copyable verbatim (~40 lines). Requires `alarms` in the new manifest's permissions — note boky's manifest lists alarms, which stage1's assumed permission set (tabs/activeTab/scripting/storage) omits. Add `alarms`."
+    },
+    {
+      "area": "Command dispatch",
+      "finding": "The `switch` over action names lives in `handleCommand()` in src/background/command-handler.ts (~line 233-485), 20 cases. Handlers are behind a `CommandHandlerPorts` interface; the chrome-specific implementations live in `chromeCommandHandlerPorts(providerRegistry, sessionStore, router, macroDeps)` in the same file. Only 7 of 20 cases are the target generic page actions; the other 13 (getStorage/setStorage/mutateStorage/getProviderState(Live)/getSessionState/reloadActiveTab/reloadExtension/simulateProviderEvent/readSelectorText/probeProviderRouter/probeSendNewMessageMacro/ping) are boky-specific or dev-only.",
+      "filePath": "extension/src/background/command-handler.ts",
+      "implication": "Confirms the stage1 risk: this file's imports pull in providers, session, ProviderRouter, ProviderId and provider-macros. The extraction must copy only the 7 page-action cases + the ports pattern, not the file — roughly 200 lines of the 760. `ping` is worth keeping as a health check."
+    },
+    {
+      "area": "Page actions",
+      "finding": "All page actions are `chrome.scripting.executeScript({target:{tabId}, func, args})` from the service worker — NO content-script messaging: readPage = `document.documentElement.outerHTML`; getPageText = `document.body.innerText`; findElement = `querySelectorAll(sel).length` → `{found, matches}`; clickElement = `el.click()` on HTMLElement; typeText = sets `.value` + dispatches input/change (or `textContent` + input for contentEditable); navigateTo = `chrome.tabs.update(tabId,{url})`; captureTab = `chrome.tabs.captureVisibleTab(windowId,{format:\"png\"})`. Target tab comes from `chrome.tabs.query({active:true,currentWindow:true})`; captureTab uses `tab.windowId`, the rest `tab.id`.",
+      "filePath": "extension/src/background/command-handler.ts",
+      "implication": "These 7 implementations are already boky-free and copy verbatim. None of them truncate output — readPage returns full outerHTML and captureTab a full PNG dataUrl, so the stage1 truncation risk requires NEW code (maxBytes/maxChars params) at either the port or the MCP layer."
+    },
+    {
+      "area": "Wire types",
+      "finding": "`extension/devtools/domain/types.ts` (153 lines) is the shared protocol module: `BridgeMessage` union (7 kinds), `Command {id, action, params}`, `CommandResponse {id, result?, error?}`, `Observation` union with types log|error|network|dom-error|runtime-error and `ObservationSource = \"service-worker\" | \"content-script\"`, plus per-command param/result interfaces (FindElementParams, TypeTextParams, CaptureTabResult, …). `KnownCommandAction` duplicates the ACTIONS list a third time.",
+      "filePath": "extension/devtools/domain/types.ts",
+      "implication": "This is the cleanest extraction seed — a boky-free protocol module the new package can copy and trim (drop dashboard-* kinds and the 13 boky actions). Note `ObservationSource` has no `page` variant, so page-world console/network capture needs a new source value."
+    },
+    {
+      "area": "Parity check",
+      "finding": "check-command-parity.mjs is 53 lines of regex: it greps `case \"X\":` out of `../src/background/command-handler.ts` and `const ACTIONS = [...]` out of extension-mcp.mjs, diffs the two sets, exits 1 on drift. It is wired as `devtools:check-parity` inside extension's `verify:fast` script — but NOT into root scripts/verify.sh.",
+      "filePath": "extension/devtools/check-command-parity.mjs",
+      "implication": "The 'mechanical parity check' criterion is a ~50-line regex script to mirror with new paths — cheap. But note the third list (`KnownCommandAction` in types.ts) is NOT covered today; the new package should either derive all lists from one const array or extend the check to 3 sources. Also decide where to hook it: root verify.sh has no per-package extension point (stages are a hardcoded array)."
+    },
+    {
+      "area": "Observation forwarding today",
+      "finding": "log-forwarder.ts patches console.log/error and global error/unhandledrejection in the SERVICE WORKER and in boky's ISOLATED content script — it captures the EXTENSION's own console, never the page's. Its doc comment explicitly warns that a content script must pass a `sink` relaying over chrome.runtime (`bridge/observation` message type) because host-page `connect-src` CSP blocks a content-script WebSocket to ws://localhost.",
+      "filePath": "extension/src/infrastructure/bridge/log-forwarder.ts",
+      "implication": "Confirms stage1: page-console capture is NEW code. The CSP note is load-bearing — the new MAIN-world capture must go page→content-script (postMessage) →service-worker (chrome.runtime) →WebSocket, never open a socket from the page/content world."
+    },
+    {
+      "area": "Page-world sniffer",
+      "finding": "The MAIN-world fetch/XHR/WebSocket interceptor exists as a TypeScript string literal (`pageWorldSnifferSource.source` in sniffer-source.ts) emitted by a custom Vite plugin as `dist/page-world-sniffer.js`, registered as `web_accessible_resources` AND patched into the BUILT manifest's content_scripts as `{world:\"MAIN\", run_at:\"document_start\"}` by the plugin's `closeBundle` (crx() cannot take a synthesized asset as a content_scripts entry in the source manifest). Idempotence-guarded via `window.__bokySnifferInstalled`.",
+      "filePath": "extension/vite.config.ts",
+      "implication": "This is the single trickiest thing to reuse: the MAIN-world script cannot be a normal TS module under @crxjs. Budget a dedicated phase for the build plumbing. Consider dropping @crxjs entirely for the new extension (a plain vite multi-entry build + hand-written manifest listing a real MAIN-world file) — simpler than replicating the closeBundle hack."
+    },
+    {
+      "area": "Page→content messaging",
+      "finding": "Page-world → content-script uses `window.postMessage` with a namespaced envelope: `PAGE_BRIDGE_NAMESPACE = \"__boky_capture_v1__\"` plus a `channel` discriminant. Two channels exist today: `PAGE_BRIDGE_CHANNEL = \"raw-reply-frame\"` (page-bridge.ts) and `NETWORK_ACTIVITY_CHANNEL = \"network-activity-v1\"` (network-activity-bridge.ts). Each has a validating type-guard predicate at the content-script trust boundary, and the recorder drops any message whose `event.source` is not the page's own window.",
+      "filePath": "extension/src/infrastructure/recorder/page-bridge.ts",
+      "implication": "The envelope+namespace+predicate pattern is the convention to copy (rename the namespace — it literally contains 'boky'). No CustomEvent path exists. Network frames already carry method/url/status shape via `network-activity-frame.ts`, worth reading as a schema seed for readNetworkRequests."
+    },
+    {
+      "area": "Ring buffers",
+      "finding": "No bounded ring-buffer / capped-collection utility exists in extension/src — the recorder path (network-activity-recorder.ts, conversation-recorder.ts, llm-capture-sink.ts) streams into provider-session log repositories, not into an in-memory capped store, and the bridge outbox is an unbounded array.",
+      "implication": "Contrary to any assumption of reuse, the ring buffer for console/network entries is 100% new code. Good news for the gates: it is pure, dependency-free, and trivially unit-testable — a natural first phase that satisfies the 'unit tests for frame protocol/ring buffers' criterion."
+    },
+    {
+      "area": "Manifest",
+      "finding": "The source manifest is `extension/public/manifest.json`, MV3, permissions `[tabs, activeTab, scripting, storage, alarms]`, host_permissions `<all_urls>`, background `{service_worker: \"src/background/service-worker.ts\", type: \"module\"}` (a TS path — @crxjs compiles it), one ISOLATED content script at document_idle, an `action` with no popup, and `web_accessible_resources` for page-world-sniffer.js.",
+      "filePath": "extension/public/manifest.json",
+      "implication": "Directly copyable as the new manifest baseline; add `alarms` to stage1's assumed permission list and drop the `action`/dashboard entry. Note the manifest points at TS sources, which only works under @crxjs — a non-crx build needs built JS paths instead."
+    },
+    {
+      "area": "Build configs",
+      "finding": "Three vite configs exist: vite.config.ts (crx extension build → dist/), vite.standalone.config.ts and vite.qa.config.ts (Vite DEV SERVERS for the React dashboard / QA harness at e.g. localhost:5175, run via `dev:standalone`/`dev:qa`), outputting dist-standalone/ and dist-qa/. Only vite.config.ts builds the extension.",
+      "filePath": "extension/vite.config.ts",
+      "implication": "The multi-config precedent is for dev servers, not multiple extension entrypoints — it does not give the new package a pattern for building extension + relay + MCP together. Expect: one vite config for the new extension, plain `tsc` for relay+MCP node code."
+    },
+    {
+      "area": "Workspace layout",
+      "finding": "The root is NOT a workspace of any kind — root package.json has no `workspaces` field, uses npm (package-lock.json) and `\"type\": \"commonjs\"`. Cross-package invocation is by explicit prefix: `npm --prefix services/nest-host run build`, `pnpm -C extension run typecheck`. extension/ and services/nest-host/ are independent installs (extension uses pnpm with its own pnpm-workspace.yaml + pnpm-lock; nest-host uses npm with package-lock).",
+      "filePath": "package.json",
+      "implication": "Refutes the stage1 assumption 'built with the same pnpm toolchain so existing gates apply without new CI plumbing.' A new `tools/chrome-bridge/` package gets its OWN package.json + lockfile + tsconfig + eslint.config + vitest.config and must be wired into root verify.sh by hand — treat this as an explicit setup phase, not free."
+    },
+    {
+      "area": "verify.sh gates",
+      "finding": "scripts/verify.sh is a hardcoded 9-stage array, and EVERY stage is scoped to extension/ or to root hooks: typecheck/lint/tests all run `pnpm -C extension`, dead-code runs `./scripts/block-dead-code.sh --all`, security runs `pnpm -C extension audit`. `services/nest-host` is not in verify.sh at all despite having its own tsconfig/eslint/vitest and its own `build`/`lint`/`typecheck`/`test:unit`/`test:int` scripts.",
+      "filePath": "scripts/verify.sh",
+      "implication": "There is precedent for a second package living OUTSIDE the root verify pipeline (nest-host). The plan can either follow that precedent (self-contained `tools/chrome-bridge` with its own verify script) or add stages — following precedent is lower risk and keeps 'boky's verify pipeline passes unchanged' trivially true."
+    },
+    {
+      "area": "check-dead-exports scope",
+      "finding": "The dead-export hook hardcodes `SRC_ROOT = existsSync('extension/src') ? 'extension/src' : 'src'` and walks only that tree; `block-dead-code.sh --all` therefore only ever scans extension/src. It also carries a `DEFERRED_EXPORTS` allowlist keyed by `path:symbolName` for intentionally-unwired exports.",
+      "filePath": ".claude/hooks/check-dead-exports.mjs",
+      "implication": "Refutes the stage1 risk 'the dead-export gate applies to the new package' — it does NOT reach outside extension/src, so scaffolding unconsumed shared types in tools/ will not trip it. Don't budget DEFERRED_EXPORTS bookkeeping unless the new code lands inside extension/src."
+    },
+    {
+      "area": "testguard scope",
+      "finding": ".testguard.json rules are anchored `^extension/src/...` for the three specific levels, but the final catch-all rule is `{ \"match\": \".*\", \"suffix\": \".unit.test.ts\", \"level\": \"unit\" }` with `requireSymbolMentions: true`, and testLocations `{dir}/{base}{suffix}` or `tests/{base}{suffix}`. The ignore list covers index.ts, types.ts, ports.ts, *.d.ts, __fixtures__, *.config.ts.",
+      "filePath": ".testguard.json",
+      "implication": "The catch-all DOES reach files outside extension/ (check-tests.mjs runs on changed files repo-wide), so every new .ts file in tools/ needs a co-located `.unit.test.ts` naming its exported symbols — unless the file is named index.ts/types.ts/ports.ts. Name the protocol module `types.ts` to inherit the ignore, or plan tests for it."
+    },
+    {
+      "area": "ESLint zones",
+      "finding": "extension/eslint.config.mjs (~330 lines) layers strictTypeChecked over `**/*.ts`, defines import/no-restricted-paths zones (inward-only), bans `chrome`/@types/chrome imports and DOM+chrome lib types in `src/domain/**`, and bans raw `chrome.runtime.sendMessage`/`onMessage`/`chrome.tabs.sendMessage`/`chrome.runtime.connect` repo-wide via no-restricted-syntax selectors (only chrome-transport.ts is exempt). `devtools/**/*.mjs` gets a relaxed override.",
+      "filePath": "extension/eslint.config.mjs",
+      "implication": "Confirms the stage1 risk. The raw-chrome-messaging ban would force the new page→SW messaging through a typed transport wrapper IF the code lived under extension/. A separate tools/ package with its own eslint.config.mjs escapes these selectors — another argument for the standalone package with a lighter, purpose-built config."
+    },
+    {
+      "area": "MCP registration",
+      "finding": "Root `.mcp.json` registers one stdio server `extension-bridge` with an ABSOLUTE path (`/Users/dimitrykatz/workspace/boky/extension/devtools/extension-mcp.mjs`), and extension/mcp.json duplicates it with a relative path. Additionally, `extension/scripts/register-mcp.mjs` already exists and registers the same server into gemini, qwen and crush CLIs (`--targets`, `--scope`, `--dry-run` flags), noting Claude Code needs no entry because it reads .mcp.json.",
+      "filePath": "extension/scripts/register-mcp.mjs",
+      "implication": "Significant unexpected asset: the 'one config snippet works across CLIs' criterion has a working precedent script to copy/parameterize for the new server — and it proves gemini/qwen/crush config shapes were already reverse-engineered. Also: the absolute path in .mcp.json means the new entry should use a repo-relative launcher script to stay portable."
+    },
+    {
+      "area": "Observation tailer",
+      "finding": "tail-logs.mjs is a 60-line controller: connects, sends hello/controller, prints observations via `summarizeObservation` from format-observation.mjs, and if stdin is piped treats the JSON as a one-shot command then exits on the command-response. It honors `BRIDGE_URL` env, and its error message tells the user to run `npm start` at the repo root.",
+      "filePath": "extension/devtools/tail-logs.mjs",
+      "implication": "A ready-made template for the new tool's manual smoke-test/debug CLI, and the natural harness for the integration tests of relay routing without needing a real Chrome."
+    },
+    {
+      "area": "Precedent for extraction",
+      "finding": "There is no `tools/` or `packages/` directory; the only non-extension package is `services/nest-host` (Nest, npm, own tsconfig/eslint/vitest/README, per-package CLAUDE.md, excluded from root verify.sh). Every module folder carries a CLAUDE.md; docs/roadmaps/ holds triples of `<name>-roadmap.json` / `.md` / `.status.json` plus per-project subfolders, with in-progress analysis under docs/roadmaps/.tmp/<slug>/.",
+      "implication": "Creating a new top-level `tools/chrome-bridge/` is a new-but-consistent move; follow the nest-host precedent (self-contained package + README + CLAUDE.md files per folder) and the docs/roadmaps triple naming for the roadmap artifacts."
+    }
+  ],
+  "requiredMaterials": [],
+  "phases": [
+    {
+      "id": "scaffold-chrome-bridge-package-protocol",
+      "order": 0,
+      "name": "Add standalone package with protocol types",
+      "goal": "Create the new self-contained package `tools/chrome-bridge/` (own package.json, tsconfig, ESLint flat config, vitest config, `npm run verify` = typecheck + lint + test) and ship its first real module: the wire protocol shared by every later phase — the WebSocket frame types (`hello`, `command`, `command-response`, `observation`) and a single `PAGE_ACTIONS` const array (`ping`, `navigateTo`, `getPageText`, `readPage`, `findElement`, `clickElement`, `typeText`, `captureTab`) with per-action param/result types, compiled and covered by a passing unit test.",
+      "rationale": "Discovery showed the repo root is not a workspace and nothing (tsconfig, ESLint, vitest, dependencies) is inherited by a new top-level folder, and the existing devtools code is untyped .mjs that is neither typechecked nor tested. Every later phase (relay, extension, controller, MCP server) imports the same frame and action types, so the shared protocol module plus the toolchain that compiles it must exist first.",
+      "filesAffected": [
+        "tools/chrome-bridge/package.json",
+        "tools/chrome-bridge/tsconfig.json",
+        "tools/chrome-bridge/eslint.config.mjs",
+        "tools/chrome-bridge/vitest.config.ts",
+        "tools/chrome-bridge/src/protocol/types.ts",
+        "tools/chrome-bridge/src/protocol/actions.ts",
+        "tools/chrome-bridge/src/protocol/actions.unit.test.ts",
+        "tools/chrome-bridge/README.md"
+      ],
+      "changes": [
+        "Create `tools/chrome-bridge/package.json` following the `services/nest-host` precedent: `\"private\": true`, `\"type\": \"module\"`, npm + package-lock.json, scripts `typecheck` (tsc --noEmit), `lint` (eslint . --max-warnings 0), `test` (vitest run), `verify` (typecheck && lint && test); devDependencies typescript, vitest, @types/node, typescript-eslint, eslint. Do NOT add it to root scripts/verify.sh (nest-host is not there either; keeps boky's pipeline unchanged).",
+        "Create `tsconfig.json` with the same strict extras boky uses (strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes, noImplicitOverride, noUnusedLocals/Parameters, verbatimModuleSyntax), `module: NodeNext`, `lib: [ES2022, DOM]` (DOM is needed later by the extension code), `include: [\"src\"]`.",
+        "Create a small purpose-built `eslint.config.mjs`: typescript-eslint strictTypeChecked, `no-explicit-any`, `no-non-null-assertion`, `consistent-type-imports`, and the `no-restricted-syntax` selectors banning `JSON.parse(x) as T` / `satisfies` — copy those selectors from `extension/eslint.config.mjs`. Do not copy boky's layer zones or chrome-messaging bans.",
+        "Create `vitest.config.ts` including `src/**/*.unit.test.ts` (the repo-wide `.testguard.json` catch-all requires every new non-`types.ts`/`index.ts` .ts file to have a co-located `.unit.test.ts` that names its exports — this applies to the whole package from now on).",
+        "Create `src/protocol/types.ts` by copying and trimming `extension/devtools/domain/types.ts`: keep `HelloMessage {kind:'hello', role:'extension'|'controller'}`, `Command {id: string, action, params}`, `CommandResponse {id, result?, error?}`, `Observation`, the `BridgeMessage` union of those four kinds only (drop all `dashboard-*` kinds), and the per-action param/result interfaces for the 8 actions (FindElementParams, TypeTextParams, NavigateToParams, ClickElementParams, ReadPageParams/GetPageTextParams with optional `maxChars`, CaptureTabResult, …). Command `id` is a string (not a number) so several controllers cannot collide at the relay.",
+        "Create `src/protocol/actions.ts` exporting `export const PAGE_ACTIONS = ['ping','navigateTo','getPageText','readPage','findElement','clickElement','typeText','captureTab'] as const`, `export type PageAction = typeof PAGE_ACTIONS[number]`, and a type-guard `isPageAction(value: unknown): value is PageAction`. This array is the single source of truth every later list derives from (there is no second hand-maintained list anywhere).",
+        "Write `actions.unit.test.ts` covering `PAGE_ACTIONS` membership and `isPageAction` accept/reject cases; confirm `npm run verify` is green from an empty `node_modules` install.",
+        "Add a minimal `README.md` stating what the package is (standalone Chrome-control bridge, not boky) and the `npm install && npm run verify` command; full usage docs are a later horizon."
+      ],
+      "boundedContext": "Protocol and package toolchain",
+      "layer": "cross-cutting",
+      "blastRadius": "small",
+      "inputs": [
+        "extension/devtools/domain/types.ts (frame and command types to copy and trim)",
+        "extension/eslint.config.mjs (strict rules and banned-syntax selectors to copy)",
+        "services/nest-host/package.json + tsconfig.json (self-contained package precedent)",
+        ".testguard.json catch-all rule (test naming the package must obey)"
+      ],
+      "expectedResult": "`tools/chrome-bridge/src/protocol/` (types.ts + actions.ts) compiles, lints and passes its unit test via `cd tools/chrome-bridge && npm run verify`.",
+      "dependsOn": [],
+      "rubric": [
+        {
+          "id": "clean-install-verify-green",
+          "label": "Package verifies green from a clean install",
+          "ruleStatement": "`tools/chrome-bridge/` is a self-contained npm package whose `npm run verify` (typecheck && lint && test) passes on a fresh clone with nothing inherited from the repo root. 10 = green from `rm -rf node_modules && npm ci`, lockfile committed, and verify also fails loudly when any one stage is broken; 8 = green from a clean `npm install` with a lockfile; below 7 = passes only because a stale node_modules, a root-level config, or a hoisted dependency happens to exist.",
+          "passCriteria": [
+            "Run `cd tools/chrome-bridge && rm -rf node_modules && npm ci && npm run verify` — exit code 0, and the output shows all three stages (tsc, eslint, vitest) actually executed (vitest reports at least 1 test file, 1+ tests passed).",
+            "`tools/chrome-bridge/package-lock.json` is committed alongside `package.json`; `package.json` has `\"private\": true`, `\"type\": \"module\"`, and scripts `typecheck`, `lint`, `test`, `verify` where `verify` chains the other three with `&&` (a failure in any one stage makes `verify` exit non-zero — check by temporarily introducing a type error and confirming exit code != 0).",
+            "`tools/chrome-bridge/tsconfig.json` has no `extends` pointing outside `tools/chrome-bridge/`, and `eslint.config.mjs` / `vitest.config.ts` import nothing from `../../extension` or `../../services` — `grep -rn '\\.\\./\\.\\.' tools/chrome-bridge/*.json tools/chrome-bridge/*.mjs tools/chrome-bridge/*.ts` returns nothing.",
+            "Root `scripts/verify.sh` is unchanged (`git diff --stat -- scripts/verify.sh` is empty) and `npm run verify:fast` from the repo root still passes."
+          ],
+          "failureExamples": [
+            "`npm run verify` is green on the developer's machine but `package-lock.json` was not committed (only `.gitignore`d or never generated), so a fresh clone resolves a newer `typescript-eslint` and lint fails.",
+            "`verify` is written as `npm run typecheck; npm run lint; npm run test` (semicolons or `npm-run-all` without `--serial --bail`), so a failing typecheck still yields exit code 0.",
+            "`tsconfig.json` uses `\"extends\": \"../../extension/tsconfig.json\"` to save typing, silently making the package depend on boky's config and its path aliases.",
+            "The developer's shell had `../../node_modules` on the resolution path (a root-level `node_modules` from a previous experiment), so `vitest` resolved even though it was missing from the package's own devDependencies."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "strictness-parity-with-boky",
+          "label": "tsconfig and ESLint enforce boky's strictness bar",
+          "ruleStatement": "The package's toolchain rejects the same unsafe code boky rejects: strict TS extras and the `no-explicit-any`, `no-non-null-assertion`, `consistent-type-imports`, and `JSON.parse(x) as T` / `satisfies` bans are present AND demonstrably active. 10 = every listed rule verified by a throwaway violation that lint/tsc actually rejects, and no boky layer-zone or `chrome.*` messaging bans leaked in; 8 = all rules present in config and at least the banned-syntax selectors verified to fire; below 7 = a rule is listed but silently inert (wrong parser setup, missing `parserOptions.project`, or rule name misspelled).",
+          "passCriteria": [
+            "`tools/chrome-bridge/tsconfig.json` sets `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitOverride`, `noUnusedLocals`, `noUnusedParameters`, `verbatimModuleSyntax` all to `true`, `module` to `NodeNext`, `lib` includes `ES2022` and `DOM`, `include` is `[\"src\"]`.",
+            "Create a scratch file `src/protocol/_probe.ts` containing `const x: any = 1; const y = JSON.parse('{}') as { a: number }; const z = {} satisfies object; const w = (null as unknown as string[])[0]!;` — `npm run lint` reports at least 4 distinct errors (no-explicit-any, the JSON.parse-as selector, the satisfies selector, no-non-null-assertion). Delete the file afterwards.",
+            "In the same scratch file, `import { PageAction } from './actions.js'` (no `type` keyword) is reported by `@typescript-eslint/consistent-type-imports` — proving type-aware linting has `parserOptions.project` (or `projectService`) wired, not just syntax-level rules.",
+            "`eslint.config.mjs` contains no `import/no-restricted-paths` block, no `chrome.runtime.sendMessage` / `chrome.tabs` selectors, and no `@domain` / `@application` / `@infrastructure` zone references — `grep -c 'chrome\\|no-restricted-paths\\|@infrastructure' tools/chrome-bridge/eslint.config.mjs` returns 0."
+          ],
+          "failureExamples": [
+            "`typescript-eslint.configs.strictTypeChecked` is spread into the config but `languageOptions.parserOptions.project` is never set, so type-aware rules (`no-unnecessary-condition`, `consistent-type-imports` in type-only positions) never fire and lint is green on unsafe code.",
+            "The `no-restricted-syntax` selectors were copied from `extension/eslint.config.mjs` wholesale, dragging in the `chrome.runtime.sendMessage` ban — harmless today but it will reject the extension phase's transport adapter later and contradicts the phase's explicit 'do not copy' instruction.",
+            "`verbatimModuleSyntax` is on but the `satisfies` selector was copied with a typo in the AST node name (`TSSatisfiesExpresion`), so ESLint accepts it silently and the ban is inert.",
+            "`lib` is `[\"ES2022\"]` only — compiles now, but the extension phase will have to touch this file, and the phase spec says DOM is required."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "protocol-types-boky-free-and-trimmed",
+          "label": "Protocol frame types are trimmed to 4 kinds, string ids, and 8 typed actions",
+          "ruleStatement": "`src/protocol/types.ts` defines exactly the frames later phases share — `hello`, `command`, `command-response`, `observation` — with string command ids, no `dashboard-*` kinds, and a per-action param/result type for each of the 8 page actions, with no residue of boky's provider/session/storage vocabulary. 10 = the `Command` type is a discriminated union over `PAGE_ACTIONS` so `action` and `params` are correlated at compile time, `id` is `string` only, and a type-level test proves a mismatched action/params pair fails to compile; 8 = all frame kinds and 8 param/result interfaces exist, `id: string`, no boky names, but `Command.params` is a loose `unknown`; below 7 = boky action names or `dashboard-*` kinds survive, or `id` is still `string | number`.",
+          "passCriteria": [
+            "`grep -nE 'dashboard|getStorage|setStorage|mutateStorage|ProviderState|SessionState|simulateProviderEvent|readSelectorText|probe|reloadExtension|reloadActiveTab' tools/chrome-bridge/src/protocol/` returns nothing.",
+            "In `types.ts` the `BridgeMessage` union has exactly four `kind` literals (`'hello'`, `'command'`, `'command-response'`, `'observation'`); `HelloMessage.role` is `'extension' | 'controller'`; `Command.id` and `CommandResponse.id` are typed `string` (not `string | number`, not `number`).",
+            "For each of the 8 actions there is a named params type and a named result type (or an explicit `void`/`undefined` result for `ping`), e.g. `NavigateToParams`, `FindElementParams`, `ClickElementParams`, `TypeTextParams`, `ReadPageParams` and `GetPageTextParams` (both with optional `maxChars?: number`), `CaptureTabResult` (base64/dataUrl PNG string field) — a reader can find all 16 by name without reading boky's code.",
+            "`CommandResponse` carries `result?` and `error?` such that a response with both absent or both present is not expressible, OR the file has a comment stating the exactly-one invariant and the unit test in this phase asserts a helper/guard enforces it (a plain `{ result?: unknown; error?: string }` with no invariant scores at most 8).",
+            "`types.ts` imports nothing from outside `tools/chrome-bridge/src/` and has no `chrome.*` references."
+          ],
+          "failureExamples": [
+            "`Command.id` copied as `string | number` from boky's `devtools/domain/types.ts` because tests elsewhere use numeric ids — collides at the relay when two controllers both start counting from 1, which is exactly why the phase mandates `string`.",
+            "`Command.action` is typed `PageAction | (string & {})` (boky's open-ended escape hatch) so that unknown actions compile — defeats the purpose of `PAGE_ACTIONS` as the single source of truth and lets a later phase add an action without updating the array.",
+            "`ReadPageParams` and `GetPageTextParams` were written but `maxChars` was omitted because 'readPage always returns the whole page today' — the analysis explicitly calls out MCP message-size limits as a risk this parameter mitigates.",
+            "`Observation` was copied verbatim with `source: 'service-worker' | 'content-script'` and boky's `type: 'log' | 'error' | 'network' | 'dom-error' | 'runtime-error'` — acceptable, but `payload: unknown` on the `log` branch was left as-is with no timestamp/tabId, so the next horizon's per-tab ring buffer cannot key on it."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "page-actions-single-source-of-truth",
+          "label": "PAGE_ACTIONS is the one derived-from list with a real type guard",
+          "ruleStatement": "`src/protocol/actions.ts` exports `PAGE_ACTIONS` as a readonly `as const` tuple of the 8 actions, `PageAction` derived from it, and `isPageAction` that narrows `unknown` correctly — and no second hand-maintained list of action names exists anywhere in the package. 10 = the tuple is the only place the 8 strings appear as a list (types.ts derives per-action maps from `PageAction`, not from a repeated union), `isPageAction` uses the array (not a duplicated switch/Set literal), and the test asserts exact length and order; 8 = tuple + derived type + guard correct, but `types.ts` repeats the 8 names in its own union; below 7 = `PageAction` is a hand-written union alongside the array, or the guard accepts near-misses.",
+          "passCriteria": [
+            "`actions.ts` contains `export const PAGE_ACTIONS = ['ping','navigateTo','getPageText','readPage','findElement','clickElement','typeText','captureTab'] as const` (that exact order) and `export type PageAction = (typeof PAGE_ACTIONS)[number]` — not a manually spelled-out string-literal union.",
+            "`isPageAction(value: unknown): value is PageAction` returns false for `undefined`, `null`, `42`, `''`, `'Ping'`, `'navigate'`, `'captureTab '` (trailing space), and `['ping']` (an array) — the unit test enumerates these rejects, not only the happy path.",
+            "`grep -rn \"'navigateTo'\" tools/chrome-bridge/src --include='*.ts' | grep -v test` shows the literal in at most two files (actions.ts and, if used as a discriminated-union key, types.ts) — there is no third copy such as a comment block, a `Set([...])`, or a `switch` listing the names.",
+            "In `types.ts`, if there is a per-action params/result mapping, it is declared as `Record<PageAction, ...>` or a mapped type keyed by `PageAction`, so adding a 9th entry to `PAGE_ACTIONS` produces a compile error until the mapping is extended (verify by temporarily appending `'foo'` to the array and running `npm run typecheck` — expect a failure; revert)."
+          ],
+          "failureExamples": [
+            "`isPageAction` is implemented as `typeof value === 'string' && PAGE_ACTIONS.includes(value as PageAction)` — the cast compiles under strict TS, but under `strictTypeChecked` the `as` on a readonly tuple `includes` triggers `no-unnecessary-type-assertion`/`no-unsafe-argument`, and the developer 'fixes' it by widening `PAGE_ACTIONS` to `readonly string[]`, silently losing the literal type.",
+            "`PageAction` is written as a hand-maintained union `'ping' | 'navigateTo' | ...` in `types.ts` for readability, and `actions.ts` re-declares the array — two lists that will drift the first time an action is added.",
+            "The test checks `PAGE_ACTIONS.includes('ping')` and `isPageAction('ping') === true` only; `isPageAction(null)` is never exercised and would throw on `.trim()` if someone later adds normalization.",
+            "`PAGE_ACTIONS` has the right 8 members but in a different order than the phase specifies, and the test asserts membership only — a later parity check that compares ordered lists against the extension handler will produce a confusing diff."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "coverage-guard-and-dead-export-compliance",
+          "label": "Package obeys the repo-wide coverage guard and keeps its exports consumed",
+          "ruleStatement": "Every non-exempt `.ts` file under `tools/chrome-bridge/src/` has a co-located `.unit.test.ts` that names each of its exports (the repo-wide `.testguard.json` catch-all applies to this package), and the package keeps the repo's no-dead-exports convention by hand — the repo's dead-export hook only scans `extension/src`, so nothing will catch it for you. 10 = `.claude/hooks/check-tests.mjs` runs cleanly against the package with zero additions to its ignore list, every export in `actions.ts` has an importer or is named in the test, and the README states the dead-export convention; 8 = coverage guard clean, possibly with consumer-less exports confined to the exempt `types.ts` until the relay/extension phases land; below 7 = the package passes its own `npm run verify` but the repo-root Stop hook / `npm run verify:fast` now reports the new files.",
+          "passCriteria": [
+            "From the repo root, run `node .claude/hooks/check-tests.mjs` (or the exact invocation `scripts/verify.sh` stage 3 uses) — output lists no file under `tools/chrome-bridge/` as missing a test or missing a symbol mention.",
+            "`tools/chrome-bridge/src/protocol/actions.unit.test.ts` contains the literal identifiers `PAGE_ACTIONS`, `PageAction` (in a type position is fine), and `isPageAction` — the `requireSymbolMentions: true` rule is satisfied by name, not by wildcard import.",
+            "Consumer-less exports exist only in `types.ts` (exempt from the coverage guard by name); `grep -n '^export' tools/chrome-bridge/src/protocol/actions.ts` lists only `PAGE_ACTIONS`, `PageAction`, and `isPageAction`, each imported by the test. The README notes that exports must have an importer because the repo's dead-export hook does not scan this package.",
+            "`git status` after `npm run verify` inside the package shows no generated files (no `dist/`, no `.tsbuildinfo`, no `coverage/`) that are untracked and unignored — `tools/chrome-bridge/.gitignore` or the root `.gitignore` covers them."
+          ],
+          "failureExamples": [
+            "The developer put the 8 param/result interfaces in `actions.ts` (next to `PAGE_ACTIONS`) instead of `types.ts`, so `requireSymbolMentions` now demands the test name `NavigateToParams`, `CaptureTabResult`, etc. — the package's own `vitest` is green but the repo-root coverage guard fails on the Stop hook.",
+            "`actions.ts` exports a convenience `PAGE_ACTION_SET` nobody imports; the package's local `verify` stays green and no hook flags it, so the dead export ships unnoticed.",
+            "The test file imports `* as actions from './actions.js'` and checks `actions.PAGE_ACTIONS` — the symbol-mention check does a text search and passes, but `isPageAction` is never mentioned because the developer tested only the array.",
+            "`vitest run` wrote `coverage/` because `coverage.enabled` was flipped on in `vitest.config.ts`, and the directory is neither ignored nor committed, leaving `git status` dirty after every verify."
+          ],
+          "minScore": 7
+        }
+      ],
+      "healerHint": "The most likely failure is that the package's own `npm run verify` is green while the repo-root coverage guard flags `tools/chrome-bridge/` (param/result interfaces placed in `actions.ts` instead of the exempt `types.ts`) — move all pure types into `types.ts`, keep only `PAGE_ACTIONS`/`PageAction`/`isPageAction` in `actions.ts`, name all three in the test, and re-run `node .claude/hooks/check-tests.mjs` from the repo root."
+    },
+    {
+      "id": "standalone-websocket-relay",
+      "order": 1,
+      "name": "Add standalone WebSocket relay process",
+      "goal": "Implement the Relay — a dependency-light local WebSocket server (only the `ws` package) that accepts one Extension and any number of Controllers, identifies each socket by its first `hello` frame, forwards `command` frames from controllers to the extension, forwards `command-response` frames back to every controller, and broadcasts `observation` frames from the extension to all controllers — started by `npm run relay` and bound to 127.0.0.1 on port 8766 (env `CHROME_BRIDGE_PORT` overrides).",
+      "rationale": "Today the relay only exists as a NestJS service that cannot start without the whole nest-host app (Redis, Mongo, workflow engine), and it binds every network interface on port 8765. The standalone tool needs a relay any developer can start with one script, that binds localhost only, and that does not collide with boky's relay when both run.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/relay/relay.ts",
+        "tools/chrome-bridge/src/relay/relay.unit.test.ts",
+        "tools/chrome-bridge/src/relay/main.ts",
+        "tools/chrome-bridge/package.json"
+      ],
+      "changes": [
+        "Add `ws` (+ `@types/ws`) to the package dependencies.",
+        "Create `src/relay/relay.ts` exporting `startRelay({ host, port }): Promise<{ port, close(): Promise<void> }>` — port from `new WebSocketServer({ host: '127.0.0.1', port })`; explicitly pass `host` (boky's relay omits it and therefore listens on 0.0.0.0). Port the routing from `services/nest-host/src/bridge-relay/bridge-relay.service.ts`: role fixed by the first `hello` frame (`role === 'extension'` → extensions set, anything else → controllers set); `command` → all extension sockets; `command-response` and `observation` → all controller sockets; parse incoming text with `JSON.parse` → `unknown` → a hand-written frame type guard from the protocol module (no `as` casts); silently drop malformed JSON and unknown kinds; remove sockets from their set on close. Drop the three `dashboard-*` kinds and the pending-request machinery entirely.",
+        "Create `src/relay/main.ts` (the process entry): read `CHROME_BRIDGE_PORT` (default 8766), call `startRelay`, log `chrome-bridge relay listening on ws://127.0.0.1:<port>`; add `\"relay\": \"tsx src/relay/main.ts\"` (or `node dist/relay/main.js` after `tsc` build — pick one; same convention the MCP server phase in this horizon will reuse) to package.json scripts.",
+        "Write `relay.unit.test.ts` that starts the relay on port 0 (ephemeral), connects a fake extension socket and two controller sockets with real `ws` clients, and asserts: a `command` from controller A reaches the extension and not controller B; a `command-response` from the extension reaches both controllers; an `observation` reaches both controllers; a malformed frame is dropped without killing the connection; `close()` shuts the server down. Use event promises, no sleeps."
+      ],
+      "boundedContext": "Relay",
+      "layer": "infrastructure",
+      "blastRadius": "small",
+      "inputs": [
+        "services/nest-host/src/bridge-relay/bridge-relay.service.ts (routing logic to port, minus dashboard kinds)",
+        "tools/chrome-bridge/src/protocol/types.ts (frame kinds and type guard)",
+        "ws package"
+      ],
+      "expectedResult": "`tools/chrome-bridge/src/relay/relay.ts` with a passing routing test; `npm run relay` prints the listening line on ws://127.0.0.1:8766.",
+      "dependsOn": [
+        "scaffold-chrome-bridge-package-protocol"
+      ],
+      "rubric": [
+        {
+          "id": "routing-fanout-correctness",
+          "label": "Frame routing matches the role-based fan-out contract",
+          "ruleStatement": "Given one extension socket and N controller sockets identified by their first `hello` frame, `command` frames go only to extension sockets, and `command-response` plus `observation` frames go to every controller socket and never back to the extension. 10: the test suite covers both directions plus the no-echo cases and a late-joining controller; 8: the three happy paths are asserted with real `ws` clients; below 7: any direction is untested or a frame leaks to the wrong role.",
+          "passCriteria": [
+            "`tools/chrome-bridge/src/relay/relay.unit.test.ts` starts the relay on port 0 and connects one fake extension socket and at least two controller sockets using the real `ws` client, each sending a `hello` frame first.",
+            "A `command` sent by controller A is asserted to arrive at the extension socket AND asserted NOT to arrive at controller B (the negative assertion is present, e.g. a message listener on B that fails the test or a bounded 'no message' check via a resolved competing promise).",
+            "A `command-response` and an `observation` sent by the extension are each asserted to arrive at both controllers, and asserted NOT to be echoed back to the extension socket.",
+            "A controller that connects after the extension has already sent frames still receives subsequent `observation` frames (late-join case).",
+            "A socket that sends a data frame before any `hello` frame is either ignored or treated per the documented default, and the test states which; it does not crash the server."
+          ],
+          "failureExamples": [
+            "The test asserts controller A's command reaches the extension but never asserts controller B did not receive it — a relay that broadcasts every frame to every socket passes the suite.",
+            "`command-response` is forwarded to all sockets including the extension, so the extension receives its own reply back; no test catches it because only controller-side listeners are attached.",
+            "Role is decided by the socket's most recent `hello` instead of its first, so a controller that later sends `hello` with role extension silently becomes an extension; test only sends one hello per socket so this passes unnoticed.",
+            "A frame arriving before `hello` throws inside the message handler and closes that socket because the role lookup returns undefined."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "malformed-input-resilience",
+          "label": "Malformed and unknown frames are dropped without harming the connection or server",
+          "ruleStatement": "Non-JSON text, JSON that fails the frame type guard, unknown `kind` values, and binary frames are silently discarded; the sending socket stays open and other sockets keep receiving traffic. Parsing goes `JSON.parse` -> `unknown` -> hand-written guard with no `as` casts. 10: all four malformed classes are tested and a subsequent valid frame on the same socket still routes; 8: non-JSON and unknown-kind are tested with the socket verified open afterwards; below 7: a malformed frame can throw out of the `message` handler or the guard uses casts.",
+          "passCriteria": [
+            "After a controller sends the literal text `not json{`, the test asserts that socket's `readyState` is still OPEN and that a following valid `command` from the same socket still reaches the extension.",
+            "A well-formed JSON object with an unrecognized `kind` (e.g. `{\"kind\":\"dashboard-state\"}`) and a JSON object missing required fields (e.g. `{\"kind\":\"command\"}` with no `data`) are both dropped: no socket receives them and no process-level `uncaughtException`/`unhandledRejection` fires during the test (attach a listener that fails the test).",
+            "`grep -n ' as ' tools/chrome-bridge/src/relay/relay.ts` shows no type assertions on the parsed message; the parse result is typed `unknown` and narrowed by the guard imported from the protocol module.",
+            "Sending a binary frame (a `Buffer`) does not close the socket or throw; the test either covers it or the code path visibly treats non-string data as a drop."
+          ],
+          "failureExamples": [
+            "`JSON.parse` is wrapped in try/catch but the type guard is only applied to `kind`; a `command` frame with `data: null` passes the guard and the forward code dereferences `data.id`, throwing inside the `ws` message listener and emitting an unhandled error event that closes the socket.",
+            "The `message` handler calls `raw.toString()` on every frame, so a binary frame is parsed as garbage bytes and silently works — but a `ws` frame with `isBinary=true` carrying valid JSON is forwarded as text, breaking clients that expect binary passthrough; no test covers binary at all.",
+            "The guard is written as `(m as Frame).kind === 'command'` to satisfy the compiler, which lint rejects under `no-restricted-syntax`.",
+            "Malformed frames are logged with `console.error` including the full payload, so a flood of garbage from one controller spams the relay's stdout and hides the listening line."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "loopback-bind-and-port-config",
+          "label": "Relay binds 127.0.0.1 only on a configurable port that defaults to 8766",
+          "ruleStatement": "The server is created with an explicit `host: '127.0.0.1'` so it is not reachable on other interfaces, the port defaults to 8766 and is overridden by `CHROME_BRIDGE_PORT`, and a non-numeric or out-of-range env value fails loudly instead of silently falling back. 10: bind address is asserted in a test and invalid env is rejected with a clear message; 8: the explicit host is in code and default/override behaviour is shown by the log line; below 7: the host option is omitted (inherits 0.0.0.0) or the port is hard-coded.",
+          "passCriteria": [
+            "`tools/chrome-bridge/src/relay/relay.ts` passes `host` explicitly into `new WebSocketServer({ host, port })`; the `main.ts` entry passes `'127.0.0.1'`.",
+            "Running `npm run relay` (from `tools/chrome-bridge`) prints exactly `chrome-bridge relay listening on ws://127.0.0.1:8766`; running `CHROME_BRIDGE_PORT=8799 npm run relay` prints the same line with 8799.",
+            "With the relay running, `lsof -nP -iTCP:8766 -sTCP:LISTEN` (or `netstat -an`) shows the listener on `127.0.0.1:8766`, not `*:8766` or `0.0.0.0:8766`.",
+            "The unit test reads the ephemeral port back from the `startRelay` result (`address().port`) rather than assuming a fixed number, and the returned `port` field equals what the server actually bound.",
+            "`CHROME_BRIDGE_PORT=abc npm run relay` exits non-zero with a message naming the variable, rather than starting on NaN/8766."
+          ],
+          "failureExamples": [
+            "`startRelay` accepts `host` in its options type but `main.ts` calls `startRelay({ port })`, so the `ws` server defaults to all interfaces exactly like boky's relay; the log line still says 127.0.0.1 so nobody notices.",
+            "`Number(process.env.CHROME_BRIDGE_PORT ?? 8766)` yields `NaN` for a typo, `ws` treats NaN as port 0, and the relay starts on a random port while the log line prints `ws://127.0.0.1:NaN`.",
+            "The port is resolved once at module import time in `relay.ts`, so the test cannot pass port 0 without also setting the env var, and the test suite therefore pins a fixed port that collides when vitest runs files in parallel.",
+            "The returned `port` is the requested value, not `server.address().port`, so with port 0 it returns 0 and the test has to reach into internals to find the real port."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "lifecycle-and-close-safety",
+          "label": "Start/close lifecycle is clean and repeatable",
+          "ruleStatement": "`startRelay` resolves only after the server is actually listening, rejects if the port is already taken, and `close()` terminates every connected socket, releases the port, and resolves; the socket sets shrink on client disconnect so no dead sockets are written to. 10: start-fails-on-busy-port, socket-set cleanup after client disconnect, and close-then-restart on the same port are all tested; 8: close resolves and the port is reusable in a test; below 7: `close()` resolves before the port is free or a closed client socket is still targeted by forwarding.",
+          "passCriteria": [
+            "A test calls `startRelay({ host, port: 0 })`, then `close()`, then `startRelay` again on the port the first instance reported, and the second start succeeds (proves the listener was released, not just `wss.close()` with hanging clients).",
+            "A test starts two relays on the same explicit port; the second `startRelay` call rejects (does not hang or resolve) with the `EADDRINUSE` error surfaced.",
+            "After a controller disconnects, a subsequent `observation` from the extension does not throw and the relay does not attempt `send` on the closed socket (assert via an `error` listener on the process or by inspecting that no `ws` 'WebSocket is not open' error is emitted).",
+            "`close()` returns a Promise that resolves after all client sockets have emitted `close` on the client side — the test awaits both the server promise and the client `close` events without a timeout-based sleep.",
+            "The vitest file has no `setTimeout`-based waits and finishes in under a few seconds; every wait is an event promise (`once(ws, 'open')`, message promises)."
+          ],
+          "failureExamples": [
+            "`startRelay` resolves synchronously after constructing `WebSocketServer` without awaiting the `listening` event, so a test connecting immediately gets `ECONNREFUSED` intermittently under load.",
+            "`close()` calls `wss.close(cb)` only; per `ws` semantics the callback fires only after all clients disconnect, so with a still-connected fake extension the promise never resolves and the test hits the vitest timeout.",
+            "Sockets are removed from the role set on `close` but not on `error`, so a client that dies abruptly stays in the set and the next `command` forward throws 'WebSocket is not open'.",
+            "A busy-port `error` event on the `WebSocketServer` is not wired to the start promise's reject, so `startRelay` on a taken port hangs forever."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "package-boundaries-and-gates",
+          "label": "Relay is boky-free, dependency-light, and passes the repo gates",
+          "ruleStatement": "The relay imports only `ws`, Node built-ins, and `tools/chrome-bridge/src/protocol/*`; nothing from `services/nest-host`, `extension/`, or NestJS; and the new files pass tsc, eslint (max-warnings 0), and the package's own tests, with every export consumed. 10: every exported symbol has an importer and is named in the test, `package.json` lists only `ws` as a runtime dependency, and boky's `npm run verify:fast` is unchanged-green; 8: gates pass and the imports are clean; below 7: a gate is red or a boky/nest import sneaks in.",
+          "passCriteria": [
+            "`grep -rn \"from '\" tools/chrome-bridge/src/relay/` shows only `ws`, `node:*`, and relative `../protocol/` imports — no `@nestjs/*`, no `services/nest-host`, no `extension/src`.",
+            "`tools/chrome-bridge/package.json` `dependencies` contains `ws` (and `tsx` only if the chosen run convention uses it); `@types/ws` is under `devDependencies`; no `@nestjs/*`, `rxjs`, or `class-validator` entries.",
+            "From `tools/chrome-bridge`: `tsc --noEmit` and `eslint . --max-warnings 0` exit 0; `vitest run src/relay` passes with the routing test file.",
+            "Every exported symbol in `tools/chrome-bridge/src/relay/` has an importer (`startRelay` is imported by `main.ts` and named in `relay.unit.test.ts`); check by grep, because the repo's dead-export hook only scans `extension/src` and will not catch it for you.",
+            "`npm run verify:fast` from the repo root is still green after the change (boky's own pipeline untouched)."
+          ],
+          "failureExamples": [
+            "The relay imports the `RelayFrame` type from `services/nest-host/src/bridge-relay/...` because it was quickest, silently making the standalone package depend on nest-host's tsconfig paths.",
+            "`relay.ts` exports a helper `parseFrame` and the `RelaySockets` type for readability; neither is imported elsewhere, leaving dead exports the package convention forbids.",
+            "`ws` is added under `devDependencies` because the developer only thought about tests, so a clean `npm install --production` of the tool cannot start the relay.",
+            "The test file uses `relay.int.test.ts` reasoning it does real I/O, but the phase's file list and the repo's `.testguard.json` catch-all expect `.unit.test.ts`, and the coverage guard reports `relay.ts` as untested."
+          ],
+          "minScore": 7
+        }
+      ],
+      "healerHint": "The most common miss is `close()` hanging or the negative routing assertions being absent — make `close()` terminate all tracked client sockets before awaiting `wss.close`, and add explicit 'controller B did not receive' and 'extension did not receive its own response' checks using a competing resolved promise instead of a sleep."
+    },
+    {
+      "id": "standalone-extension-page-actions",
+      "order": 2,
+      "name": "Add standalone extension executing page actions",
+      "goal": "Create the standalone MV3 extension (own manifest named 'Chrome Bridge', no boky code) whose service worker dials the Relay at ws://127.0.0.1:8766 on startup, sends `hello role=extension`, keeps the MV3 service worker alive with a `chrome.alarms` heartbeat, reconnects on a fixed delay, and dispatches every incoming `command` frame to a real handler for each of the eight `PAGE_ACTIONS` — `ping`, `navigateTo`, `getPageText`, `readPage`, `findElement`, `clickElement`, `typeText`, `captureTab` — acting on the active tab of the current window via `chrome.scripting.executeScript` / `chrome.tabs`, with an optional `maxChars` truncation on `readPage`/`getPageText` (default 200 000 characters, response reports `truncated: true`), replying with a matching `command-response`; built by Vite into a loadable `dist/extension/` folder.",
+      "rationale": "The browser side of the bridge is currently a service worker entangled with boky's providers, sessions, and dashboard messaging, hardcoded to boky's port, and the eight page actions a terminal AI tool needs already have working boky-free implementations buried in a file full of boky-specific commands. A clean extension that loads unpacked in any Chrome profile, proves the connection loop (connect, keepalive, reconnect, request/response correlation), and answers all eight actions from day one means there is no intermediate build with unusable stub handlers. Copying only those handlers behind a small chrome-API port makes them unit-testable with fakes and keeps large page HTML from overflowing MCP client message limits.",
+      "filesAffected": [
+        "tools/chrome-bridge/extension/manifest.json",
+        "tools/chrome-bridge/src/extension/service-worker.ts",
+        "tools/chrome-bridge/src/extension/bridge-client.ts",
+        "tools/chrome-bridge/src/extension/bridge-client.unit.test.ts",
+        "tools/chrome-bridge/src/extension/keepalive.ts",
+        "tools/chrome-bridge/src/extension/keepalive.unit.test.ts",
+        "tools/chrome-bridge/src/extension/command-dispatch.ts",
+        "tools/chrome-bridge/src/extension/command-dispatch.unit.test.ts",
+        "tools/chrome-bridge/src/extension/chrome-ports.ts",
+        "tools/chrome-bridge/src/extension/page-actions.ts",
+        "tools/chrome-bridge/src/extension/page-actions.unit.test.ts",
+        "tools/chrome-bridge/vite.extension.config.ts",
+        "tools/chrome-bridge/package.json"
+      ],
+      "changes": [
+        "Create `extension/manifest.json` (hand-written, MV3) from `extension/public/manifest.json`: name 'Chrome Bridge', permissions `[tabs, activeTab, scripting, storage, alarms]`, host_permissions `<all_urls>`, background `{ service_worker: 'service-worker.js', type: 'module' }` (a BUILT JS path — no @crxjs). No `action`, no content scripts, no web_accessible_resources in this horizon.",
+        "Create `vite.extension.config.ts`: plain Vite build (no @crxjs) with rollup input `src/extension/service-worker.ts`, output `dist/extension/service-worker.js` as a single ES bundle, and a copy of `extension/manifest.json` into `dist/extension/` (vite-plugin-static-copy or a 10-line closeBundle hook). Add `\"build:extension\": \"vite build -c vite.extension.config.ts\"` to package.json; add `@types/chrome` and `vite` devDependencies.",
+        "Create `src/extension/bridge-client.ts` by porting `extension/src/infrastructure/bridge/bridge-client.ts` and cutting the dashboard-request/response/broadcast half (the only part that imports boky's messaging layer): `createBridgeClient({ url, socketFactory, onCommand, reconnectDelayMs })` that dials eagerly (not lazily on first use — the standalone extension has nothing else to trigger a dial), sends `hello role=extension` on open, parses frames via the protocol type guard, calls `onCommand(command)` and sends the returned `CommandResponse`, buffers outbound frames in a bounded outbox until open, and reconnects after a fixed 2000ms delay. Default URL constant `ws://127.0.0.1:8766`.",
+        "Copy `extension/src/infrastructure/bridge/keepalive.ts` verbatim (it is boky-free) as `src/extension/keepalive.ts`: `chrome.alarms.create('bridge-keepalive', { periodInMinutes: 0.5 })` with the injectable `AlarmsPort` and idempotency guard.",
+        "Create `src/extension/command-dispatch.ts`: `createCommandDispatcher(handlers: Record<PageAction, Handler>)` returning `(command) => Promise<CommandResponse>`; unknown action → `{ id, error: 'unknown action <x>' }`; thrown handler errors → `{ id, error: message }`. Typing the handler map as `Record<PageAction, Handler>` means the compiler refuses to build if an action from `PAGE_ACTIONS` has no handler — this is the mechanical parity check for the extension side.",
+        "Create `src/extension/chrome-ports.ts`: a narrow `ChromePorts` interface `{ queryActiveTab(): Promise<{ id, windowId }>, executeScript<T>(tabId, func, args): Promise<T>, updateTab(tabId, { url }): Promise<void>, captureVisibleTab(windowId): Promise<string> }` plus `chromeCommandPorts(): ChromePorts` implemented over `chrome.tabs.query({ active: true, currentWindow: true })`, `chrome.scripting.executeScript`, `chrome.tabs.update`, `chrome.tabs.captureVisibleTab(windowId, { format: 'png' })`. Justification for the interface: the unit tests are the real second implementation (fakes) — the service worker cannot run under vitest.",
+        "Create `src/extension/page-actions.ts` exporting `pageActionHandlers(ports: ChromePorts): Record<PageAction, Handler>` with all eight actions real: `ping` returns `{ ok: true, ts }`; the other seven copy the `case` bodies from `extension/src/background/command-handler.ts` lines ~391-485 verbatim in behaviour: readPage = `document.documentElement.outerHTML`; getPageText = `document.body.innerText`; findElement = `querySelectorAll(selector).length` → `{ found, matches }`; clickElement = `HTMLElement.click()` → `{ clicked }`; typeText = set `.value` + dispatch `input`/`change` (or `textContent` + `input` when contentEditable) → `{ typed }`; navigateTo = `updateTab(tabId, { url })`; captureTab = `captureVisibleTab(windowId)` → `{ dataUrl }`. Validate `params` with hand-written guards (selector is a non-empty string, url is a string, …) and return `{ error }` on bad params instead of throwing.",
+        "Apply `maxChars` (from params, default 200000) to readPage and getPageText results: slice and add `truncated: true, totalChars` to the result; captureTab is left uncapped here (the MCP server phase decides how to present the PNG).",
+        "Create `src/extension/service-worker.ts` wiring: start keepalive, create the dispatcher over `pageActionHandlers(chromeCommandPorts())`, create the bridge client with `onCommand = dispatcher`, `socketFactory = (url) => new WebSocket(url)`.",
+        "Unit tests with fake sockets / fake alarms / a fake `ChromePorts` (no real network, no real Chrome): bridge-client sends hello on open, routes a command to onCommand and writes the response with the same id, buffers before open, reconnects after close; keepalive creates the alarm once; dispatcher answers ping and errors on unknown action; page-actions per action — correct tabId/windowId routing, param validation errors, truncation flag and length, `findElement` zero-match shape.",
+        "Manual check recorded in the phase notes: `npm run relay` in one terminal, load `dist/extension/` unpacked in chrome://extensions, confirm the relay logs an extension `hello`, then pipe a `{\"kind\":\"command\",\"data\":{\"id\":\"1\",\"action\":\"getPageText\",\"params\":{}}}` frame through a throwaway `ws` client (or `extension/devtools/tail-logs.mjs` with `BRIDGE_URL=ws://127.0.0.1:8766`) and confirm the active tab's text comes back."
+      ],
+      "boundedContext": "Extension",
+      "layer": "infrastructure",
+      "blastRadius": "medium",
+      "inputs": [
+        "extension/src/infrastructure/bridge/bridge-client.ts + keepalive.ts (code to port, minus dashboard half)",
+        "extension/src/background/command-handler.ts (the seven page-action case bodies and the ports pattern) + extension/public/manifest.json (manifest baseline)",
+        "tools/chrome-bridge/src/protocol/ (frames, PAGE_ACTIONS, per-action param/result types)",
+        "Relay from the previous phase for the manual connection check"
+      ],
+      "expectedResult": "`tools/chrome-bridge/dist/extension/` (built by `npm run build:extension`) loads unpacked in Chrome, connects to the running relay, and answers page-action commands (`ping`, `getPageText`, …) on a real tab with matching `command-response` frames, with all eight handlers covered by passing fake-port unit tests.",
+      "dependsOn": [
+        "standalone-websocket-relay"
+      ],
+      "rubric": [
+        {
+          "id": "boky-free-loadable-build",
+          "label": "Built extension is self-contained, boky-free, and loads unpacked",
+          "ruleStatement": "`npm run build:extension` in tools/chrome-bridge produces a dist/extension/ folder that Chrome accepts unpacked with zero manifest warnings, whose service-worker.js is one ES bundle with no imports from extension/src, no boky vocabulary, and a manifest carrying exactly the five permissions the phase names. 10 = build is reproducible byte-for-byte on a second run and the bundle contains no string from boky's domain (provider, story, session, dashboard); 8 = loads clean and grep is clean but a rebuild leaves a stale file or an unused permission slipped in; below 7 = Chrome shows a manifest error or the bundle reaches back into extension/src.",
+          "passCriteria": [
+            "Run `npm run build:extension` twice from a clean tools/chrome-bridge; `ls dist/extension/` shows exactly `manifest.json` and `service-worker.js` (plus source maps if configured), and `rm -rf dist && npm run build:extension` yields the same file list.",
+            "`cat dist/extension/manifest.json` shows `\"name\": \"Chrome Bridge\"`, `manifest_version: 3`, `permissions` equal to the set {tabs, activeTab, scripting, storage, alarms} and nothing else, `host_permissions: [\"<all_urls>\"]`, `background.service_worker: \"service-worker.js\"`, `background.type: \"module\"`, and no `action`, `content_scripts`, or `web_accessible_resources` keys.",
+            "`grep -ciE 'provider|storyId|dashboard-|sessionState|boky' dist/extension/service-worker.js` returns 0, and `grep -rn 'extension/src' tools/chrome-bridge/src/extension tools/chrome-bridge/vite.extension.config.ts` returns nothing (no relative or alias import into boky's tree).",
+            "Load dist/extension/ via chrome://extensions > Load unpacked: the card shows no 'Errors' button and the service worker link opens without a red console error on startup."
+          ],
+          "failureExamples": [
+            "The Vite config uses `format: 'es'` but leaves code-splitting on, so the build emits `service-worker.js` plus a `chunk-xxxx.js`; the manifest's single-path service worker loads but the dynamic chunk 404s inside the worker context.",
+            "The port kept boky's `import type { Observation } from '../../../extension/src/...'` because it is type-only and tsc allowed it; the bundle is clean but the standalone package now breaks whenever boky's messaging types move.",
+            "manifest.json copied from extension/public/manifest.json still carries `content_scripts` or `web_accessible_resources` from boky, so Chrome warns about missing files at load."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "connection-loop-resilience",
+          "label": "Eager dial, hello, outbox, and fixed-delay reconnect are proven with fake sockets",
+          "ruleStatement": "The bridge client dials at construction, sends `{kind:'hello', role:'extension'}` as the first frame on open, holds outbound frames in a bounded outbox until open, and after any close re-dials after exactly the configured delay, re-sending hello on the new socket, with every one of these visible as a passing unit test that uses a fake socket factory and fake timers. 10 = also proves the outbox cap drops oldest, that a close during the reconnect wait does not schedule a second timer, and that `close()`/dispose cancels the pending reconnect; 8 = the four core behaviours are tested but the double-timer and dispose cases are not; below 7 = reconnect or hello-on-reopen is untested or the client only dials on first send.",
+          "passCriteria": [
+            "In bridge-client.unit.test.ts, a test constructs the client with a fake socketFactory and asserts the factory was called once BEFORE any command or send happens (eager dial).",
+            "A test fires the fake socket's `open` and asserts the first message written is a hello frame with `role: 'extension'`; a second test sends a frame before `open`, asserts nothing was written, fires `open`, and asserts hello is written first followed by the buffered frame.",
+            "A test fires `close`, advances fake timers by (delay - 1) ms and asserts socketFactory was still called once, then advances 1 ms and asserts it was called twice and hello is written again on the second socket.",
+            "A test fires `close` twice in a row (or `error` then `close`) and asserts only one reconnect socket is created after the delay; a test calls the client's stop/dispose and asserts advancing timers creates no new socket.",
+            "Reading bridge-client.ts, the outbox has a numeric cap (a named constant), and no `setTimeout` for reconnect is scheduled while a previous one is pending."
+          ],
+          "failureExamples": [
+            "The socket emits `error` followed by `close` (the normal WebSocket sequence when the relay is down); both handlers call scheduleReconnect, so two timers fire and two sockets are dialed every cycle, doubling connections on the relay.",
+            "The port keeps boky's lazy `ensureSocket()` called from `send()`; the standalone worker has nothing to send until a command arrives, so the extension never appears at the relay until it is already too late.",
+            "Reconnect timing is tested with a real 2000ms `setTimeout` and `await sleep(2100)`, making the test slow and timing-dependent rather than using fake timers."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "correlated-responses-and-dispatch-errors",
+          "label": "Every command frame gets exactly one command-response with the same id, including failures",
+          "ruleStatement": "For any incoming `command` frame the extension writes exactly one `command-response` frame whose `id` equals the command's `id`, carrying either `result` or `error` (never both, never neither) — for unknown actions, malformed params, handler exceptions, and rejected chrome API promises alike. 10 = also verified that a non-command / malformed frame is ignored without a response and without crashing the socket handler, and that a handler that throws a non-Error value still yields a string `error`; 8 = unknown action, bad params, and thrown Error are covered; below 7 = a thrown or rejected handler leaves the controller waiting forever.",
+          "passCriteria": [
+            "command-dispatch.unit.test.ts has a test sending `{ id: 'x', action: 'notAnAction' }` and asserting the returned object is `{ id: 'x', error: <string containing 'notAnAction'> }` with no `result` key.",
+            "A test registers a handler that throws `new Error('boom')` and asserts the response is `{ id, error: 'boom' }`; a second test throws a plain string or object and asserts `error` is still a string.",
+            "bridge-client.unit.test.ts has a test that delivers a command frame over the fake socket and asserts the frame written back has `kind: 'command-response'` and `data.id` equal to the delivered command id, and that delivering `{ kind: 'hello' }` or invalid JSON writes nothing back and the socket stays usable for the next command.",
+            "For each of the seven non-ping actions, page-actions.unit.test.ts has at least one test where the fake ChromePorts rejects (e.g. `executeScript` rejects with 'Cannot access a chrome:// URL') and asserts the response carries that message in `error` rather than the test's promise rejecting."
+          ],
+          "failureExamples": [
+            "`onCommand` is awaited inside the socket `message` handler without a try/catch; a rejection from `chrome.tabs.captureVisibleTab` on a chrome:// tab becomes an unhandled rejection in the worker and no response is ever sent, so the controller's request hangs until its own timeout.",
+            "The dispatcher catches errors and returns `{ id, error }`, but the unknown-action branch returns `{ id, result: undefined, error }` — the MCP side later treats presence of `result` as success.",
+            "Invalid JSON on the socket throws inside `JSON.parse` in the message listener, which under MV3 kills the listener for subsequent messages until the socket reconnects."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "page-action-fidelity",
+          "label": "Eight handlers act on the active tab with correct routing, param guards, and truncation",
+          "ruleStatement": "Each PAGE_ACTIONS handler targets the active tab's `id` (or `windowId` for captureTab) obtained from `queryActiveTab`, validates its params by hand and returns `{ error }` on bad input without calling any chrome port, returns the exact result shapes named in the phase (`{found, matches}`, `{clicked}`, `{typed}`, `{navigated}` or void-equivalent, `{dataUrl}`, `{ok, ts}`), and applies `maxChars` (default 200000) to readPage/getPageText with `truncated` and `totalChars` in the response. 10 = truncation is tested at the exact boundary (length == maxChars is not truncated, length == maxChars+1 is), `maxChars` of 0/negative/non-number falls back to the default, typeText covers both `.value` inputs and contentEditable, and the no-active-tab case returns an error for all seven; 8 = every action has a happy-path and a bad-param test and truncation is tested for one over-limit string; below 7 = an action is wired to the wrong tab field or truncation is silent.",
+          "passCriteria": [
+            "page-actions.unit.test.ts contains, for each of the eight action names, at least one test whose name includes the action name (grep the test file for `'ping'`, `'navigateTo'`, ... `'captureTab'`).",
+            "A test for captureTab asserts the fake `captureVisibleTab` was called with the `windowId` returned by the fake `queryActiveTab` (not the tab id); tests for the executeScript-based actions assert the fake `executeScript` received the tab `id`.",
+            "Tests for findElement, clickElement, typeText, navigateTo call the handler with `params: {}` and with `params: { selector: '' }` (or `url: ''`) and assert an `error` string is returned AND the fake `executeScript`/`updateTab` was never called.",
+            "A truncation test feeds a fake `executeScript` returning a string longer than a small `maxChars` (e.g. 10) and asserts `result.text.length === 10`, `result.truncated === true`, `result.totalChars === <original length>`; a companion test with a string of exactly `maxChars` asserts `truncated` is false or absent.",
+            "A test for findElement with a fake returning 0 matches asserts `{ found: false, matches: 0 }`; a test with `maxChars` omitted and a 200001-character string asserts truncation at 200000."
+          ],
+          "failureExamples": [
+            "captureTab is wired to `queryActiveTab().id` and passed to `captureVisibleTab`, which accepts a windowId; it works by coincidence in a fresh profile where tab id and window id are both 1 and silently captures the wrong window otherwise.",
+            "Truncation is applied as `text.slice(0, maxChars)` but `truncated` is computed after slicing as `text.length > maxChars`, so it is always false; or `totalChars` reports the post-slice length.",
+            "The `maxChars` guard accepts `params.maxChars` as `number` without checking finiteness, so a controller sending `maxChars: 0` gets an empty page and `truncated: true` instead of the default.",
+            "typeText sets `.value` and dispatches `input` but not `change`, or dispatches the events with `bubbles: false`, so React-controlled inputs never see the text — the fake-port unit test cannot catch this, but the injected function's source (visible in page-actions.ts) must show `new Event('input', { bubbles: true })` and `change`."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "keepalive-and-worker-wiring",
+          "label": "Keepalive alarm is idempotent and the service worker wires all three pieces at top level",
+          "ruleStatement": "keepalive.ts registers the `bridge-keepalive` alarm with `periodInMinutes: 0.5` exactly once regardless of how many times it is called, and service-worker.ts — at module top level, not inside `onInstalled`/`onStartup` — installs keepalive, builds the dispatcher over `pageActionHandlers(chromeCommandPorts())`, and constructs the bridge client with the real `WebSocket` factory and the default `ws://127.0.0.1:8766` URL. 10 = the alarm listener ignores alarms with other names (tested), and manual notes record the relay logging an extension hello within ~2s of load and again within ~5s after killing the worker from chrome://serviceworker-internals; 8 = idempotency and wiring are present and tested but the recovery-after-kill check was not recorded; below 7 = wiring lives inside a lifecycle event so a worker that wakes from an alarm never redials.",
+          "passCriteria": [
+            "keepalive.unit.test.ts calls the install function twice with a fake AlarmsPort and asserts `create` was called exactly once with `('bridge-keepalive', { periodInMinutes: 0.5 })`; a test invokes the registered listener with `{ name: 'other' }` and asserts nothing throws or dials.",
+            "Reading service-worker.ts, the three calls (keepalive install, dispatcher creation, bridge client creation) execute at module top level; none are inside `chrome.runtime.onInstalled` or `onStartup` callbacks.",
+            "service-worker.ts passes `socketFactory: (url) => new WebSocket(url)` and does not hardcode 8765 anywhere; `grep -rn 8765 tools/chrome-bridge/src/extension` returns nothing.",
+            "Phase notes (in the ledger row's `notes` or a NOTES section of tools/chrome-bridge/README.md) record the manual check: relay running, extension loaded, relay log line showing the extension hello, and a getPageText frame sent via a throwaway ws client returning the active tab's text — with the command id echoed in the response."
+          ],
+          "failureExamples": [
+            "The bridge client is created inside `chrome.runtime.onStartup`; when Chrome suspends the idle worker and the alarm wakes it, top-level code re-runs but onStartup does not fire, so the socket is never re-established after the first suspension.",
+            "keepalive.ts is copied verbatim including its module-level `installed` flag, but the Vite bundle inlines it into a scope that re-evaluates on every alarm wake — harmless here, but the test suite calls install in two tests without the reset helper and the second test's `create` assertion passes vacuously because the alarm was never created.",
+            "The manual check was run with `BRIDGE_URL` pointed at boky's 8765 relay, so the success recorded in notes actually exercised boky's extension, not the new one."
+          ],
+          "minScore": 7
+        }
+      ],
+      "healerHint": "The most likely miss is the connection loop — a rejected handler or an error+close pair leaving the controller hanging or double-dialing — so wrap onCommand in try/catch that always writes a command-response with the same id, guard scheduleReconnect with a pending-timer check, and cover both with fake-socket, fake-timer tests before touching the manual Chrome check."
+    },
+    {
+      "id": "controller-relay-client",
+      "order": 3,
+      "name": "Add controller client for relay commands",
+      "goal": "Implement the Node-side Controller client: connects to the Relay (URL from `CHROME_BRIDGE_URL`, default ws://127.0.0.1:8766), sends `hello role=controller`, exposes `sendCommand(action, params, { timeoutMs })` that returns a promise resolved by the `command-response` with the matching id (ids are `crypto.randomUUID()` strings), rejects on a 30s timeout or when the connection drops, and reconnects with exponential backoff 1s→15s.",
+      "rationale": "The MCP server (next phase) needs a typed, tested way to send a command and await its reply over the relay; boky has this logic only as an untyped class inside its MCP script, with a hardcoded URL and integer ids that would collide between two controllers. Isolating it lets its correlation/timeout/reconnect behaviour be tested against the real relay without Chrome.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/controller/controller-client.ts",
+        "tools/chrome-bridge/src/controller/controller-client.unit.test.ts"
+      ],
+      "changes": [
+        "Create `src/controller/controller-client.ts` porting `BridgeClient` from `extension/devtools/extension-mcp.mjs` to typed TS: `createControllerClient({ url, timeoutMs = 30000 })` with `connect()`, `sendCommand<A extends PageAction>(action: A, params): Promise<CommandResponse>`, `onObservation(cb)`, `close()`; pending map keyed by string id; `crypto.randomUUID()` ids; parse frames via the protocol type guard; reject all pending with 'Bridge connection lost' on close; exponential reconnect 1000ms doubling to a 15000ms cap; read the URL default from `process.env.CHROME_BRIDGE_URL ?? 'ws://127.0.0.1:8766'` in a small exported `resolveBridgeUrl()` helper.",
+        "Write `controller-client.unit.test.ts` using the real relay from `src/relay/relay.ts` on an ephemeral port plus a fake extension `ws` socket that echoes `command-response` frames: a command resolves with the response for its id; two concurrent commands with different ids resolve independently; a command with no reply rejects after `timeoutMs` (use a short test timeout value, do not bump defaults); closing the relay rejects pending commands; observations reach `onObservation`."
+      ],
+      "boundedContext": "Controller client",
+      "layer": "infrastructure",
+      "blastRadius": "small",
+      "inputs": [
+        "extension/devtools/extension-mcp.mjs BridgeClient class (correlation/timeout/reconnect logic to port)",
+        "tools/chrome-bridge/src/relay/relay.ts (real relay for the test)",
+        "tools/chrome-bridge/src/protocol/ (frames, PageAction)"
+      ],
+      "expectedResult": "`tools/chrome-bridge/src/controller/controller-client.ts` with a passing test that round-trips commands through the real relay and a fake extension socket.",
+      "dependsOn": [
+        "standalone-websocket-relay"
+      ],
+      "rubric": [
+        {
+          "id": "response-correlation-by-id",
+          "label": "Command/response correlation by UUID id",
+          "ruleStatement": "Each sendCommand resolves or rejects only with the command-response frame carrying its own id; ids are crypto.randomUUID() strings and the pending map is keyed by that string. 10: concurrent, out-of-order, duplicate, and unknown-id responses are all handled and tested; 8: concurrent commands with distinct ids resolve correctly and the pending entry is removed on settle; below 7: any cross-talk between commands or integer/counter ids.",
+          "passCriteria": [
+            "grep controller-client.ts for `randomUUID` and confirm no `nextId`/counter-based id remains; the pending map's key type is string.",
+            "The test sends two commands before either reply arrives and the fake extension replies in REVERSE order; assert each promise resolves with the payload whose id matches its own request.",
+            "A command-response whose `data.error` is set rejects the matching promise with that error message, and the pending map no longer contains the id afterwards (inspect via a test-visible `pendingCount()` or equivalent, or assert a second reply with the same id is ignored without throwing).",
+            "A command-response with an id no controller sent (or a malformed frame that fails the protocol type guard) is ignored: the test sends one and asserts the process emits no unhandled error and later commands still work."
+          ],
+          "failureExamples": [
+            "Client ported faithfully but keeps `this.nextId++` integer ids, so two MCP servers pointed at the same relay collide on id 1.",
+            "Responses tested only in send order; a reversed-order reply reveals the client resolves the oldest pending promise rather than the matching id.",
+            "A duplicate or unknown-id response throws inside the message handler, which crashes the ws listener and silently kills all future replies.",
+            "On `data.error` the promise rejects but the entry stays in the pending map, so it is rejected a second time on connection close (unhandled rejection warning in test output)."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "timeout-and-disconnect-rejection",
+          "label": "Timeout and connection-loss rejection semantics",
+          "ruleStatement": "A command with no reply rejects after the configured timeoutMs (default 30000, overridable per call) and a dropped relay connection rejects every pending command with 'Bridge connection lost'; neither path leaks a timer or a pending entry. 10: both paths tested with fake/short timers, timers cleared on every settle path, and a late reply after timeout is a no-op; 8: both rejection paths tested with real short timeouts and pending map cleared; below 7: a rejection path is untested or a timer outlives its command.",
+          "passCriteria": [
+            "The test calls `sendCommand(action, params, { timeoutMs: <small value e.g. 50-200> })` against a fake extension that never replies and asserts rejection with a message naming the timeout; the default 30000 in the source is NOT changed to make the test pass.",
+            "Timers are cleared on resolve, on error-reject, and on connection-close: grep for `clearTimeout` on each settle path; a test that resolves a command then waits longer than its timeoutMs sees no second rejection and no unhandled-rejection warning.",
+            "The test closes the relay (or the client's socket) while a command is pending and asserts rejection with 'Bridge connection lost'; after this the pending map is empty.",
+            "A reply that arrives after the timeout fired is ignored (no throw, no double-settle) — verify with a fake extension that replies after a delay greater than timeoutMs.",
+            "The test file finishes without vitest reporting open handles; `close()` on the client stops the reconnect timer so the process can exit."
+          ],
+          "failureExamples": [
+            "Timeout implemented with setTimeout but never cleared on success, so every successful command leaves a 30s live timer that keeps vitest (and the MCP server process) alive after close().",
+            "Connection-close rejects pending promises but the per-command timeout timers still fire later and call reject a second time — harmless to the promise but produces noise and hides real bugs.",
+            "Timeout test passes by bumping the vitest test timeout or by monkey-patching the default rather than passing a per-call timeoutMs.",
+            "The test closes the fake extension socket instead of the relay/controller socket; the relay stays up so the controller never sees a close event and the 'connection lost' path is never actually exercised."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "reconnect-backoff-behaviour",
+          "label": "Exponential reconnect with cap and reset",
+          "ruleStatement": "After the socket closes the client reconnects with delays 1000, 2000, 4000, 8000, 15000, 15000 ms (doubling, capped at 15000) and resets to 1000 after a successful open; on reconnect it re-sends hello role=controller; close() disables reconnection. 10: the delay sequence is asserted explicitly with fake timers and the reset-after-open is tested; 8: the delay function is exported or observable and the cap, reset, and hello-on-reconnect are covered; below 7: backoff is hardcoded/unobservable or close() still schedules a reconnect.",
+          "passCriteria": [
+            "With vi.useFakeTimers (or an injectable scheduler), drop the connection repeatedly and assert the observed delays are exactly 1000, 2000, 4000, 8000, 15000, 15000.",
+            "After a reconnect succeeds (relay restarted on the same ephemeral port), assert the fake extension/relay receives a fresh `{kind:'hello', role:'controller'}` frame and that the next disconnect waits 1000 ms, not the previous capped delay.",
+            "Call `close()` while disconnected with a reconnect scheduled; advance timers past 15000 ms and assert no new socket is opened (relay connection count unchanged).",
+            "Commands sent while disconnected reject immediately with a clear 'not connected' error rather than queueing silently or hanging until the 30s timeout."
+          ],
+          "failureExamples": [
+            "Backoff doubles correctly but reconnectDelay is reset only in the constructor, so after one long outage every later blip waits the full 15 s.",
+            "close() sets ws=null but the already-scheduled setTimeout(connect) still fires and reopens a socket, leaving a zombie controller connected to the relay after the MCP server 'shut down'.",
+            "Reconnect opens the socket but relies on the initial connect() code path to send hello, so the reconnected socket never announces its role and the relay treats it as an unknown client that gets no responses.",
+            "Backoff is implemented but the test only asserts 'reconnects eventually' with a real 1 s sleep, so the doubling and the 15 s cap are unverified."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "observations-and-url-resolution",
+          "label": "Observation delivery and CHROME_BRIDGE_URL resolution",
+          "ruleStatement": "Observation frames from the relay reach every onObservation callback (with unsubscribe), and resolveBridgeUrl() returns process.env.CHROME_BRIDGE_URL when set and 'ws://127.0.0.1:8766' otherwise. 10: multiple subscribers, unsubscribe, malformed-observation tolerance, and both env branches are tested with env restored; 8: one subscriber receives observations and both env branches are tested; below 7: observations untested or the URL default is hardcoded at the WebSocket constructor.",
+          "passCriteria": [
+            "Test: fake extension sends an `observation` frame through the relay; the callback registered via `onObservation` receives the parsed frame with the same payload; a second registered callback also receives it.",
+            "`onObservation` returns an unsubscribe function (or `offObservation` exists); after calling it the callback is not invoked for the next observation.",
+            "A unit test sets `process.env.CHROME_BRIDGE_URL` to a custom value, asserts `resolveBridgeUrl()` returns it, then deletes the var and asserts the default `ws://127.0.0.1:8766`; the env var is restored in afterEach so other tests are unaffected.",
+            "`resolveBridgeUrl` and `createControllerClient` are both exported and both imported by the test file (no dead exports) and the default port is 8766, not boky's 8765."
+          ],
+          "failureExamples": [
+            "Observations are only delivered if they arrive while a command is pending, because the message handler returns early when the pending map is empty.",
+            "Env var read at module load time (`const URL = process.env...` at top level), so the test's env override has no effect and only the default branch is really tested.",
+            "onObservation stores callbacks in an array but a callback that throws stops delivery to the remaining subscribers.",
+            "Test sets CHROME_BRIDGE_URL and never restores it, which makes the relay-based tests in the same file connect to the wrong URL when run in a different order."
+          ],
+          "minScore": 6
+        },
+        {
+          "id": "real-relay-test-hygiene",
+          "label": "Test runs against the real relay on an ephemeral port and cleans up",
+          "ruleStatement": "The unit test boots the real `src/relay/relay.ts` on port 0 (OS-assigned), attaches a fake extension `ws` socket that says hello role=extension, and tears everything down so the file is repeatable and parallel-safe. 10: every test gets a fresh relay+client via beforeEach/afterEach, passes 5x in a row and under `--fileParallelism`, with no sleeps; 8: shared relay per file with a fresh client per test, deterministic waits (await events, not sleep), clean exit; below 7: fixed port, leaked sockets, or sleep-based synchronization.",
+          "passCriteria": [
+            "grep the test for a numeric port: none present; the relay is started with port 0 and the bound address's port is read back from the server and passed into `createControllerClient({ url })`.",
+            "The fake extension is a plain `ws` WebSocket that sends `{kind:'hello', role:'extension'}` and responds to `command` frames by echoing `{kind:'command-response', data:{id, result}}` — no import of boky's `extension/` or `services/nest-host/` code.",
+            "afterEach/afterAll closes the client, the fake extension socket, and the relay; running `npx vitest run controller-client.unit.test.ts` five times in a row passes every time and the process exits without `--forceExit`-style flags.",
+            "No `setTimeout`-based sleeps for synchronization: waits are on promises/events (`once(ws,'open')`, the command promise itself); the timeout test uses the client's own timeoutMs parameter."
+          ],
+          "failureExamples": [
+            "Test uses a fixed port like 8767; passes locally, fails when the relay integration test file in the same package runs in parallel on the same port.",
+            "Fake extension reply is sent synchronously inside the 'message' handler before the relay has registered the extension's role, so the relay drops the response and the test is flaky under load.",
+            "Relay is closed in afterAll but the client's reconnect timer fires after the relay is gone, logging connection errors and keeping the vitest worker alive for 15 s.",
+            "Test file imports `BridgeRelayModule` from services/nest-host to stand up the relay, coupling the new package to boky's Nest host and to the WorkflowEngineModule boot order."
+          ],
+          "minScore": 7
+        }
+      ],
+      "healerHint": "The most common miss is timers that outlive their command — clear the per-command timeout on every settle path (resolve, error-reject, connection-close) and cancel the scheduled reconnect in close(), then rerun the test file five times and confirm vitest exits without open handles."
+    },
+    {
+      "id": "mcp-server-page-action-tools",
+      "order": 4,
+      "name": "Add MCP server exposing page actions as tools",
+      "goal": "Implement the stdio MCP server (`npm run mcp`) that any MCP-capable terminal AI tool launches: it advertises one discrete MCP tool per `PAGE_ACTIONS` entry (`ping`, `navigateTo`, `getPageText`, `readPage`, `findElement`, `clickElement`, `typeText`, `captureTab`) with explicit JSON input schemas, forwards each call through the Controller client, returns text results as text content and `captureTab` as an MCP image content block (base64 PNG), and is registered in the root `.mcp.json` as `chrome-bridge` via a repo-relative launcher so Claude Code can use it immediately.",
+      "rationale": "Boky's MCP server exposes a single `ext_command` tool with an enum of 20 boky-specific actions and a hardcoded server name; terminal tools like Codex, Gemini CLI and Cursor handle enums inconsistently, so one clearly-described tool per action is the shape that works across clients. This phase is what finally lets a terminal AI tool drive Chrome end-to-end through the new package.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/mcp/tool-catalog.ts",
+        "tools/chrome-bridge/src/mcp/tool-catalog.unit.test.ts",
+        "tools/chrome-bridge/src/mcp/server.ts",
+        "tools/chrome-bridge/src/mcp/server.unit.test.ts",
+        "tools/chrome-bridge/src/mcp/main.ts",
+        "tools/chrome-bridge/bin/mcp.mjs",
+        "tools/chrome-bridge/package.json",
+        ".mcp.json"
+      ],
+      "changes": [
+        "Add `@modelcontextprotocol/sdk` to dependencies.",
+        "Create `src/mcp/tool-catalog.ts`: `export const TOOL_CATALOG: Record<PageAction, { description: string; inputSchema: JsonSchemaObject }>` — one entry per action with plain-English descriptions and input schemas (`navigateTo: { url }`, `findElement/clickElement: { selector }`, `typeText: { selector, text }`, `readPage/getPageText: { maxChars? }`, `ping/captureTab: {}`), plus `listTools()` deriving the MCP tool list from `PAGE_ACTIONS`. The `Record<PageAction, …>` type is the compile-time parity check on the MCP side: adding an action to `PAGE_ACTIONS` without a catalog entry fails `tsc`, mirroring what boky's regex `check-command-parity.mjs` does at runtime.",
+        "Create `src/mcp/server.ts`: `createMcpServer({ client: ControllerClient })` using the SDK's low-level `Server` (name `chrome-bridge`) with `ListToolsRequestSchema` → `listTools()` and `CallToolRequestSchema` → validate `name` with `isPageAction`, `client.sendCommand(name, args)`, map `{ error }` responses to `isError: true` text content, `captureTab` `dataUrl` to `{ type: 'image', mimeType: 'image/png', data: <base64 without the data: prefix> }`, everything else to JSON text content.",
+        "Create `src/mcp/main.ts`: build the controller client from `resolveBridgeUrl()`, connect, create the server, attach `StdioServerTransport`; never write logs to stdout (stdio is the MCP channel) — use stderr. Add `bin/mcp.mjs` as the repo-relative launcher (imports the built/tsx entry, same convention chosen in the relay phase) and `\"mcp\"` script to package.json.",
+        "Register in root `.mcp.json`: `\"chrome-bridge\": { \"type\": \"stdio\", \"command\": \"node\", \"args\": [\"tools/chrome-bridge/bin/mcp.mjs\"], \"env\": {} }` — relative path, unlike the absolute path of the existing `extension-bridge` entry, which stays untouched.",
+        "Unit tests: `tool-catalog` lists exactly `PAGE_ACTIONS` names with object schemas; `server` with a fake ControllerClient — a `getPageText` call returns text content, a `captureTab` call returns an image block, an `{ error }` response yields `isError: true`, an unknown tool name is rejected.",
+        "Manual end-to-end check recorded in the phase notes: relay running, extension loaded, restart Claude Code in this repo, call the `chrome-bridge` `getPageText` and `captureTab` tools against a real tab."
+      ],
+      "boundedContext": "MCP server",
+      "layer": "interface",
+      "blastRadius": "medium",
+      "inputs": [
+        "extension/devtools/extension-mcp.mjs (SDK wiring pattern to port)",
+        "tools/chrome-bridge/src/controller/controller-client.ts",
+        "tools/chrome-bridge/src/protocol/actions.ts (PAGE_ACTIONS drives the tool list)",
+        "Built extension + relay from earlier phases for the manual end-to-end check"
+      ],
+      "expectedResult": "`tools/chrome-bridge/src/mcp/server.ts` launched by `node tools/chrome-bridge/bin/mcp.mjs` (registered as `chrome-bridge` in `.mcp.json`) advertises the eight page-action tools and returns a real tab's text and screenshot when called from Claude Code.",
+      "dependsOn": [
+        "standalone-extension-page-actions",
+        "controller-relay-client"
+      ],
+      "compensation": "Remove the `chrome-bridge` entry from root `.mcp.json`; the package under tools/chrome-bridge/ has no other external effect and can be deleted wholesale.",
+      "rubric": [
+        {
+          "id": "tool-catalog-parity",
+          "label": "One discrete MCP tool per page action, schema-checked at compile time",
+          "ruleStatement": "The `tools/list` response advertises exactly the `PAGE_ACTIONS` names (ping, navigateTo, getPageText, readPage, findElement, clickElement, typeText, captureTab) as separate tools with object input schemas whose `required` arrays match the params each action actually needs, and the catalog type makes a missing entry a `tsc` error. 10 = every schema has `additionalProperties: false`, per-property descriptions, and the unit test asserts required-arrays per tool, not just names; 8 = names match, schemas are objects, required arrays correct; below minScore = a tool is missing/extra, or a required param is optional in the schema.",
+          "passCriteria": [
+            "Run the server with a stub client and send a `tools/list` request (or call `listTools()` in the unit test): the returned tool names, sorted, equal `PAGE_ACTIONS` sorted, with no `ext_command` umbrella tool and no boky-only actions (getStorage, getSessionState, probeProviderRouter, ...).",
+            "Open `tools/chrome-bridge/src/mcp/tool-catalog.ts`: `TOOL_CATALOG` is typed `Record<PageAction, ...>`; temporarily add a fake action to `PAGE_ACTIONS` and confirm `npm run typecheck` fails in tool-catalog.ts, then revert.",
+            "Inspect each `inputSchema`: `navigateTo` requires `url`; `findElement` and `clickElement` require `selector`; `typeText` requires both `selector` and `text`; `readPage`/`getPageText` have no required fields but declare `maxChars` as an optional integer; `ping`/`captureTab` are `{ type: 'object', properties: {} }`.",
+            "`tool-catalog.unit.test.ts` names every exported symbol from tool-catalog.ts (`TOOL_CATALOG`, `listTools`) and asserts the required-array contents per tool, not only the tool names."
+          ],
+          "failureExamples": [
+            "All eight tools are advertised but `typeText`'s schema lists `text` under `properties` without adding it to `required`, so a client can call it with only a selector and the extension receives `text: undefined`.",
+            "The catalog is typed `Record<string, ...>` (or built from an array literal) so adding a ninth action to `PAGE_ACTIONS` compiles cleanly and silently ships an unadvertised action.",
+            "`listTools()` is derived from `Object.keys(TOOL_CATALOG)` rather than `PAGE_ACTIONS`, so an extra catalog entry with no extension handler is advertised to clients."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "call-result-mapping",
+          "label": "Tool call results map to the correct MCP content types and error flag",
+          "ruleStatement": "`tools/call` forwards `{name, arguments}` to `ControllerClient.sendCommand` and shapes the reply: text/JSON results become `text` content, `captureTab` becomes an `image` block with `mimeType: 'image/png'` and pure base64 data, `{ error }` replies and transport failures become `isError: true` with a readable message, and unknown tool names are rejected without hitting the client. 10 = timeouts/disconnects also surface as `isError: true` with the action name in the message and the image block strips any `data:` prefix regardless of dataUrl format; 8 = all four unit-test cases from the phase pass; below minScore = any of image-block, isError mapping, or unknown-name rejection missing.",
+          "passCriteria": [
+            "In `server.unit.test.ts` with a fake ControllerClient: a `getPageText` call resolves to `content: [{ type: 'text', text: ... }]` and no `isError` flag.",
+            "A `captureTab` call whose fake reply is `{ dataUrl: 'data:image/png;base64,AAAA' }` resolves to `content: [{ type: 'image', mimeType: 'image/png', data: 'AAAA' }]` — the `data:image/png;base64,` prefix is absent and the string is not double-encoded.",
+            "A fake reply of `{ error: 'no active tab' }` resolves (does not throw) to a result with `isError: true` and text content containing `no active tab`.",
+            "Calling an unknown tool name such as `getStorage` yields an error result/thrown MCP error and the fake client's `sendCommand` spy was never invoked.",
+            "A fake client whose `sendCommand` rejects (simulated relay timeout) yields `isError: true` rather than an unhandled promise rejection that kills the process."
+          ],
+          "failureExamples": [
+            "`captureTab` returns the full `data:image/png;base64,...` string inside `data`, which Claude Code renders as a broken image while a naive test that only checks `type === 'image'` still passes.",
+            "Error replies are returned as ordinary text content (no `isError`), so the calling AI tool treats `{\"error\":\"no active tab\"}` as a successful page read.",
+            "A rejected `sendCommand` (relay down) propagates out of the request handler; the SDK closes the connection and the client sees the server 'disappear' instead of a tool error.",
+            "The unknown-name guard runs after `sendCommand`, so boky-style actions like `getSessionState` are forwarded to the extension and only fail there."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "stdio-hygiene",
+          "label": "Nothing but MCP protocol frames on stdout",
+          "ruleStatement": "Across startup, normal operation, relay-connection failure and shutdown, the process writes only JSON-RPC frames to stdout; all diagnostics go to stderr. 10 = a test or script spawns `node tools/chrome-bridge/bin/mcp.mjs` with no relay running and asserts every stdout line parses as JSON-RPC, and the launcher has no `console.log`/banner; 8 = grep-clean source plus a manual spawn shows a silent stdout; below minScore = any non-JSON byte on stdout in any of those states.",
+          "passCriteria": [
+            "`grep -rn 'console.log\\|process.stdout' tools/chrome-bridge/src/mcp tools/chrome-bridge/bin` returns no hits outside the SDK's own transport (any logging helper writes to `process.stderr`/`console.error`).",
+            "Spawn `node tools/chrome-bridge/bin/mcp.mjs < /dev/null 2>/dev/null` with the relay stopped for ~2 seconds: stdout is empty or contains only lines starting with `{\"jsonrpc\"` — the connection-refused message must appear on stderr only.",
+            "Pipe `{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",...}` followed by `tools/list` into the process: each stdout line is a single parseable JSON object, with no ANSI colour codes, tsx/esbuild warnings, or dotenv/`[relay]` prefixes interleaved.",
+            "Node deprecation or experimental-loader warnings triggered by the launcher (e.g. from `tsx` or `--experimental-*` flags) are absent from stdout; if unavoidable, `NODE_NO_WARNINGS=1` or an equivalent is set in the launcher, not left for the user."
+          ],
+          "failureExamples": [
+            "The controller client reuses a shared `log()` helper that defaults to `console.log`, so the single `connected to ws://127.0.0.1:<port>` line lands on stdout and Claude Code reports a JSON parse error at startup.",
+            "`bin/mcp.mjs` imports via `tsx`, which prints an ExperimentalWarning to stdout under some Node versions; it works on the developer's Node but breaks under a client that pins a different Node.",
+            "On relay disconnect the client calls `console.log` from a `close` handler, so stdout is clean during the happy path (which is all that was tested) but corrupts mid-session when the relay restarts."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "mcp-json-registration-portable",
+          "label": "`.mcp.json` entry is repo-relative and leaves `extension-bridge` intact",
+          "ruleStatement": "Root `.mcp.json` gains a `chrome-bridge` stdio entry launched via a path relative to the repo root that works on a fresh clone at any location, and the pre-existing `extension-bridge` entry is byte-for-byte unchanged. 10 = the launcher also works when the client's cwd is a subdirectory (resolves relative to its own file, not `process.cwd()`) and the README shows the same snippet for other MCP clients; 8 = relative args, valid JSON, extension-bridge unchanged, launches from repo root; below minScore = absolute path containing `/Users/...`, or extension-bridge modified/removed, or invalid JSON.",
+          "passCriteria": [
+            "`git diff <base> -- .mcp.json` shows only added lines inside `mcpServers`; the `extension-bridge` block (including its absolute path) has no changed, reordered, or reformatted lines.",
+            "The `chrome-bridge` entry has `\"type\": \"stdio\"`, `\"command\": \"node\"`, and `args` equal to `[\"tools/chrome-bridge/bin/mcp.mjs\"]` (or another path that does not start with `/` and does not contain a username).",
+            "`node -e 'JSON.parse(require(\"fs\").readFileSync(\".mcp.json\",\"utf8\"))'` from the repo root exits 0.",
+            "`node tools/chrome-bridge/bin/mcp.mjs` from the repo root starts (exits only on stdin EOF, not on a module-not-found error), and `bin/mcp.mjs` resolves the entry it imports via `import.meta.url`/`fileURLToPath`, not a cwd-relative string.",
+            "The dependency `@modelcontextprotocol/sdk` is declared in `tools/chrome-bridge/package.json` (not resolved by accident from `extension/node_modules`), so the launcher works after a clean `npm install` in the package."
+          ],
+          "failureExamples": [
+            "The developer copies the `extension-bridge` block and edits it, producing a correct relative path for `chrome-bridge` but Prettier reformats the whole file so the `extension-bridge` block appears changed in the diff.",
+            "`args` is relative, but `bin/mcp.mjs` does `import('./dist/mcp/main.js')` where `dist/` is only produced by a build nobody documents, so a fresh clone gets `ERR_MODULE_NOT_FOUND` on stderr and the client shows the server as failed.",
+            "The launcher runs `tsx` through `node`'s `--import` flag but `tsx` is a devDependency of `extension/`, not of `tools/chrome-bridge/`, so it works in this monorepo checkout only because of hoisting."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "end-to-end-evidence",
+          "label": "Real-tab round trip recorded with reproducible steps",
+          "ruleStatement": "The deliverable contains evidence that the `chrome-bridge` server, launched by Claude Code from `.mcp.json`, returned a real tab's text and a PNG screenshot through the relay and extension. 10 = the phase notes include the exact command sequence, the relay port used, the returned `getPageText` excerpt, the PNG byte length, and one failure-path observation (relay stopped → `isError` message); 8 = both successful calls recorded with commands to reproduce; below minScore = the note only says 'tested manually' with no reproducible steps or output.",
+          "passCriteria": [
+            "The phase notes / roadmap entry list the steps in order: start the relay script, load the unpacked extension, restart Claude Code in the repo, `/mcp` shows `chrome-bridge` connected with 8 tools.",
+            "The notes quote a `getPageText` result (first ~100 chars plus the tab URL) obtained via the `chrome-bridge` tool, not via `extension-bridge`'s `ext_command`.",
+            "The notes record a `captureTab` call that returned an image block, with the decoded PNG size in bytes (or a saved file path) and confirmation that the client rendered it.",
+            "The notes record what the tool returned when the relay was stopped (an `isError` result with a message), demonstrating the failure path was exercised outside unit tests."
+          ],
+          "failureExamples": [
+            "The developer verifies `getPageText` through the still-registered `extension-bridge` `ext_command` tool by habit and records it as passing for `chrome-bridge`.",
+            "Both calls succeed in the notes but `captureTab` was checked only by seeing 'image' in the raw JSON; the client actually rendered a broken image because the data-URL prefix was not stripped, and nobody looked.",
+            "The manual check was run against the relay on boky's port 8765 with boky's extension loaded, so the standalone extension and its distinct default port were never exercised."
+          ],
+          "minScore": 7
+        }
+      ],
+      "healerHint": "The most likely miss is a stray `console.log` (or tsx/Node warning) on stdout that makes the client fail to parse frames — grep `src/mcp` and `bin/` for `console.log`/`process.stdout`, redirect all diagnostics to `console.error`, and re-run `node tools/chrome-bridge/bin/mcp.mjs </dev/null 2>/dev/null` to confirm stdout is empty."
+    }
+  ],
+  "successCriteria": [
+    "Locally: (1) a separate unpacked MV3 extension with its own manifest and no boky code loads in any Chrome profile with no sign-in and connects to the relay; (2) a standalone relay starts via `npm run relay`, binds 127.0.0.1:8766, and routes command / command-response / observation frames between one extension and N controllers; (3) a stdio MCP server exposes ping, navigateTo, getPageText, readPage, findElement, clickElement, typeText, captureTab as discrete tools and none of boky's provider/session/storage probes, registered in root .mcp.json and verified from Claude Code against a real tab; (4) action-list drift between extension handlers and MCP tools is a tsc error via `Record<PageAction, …>`; (5) tsc --noEmit, eslint --max-warnings 0, and vitest pass for tools/chrome-bridge including relay-routing and controller round-trip tests against the real relay; (6) boky's extension, bridge, and root verify pipeline are unchanged. Carried to horizon 2, not criteria here: readConsoleMessages/readNetworkRequests, the multi-client README snippet verified with two non-Claude clients, and the empirical size-cap tuning.",
+    "Add standalone package with protocol types: `tools/chrome-bridge/src/protocol/` (types.ts + actions.ts) compiles, lints and passes its unit test via `cd tools/chrome-bridge && npm run verify`.",
+    "Add standalone WebSocket relay process: `tools/chrome-bridge/src/relay/relay.ts` with a passing routing test; `npm run relay` prints the listening line on ws://127.0.0.1:8766.",
+    "Add standalone extension executing page actions: `tools/chrome-bridge/dist/extension/` (built by `npm run build:extension`) loads unpacked in Chrome, connects to the running relay, and answers page-action commands (`ping`, `getPageText`, …) on a real tab with matching `command-response` frames, with all eight handlers covered by passing fake-port unit tests.",
+    "Add controller client for relay commands: `tools/chrome-bridge/src/controller/controller-client.ts` with a passing test that round-trips commands through the real relay and a fake extension socket.",
+    "Add MCP server exposing page actions as tools: `tools/chrome-bridge/src/mcp/server.ts` launched by `node tools/chrome-bridge/bin/mcp.mjs` (registered as `chrome-bridge` in `.mcp.json`) advertises the eight page-action tools and returns a real tab's text and screenshot when called from Claude Code."
+  ],
+  "deferred": [
+    "Tab and profile management (list/create/close/switch tabs, targeting a tab by id, multi-profile discovery) — the user explicitly deferred it; commands act on the active tab only.",
+    "Migrating boky itself onto the extracted tool or deleting boky's existing devtools bridge — reuse by copy is the goal; rewiring boky is a separate refactor with its own blast radius.",
+    "Publishing as an npm package or Chrome Web Store listing — quality bar is 'works locally from this repo via a script'.",
+    "Authentication/authorization on the relay or MCP server beyond localhost binding — local dev tool; adding tokens is a follow-up once a remote use-case exists.",
+    "Push/streaming of console and network events into MCP clients (notifications, SSE transport) — pull-style queryable buffers satisfy the stated need; MCP notification support across clients is inconsistent.",
+    "Advanced automation primitives (keyboard shortcuts, drag, file upload, form_input helpers, JavaScript eval, GIF recording, window resize) — beyond the core page actions the user listed.",
+    "Capturing network traffic via chrome.debugger / CDP or WebSocket frame capture — the fetch/XHR page-world wrapper covers the stated need without the debugger banner; CDP is a different architecture.",
+    "Persisting console/network history across service-worker restarts (IndexedDB) — in-memory ring buffers are sufficient for an interactive debugging loop.",
+    "Cross-browser support (Firefox, Safari, Edge-specific) — the extension is MV3 Chrome-first like boky.",
+    "A GUI/dashboard for the tool — consumers are terminal AI tools over MCP; no React UI is carried over.",
+    "Page console-log capture (MAIN-world content script wrapping console.* / error / unhandledrejection, postMessage envelope with a non-boky namespace, content-script relay to the service worker, per-tab ring buffer, `readConsoleMessages` MCP tool) — held for next horizon; needs the MAIN-world build plumbing below and does not block any Horizon 1 phase.",
+    "Network-request capture (MAIN-world fetch/XHR wrapper modeled on the page-world sniffer, byte- and count-capped per-tab ring buffer, `readNetworkRequests` MCP tool with since/limit/filter) — held for next horizon, same reason.",
+    "Bounded ring-buffer utility in the service worker (100% new code per discovery) — held for next horizon; only the two capture features consume it (YAGNI gate 2: not needed now).",
+    "MAIN-world content-script build plumbing (real MAIN-world JS entry in the plain Vite build, `content_scripts` with `world: MAIN, run_at: document_start`, ISOLATED forwarder script) — held for next horizon; only needed once capture lands.",
+    "README with the MCP config snippet for Claude Code, Codex CLI (config.toml), Gemini CLI and Cursor, plus parameterizing `extension/scripts/register-mcp.mjs` for the new server — held for next horizon; depends on the Codex/Cursor config-format materials still to be acquired.",
+    "Manual verification with at least two non-Claude MCP clients and the empirical choice of readPage/captureTab size caps against real client limits — held for next horizon; the 200 000-char default and image content block are provisional until measured.",
+    "Standalone regex parity script mirroring `check-command-parity.mjs` — failed YAGNI gate 4 (ceremony): both the extension handler map and the MCP tool catalog are typed `Record<PageAction, …>` over the single `PAGE_ACTIONS` array, so drift already fails `tsc`; revisit only if a list ever moves out of TypeScript.",
+    "Wiring `tools/chrome-bridge` into root `scripts/verify.sh` — failed YAGNI gate 2 and follows the nest-host precedent of a self-contained package with its own `npm run verify`; keeps 'boky's verify pipeline passes unchanged' trivially true.",
+    "Tail/debug CLI (typed equivalent of `extension/devtools/tail-logs.mjs`) — failed YAGNI gate 2: the controller-client tests and MCP tools cover the need in Horizon 1; reconsider alongside the README/observation work next horizon.",
+    "Configurable relay URL inside the extension (chrome.storage override for multi-profile setups) — failed YAGNI gate 2: one extension per relay on the default port is the supported topology; the multi-profile limitation is documented instead.",
+    "Forwarding the extension's own service-worker console as observations (port of `log-forwarder.ts`) — failed YAGNI gate 1: not part of the stated first version; may ride along with console capture next horizon.",
+    "Tab targeting / tab management, relay auth tokens, push streaming of observations over MCP, chrome.debugger-based capture, persistence across service-worker restarts, non-Chrome browsers, any GUI — out of scope per the task analysis.",
+    "Materials to acquire before the next horizon's README / multi-client verification work (no phase in this horizon consumes them; carried in next-horizon-brief.md research/unknowns): MCP stdio server config formats for Codex CLI and Cursor; Installed non-Claude MCP clients for manual verification (at least two of Codex CLI, Gemini CLI, Cursor agent); MCP client per-message size / response limits for the chosen clients"
+  ],
+  "revision": 0
+}

@@ -1,0 +1,232 @@
+{
+  "task": "Horizon 09 of agent-agnostic-browser-bridge. Horizon 08 added an evalIsolated chrome-bridge action to read values on strict-CSP sites via an isolated-world string eval; live testing proved this impossible (MV3's extension CSP forbids eval in every world). The only route to strict-CSP value reads is CDP Runtime.evaluate, previously barred by decisions.md (h6 + h8). The user has decided to lift that ban for read-only page evaluation (and greenlight the broader CDP pivot for later horizons) and to remove the dead evalIsolated action. This horizon: remove evalIsolated, add a CDP Runtime.evaluate port, wire a new evaluatePage action end to end, and verify strict-CSP value reads in live Chrome.",
+  "analysis": {
+    "objective": "Lift the project's ban on CDP Runtime.evaluate for read-only page evaluation, ship a CDP-backed evaluatePage action that reads values from strict-CSP sites, and remove the non-functional evalIsolated action it replaces.",
+    "successDefinition": "npm run verify is green for tools/chrome-bridge with evalIsolated fully removed; a new evaluatePage action calls CDP Runtime.evaluate on the sandbox tab; a live-Chrome transcript shows evaluatePage returning a real value on at least two strict-CSP sites while executeScript still returns the page's CSP error on the same expression; executeScript's own behaviour is byte-for-byte unchanged.",
+    "assumptions": [
+      "chrome.debugger.sendCommand supports Runtime.evaluate with returnByValue + awaitPromise from an MV3 service worker (the debugger permission is already granted and already used for Page.captureScreenshot).",
+      "CDP Runtime.evaluate is exempt from the page's Content-Security-Policy (it is the documented DevTools mechanism; executeScript's CSP failure is specific to chrome.scripting, per horizon-04 discoveries).",
+      "The dedicated sandbox tab remains the sole action target (horizon-06 decision); evaluatePage resolves it the same way every other action does.",
+      "A live-Chrome check can be run this horizon via the chrome-bridge MCP; if it cannot, phase 4 ends blocked with MANUAL_CHROME_CHECK_PENDING and exact retry steps rather than done-but-unverified."
+    ],
+    "risks": [
+      "CDP Runtime.evaluate could itself hit a Trusted-Types or site-specific restriction on some target — mitigated by phase 4 testing at least two strict-CSP sites head-to-head against executeScript.",
+      "Sharing the attach/detach lifecycle between captureScreenshot and evaluate could regress screenshot capture if the refactor is careless — mitigated by an explicit unchanged-behaviour rubric dimension.",
+      "Attaching chrome.debugger raises Chrome's 'started debugging this browser' banner on the sandbox tab — acceptable because the tab is deliberately kept unfocused, but noted."
+    ],
+    "outOfScope": [
+      "Trusted synthetic input via CDP Input.dispatch* — greenlit by the horizon-09 decision but not built this horizon; no phase needs it.",
+      "CDP-driven scroll and virtualized-list materialization — deferred to a later horizon now that the CDP door is open.",
+      "Persistent multi-command CDP sessions (vs per-command attach/detach) — deferred until a phase actually needs session continuity.",
+      "Removing or deprecating executeScript now that CDP eval is a functional superset — executeScript stays unchanged this horizon.",
+      "DOM page-model snapshot / findElement-refs (horizon-05, never executed) — still deferred.",
+      "A wait/settle primitive — still deferred.",
+      "Deleting the deliberately-dead active-tab surface — still deferred.",
+      "Relocating the result-size cap to a generic MCP-layer truncation — evaluatePage reuses the existing per-action cap."
+    ],
+    "domainShape": "technical",
+    "domainShapeReason": "Developer tooling — a Chrome extension, a chrome.debugger/CDP adapter and an MCP tool catalog; no business entities or rules a domain expert would recognize.",
+    "ubiquitousLanguage": [
+      { "term": "CDP (Chrome DevTools Protocol)", "meaning": "The low-level Chrome control protocol reached from the extension via chrome.debugger; not subject to a page's Content-Security-Policy." },
+      { "term": "Runtime.evaluate", "meaning": "The CDP command that evaluates a JavaScript expression in a tab's page context and returns its value." },
+      { "term": "page action", "meaning": "One discrete capability listed in PAGE_ACTIONS and exposed as exactly one MCP tool." },
+      { "term": "sandbox tab", "meaning": "The single auto-created background tab that every page action targets since horizon 06." },
+      { "term": "strict-CSP site", "meaning": "A site whose Content-Security-Policy blocks chrome.scripting eval — github.com, reddit.com, LinkedIn." },
+      { "term": "evalIsolated", "meaning": "The horizon-08 action being removed; it attempted isolated-world string eval, which MV3 forbids in every world." },
+      { "term": "DebuggerPorts", "meaning": "The chrome.debugger-backed port module (formerly CaptureDebuggerPorts) that owns the attach / send-command / detach lifecycle with leak-safe cleanup." }
+    ]
+  },
+  "discoveryFindings": [
+    { "area": "CDP adapter", "finding": "tools/chrome-bridge/src/extension/debugger-ports.ts already implements attach -> single CDP command -> detach with an onDetach listener and an inFlight map that rejects only the interrupted capture, registered once at construction. It exposes only captureScreenshot(tabId).", "filePath": "tools/chrome-bridge/src/extension/debugger-ports.ts", "implication": "Runtime.evaluate is the same attach/command/detach lifecycle; add it as a second method on this module and factor out the shared attach/cleanup rather than duplicating it." },
+    { "area": "handler wiring", "finding": "createPageActionHandlers(ports, sandboxTab, captureDebugger) — every handler does `const tabId = await sandboxTab.resolveTabId()`; captureTab already delegates to captureDebugger.captureScreenshot(tabId). guard() wraps each handler in the guarded return map.", "filePath": "tools/chrome-bridge/src/extension/page-actions.ts", "implication": "evaluatePage's handler is a 4-line body: resolve sandbox tab, call captureDebugger.evaluate(tabId, code), coerce the outcome. No new constructor parameter needed." },
+    { "area": "eval outcome shape", "finding": "executeScript and evalIsolated both return an in-page `InPageScriptOutcome` ({ ok, json } | { ok: false, error }) that coerceExecuteScriptOutcome maps to { result: { value } } | { error }, with a MAX_EXECUTE_SCRIPT_RESULT_CHARS (1_000_000) cap applied handler-side.", "filePath": "tools/chrome-bridge/src/extension/page-actions.ts", "implication": "The CDP evaluate method should return the same InPageScriptOutcome shape so the handler reuses coerceExecuteScriptOutcome unchanged; the size cap stays where it is." },
+    { "area": "add-an-action surface", "finding": "Adding a page action requires edits in six coordinated places: PAGE_ACTIONS tuple, PageActionParams + PageActionResults mapped types (plus the two named interfaces), the raw handler map, the guarded return map, TOOL_CATALOG, and the count-hardcoded unit tests (actions.unit.test.ts, tool-catalog.unit.test.ts). All are typed Record<PageAction, ...> so a missing one is a tsc error.", "filePath": "tools/chrome-bridge/src/protocol/actions.ts", "implication": "Phase 3 is one type-locked atomic unit that must land with its count tests; phase 1's removal and phase 3's addition each touch the same six places." },
+    { "area": "evalIsolated footprint", "finding": "evalIsolated appears in exactly these files: actions.ts (tuple), actions.unit.test.ts (tuple + count 18), types.ts (2 interfaces + 2 map entries), page-actions.ts (raw handler ~453-508 + guarded map line 620), page-actions.unit.test.ts (describe block ~1036-1160), tool-catalog.ts (line 212), tool-catalog.unit.test.ts (line 45 + count), README.md (lines 51, ~199, 217, plus the 'eighteen page actions'/'18 tools' counts).", "filePath": "tools/chrome-bridge/src/protocol/actions.ts", "implication": "Removal is fully enumerable and small; grep for evalIsolated / EvalIsolated must return zero hits when phase 1 is done." },
+    { "area": "live-verify enablement", "finding": "A newly added page action is only callable after the chrome-bridge MCP server restarts (it advertises its tool list at startup) AND dist/extension is rebuilt and the unpacked extension is remove+re-added. A stale service worker makes a new action silently TIME OUT (isCommand() drops the frame) rather than returning an 'unknown action' error.", "filePath": "tools/chrome-bridge/src/protocol/guards.ts", "implication": "Phase 4 must rebuild, restart the MCP server, and remove+re-add the extension before testing; the failure signature to distinguish stale-build from a real hang is 'timeout, never an unknown-action error'." },
+    { "area": "strict-CSP evidence", "finding": "On github.com (script-src, no unsafe-eval) and reddit.com (script-src 'self' 'strict-dynamic' nonce, no unsafe-eval), executeScript returns Chrome's verbatim CSP-eval error, not a value. On the sandbox tab, evalIsolated returned the extension's OWN MV3 CSP error — proving no string-eval world exists.", "filePath": "docs/roadmaps/agent-agnostic-browser-bridge/discoveries.md", "implication": "Phase 4's head-to-head is well-grounded: executeScript is the known-failing control, evaluatePage via CDP is the treatment; github.com + one of reddit/LinkedIn are the target sites." }
+  ],
+  "requiredMaterials": [],
+  "phases": [
+    {
+      "id": "remove-eval-isolated-action",
+      "order": 1,
+      "name": "Remove the non-functional evalIsolated action",
+      "goal": "Delete the evalIsolated page action and its entire protocol / handler / catalog / test / documentation surface, returning PAGE_ACTIONS to 17 entries with npm run verify green.",
+      "rationale": "Horizon 08 shipped an 'evalIsolated' MCP tool meant to read values on strict-CSP sites by running a caller-supplied string through JavaScript's eval inside the extension's isolated content-script world. Live testing proved this can never work: Chrome's MV3 platform forbids string evaluation in every execution world, including the isolated one, because the extension's own Content-Security-Policy disallows it and MV3 does not let that policy be relaxed. Every call to the tool returns a CSP error. A permanently-dead tool advertised in the MCP catalog misleads any AI agent connected to the bridge into believing the capability exists, so it is removed rather than left frozen.",
+      "rationaleTerms": "MV3 = Manifest V3, the current Chrome extension platform. Content-Security-Policy (CSP) = a browser rule set restricting which code a page (or extension) may execute. Isolated world = the private JavaScript context a content script runs in, separate from the page's own scripts.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/protocol/actions.ts",
+        "tools/chrome-bridge/src/protocol/actions.unit.test.ts",
+        "tools/chrome-bridge/src/protocol/types.ts",
+        "tools/chrome-bridge/src/extension/page-actions.ts",
+        "tools/chrome-bridge/src/extension/page-actions.unit.test.ts",
+        "tools/chrome-bridge/src/mcp/tool-catalog.ts",
+        "tools/chrome-bridge/src/mcp/tool-catalog.unit.test.ts",
+        "tools/chrome-bridge/README.md"
+      ],
+      "changes": [
+        "Remove \"evalIsolated\" from the PAGE_ACTIONS tuple in actions.ts.",
+        "Delete the EvalIsolatedParams and EvalIsolatedResult interfaces in types.ts and their entries in the PageActionParams and PageActionResults mapped types.",
+        "Delete the evalIsolated raw handler in page-actions.ts and its entry in the guarded return map.",
+        "Delete the evalIsolated entry from TOOL_CATALOG in tool-catalog.ts.",
+        "Delete the 'pageActionHandlers - evalIsolated' describe block from page-actions.unit.test.ts.",
+        "Update the ordered-tuple assertion and the hardcoded count (18 -> 17) in actions.unit.test.ts and tool-catalog.unit.test.ts.",
+        "Remove evalIsolated from the README action enumeration (two spots) and its manual e2e step; change the 'eighteen page actions' / 'connected with 18 tools' counts to seventeen / 17."
+      ],
+      "boundedContext": "chrome-bridge page-action protocol",
+      "layer": "cross-cutting",
+      "blastRadius": "small",
+      "inputs": [
+        "The horizon-08 status.json REPLAN_REQUIRED finding (isolated-world string eval impossible under MV3).",
+        "The enumerated evalIsolated footprint from discovery (11 sites across 8 files).",
+        "The Record<PageAction, ...> type-locked maps that make a missed edit a tsc error."
+      ],
+      "expectedResult": "npm run verify green (tsc --noEmit, eslint --max-warnings 0, vitest) with grep -riE 'evalIsolated|EvalIsolated' over tools/chrome-bridge returning zero matches, PAGE_ACTIONS.length === 17, and the two count-hardcoded tests asserting 17.",
+      "dependsOn": [],
+      "rubric": [
+        { "id": "complete-removal", "label": "Every trace of evalIsolated is gone", "ruleStatement": "No identifier, type, handler, catalog entry, test, or doc line referencing evalIsolated remains anywhere under tools/chrome-bridge.", "passCriteria": ["grep -riE 'evalIsolated|EvalIsolated|eval-isolated' over tools/chrome-bridge returns zero matches", "PAGE_ACTIONS.length === 17 and both count-hardcoded tests assert 17", "README no longer enumerates evalIsolated and its counts read seventeen / 17"], "failureExamples": ["The tuple entry and handler are removed but EvalIsolatedParams/EvalIsolatedResult stay in types.ts as orphan exports (dead-export gate would also fail)", "page-actions.unit.test.ts still has the evalIsolated describe block, now testing a handler that no longer exists", "README manual e2e step 12 for evalIsolated is left in place"], "minScore": 8 },
+        { "id": "green-gate-no-shortcuts", "label": "npm run verify passes without suppressions", "ruleStatement": "tsc --noEmit, eslint --max-warnings 0, and vitest all pass with no new @ts-expect-error, eslint-disable, it.skip, or loosened assertion introduced to get there.", "passCriteria": ["npm run verify exits 0", "git diff contains no new suppression directive or skipped test", "the type-locked Record<PageAction, ...> maps compile with 17 keys"], "failureExamples": ["A test that referenced the removed action is silenced with it.skip instead of deleted", "An eslint-disable is added to a map that now has an unused import of a deleted type"], "minScore": 8 },
+        { "id": "removal-only-scope", "label": "The phase removes and nothing else", "ruleStatement": "The diff deletes the evalIsolated surface and makes only the mechanical count/enumeration updates that removal forces — no CDP code, no new action, no refactor of neighbouring handlers.", "passCriteria": ["No file outside the eight listed in filesAffected is touched", "executeScript and every other handler are byte-for-byte unchanged", "no new runtime behaviour is added"], "failureExamples": ["The executeScript handler is 'tidied' while nearby, making the diff hard to review", "The CDP evaluate method is started here because it felt related"], "minScore": 7 }
+      ],
+      "healerHint": "Re-scope to a pure deletion plus the count/enumeration edits removal forces; if a rubric dimension fails, it is almost always an orphan type or a stale test left behind — grep again.",
+      "compensation": "Restore the deleted surface from git history if a later horizon revives an isolated-world approach (none is currently believed possible under MV3)."
+    },
+    {
+      "id": "add-cdp-evaluate-port",
+      "order": 2,
+      "name": "Add a CDP port that reads page values",
+      "goal": "Add an evaluate(tabId, expression) method to the chrome.debugger-backed port module that runs an expression against a tab through CDP Runtime.evaluate and returns a JSON-serialisable value or an error, reusing the module's existing attach / detach / leak-cleanup lifecycle.",
+      "rationale": "The chrome-bridge extension can already drive a Chrome DevTools Protocol session against the dedicated background sandbox tab — horizon 06 added debugger-ports.ts, which attaches a debugger, runs one CDP command, and detaches, with cleanup so a crash never leaks the attachment. That module today exposes only screenshot capture. CDP's Runtime.evaluate command evaluates a JavaScript expression in the page's real context and is not subject to any Content-Security-Policy — it is the one mechanism that can read values from strict-CSP sites like LinkedIn, github.com and reddit, where the existing executeScript action is blocked. This phase adds that one CDP call as a new port method; wiring it into a user-facing action is the next phase.",
+      "rationaleTerms": "Port = a small interface isolating one slice of the chrome.* API so it can be faked in tests. Runtime.evaluate params: returnByValue asks CDP to send back the value itself (not a remote handle); awaitPromise resolves a returned promise before replying.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/extension/debugger-ports.ts",
+        "tools/chrome-bridge/src/extension/debugger-ports.unit.test.ts"
+      ],
+      "changes": [
+        "Rename the CaptureDebuggerPorts interface to DebuggerPorts (it is no longer capture-only) and update its single importer in page-actions.ts; keep captureScreenshot and add evaluate(tabId: number, expression: string): Promise<InPageScriptOutcome>.",
+        "Factor the shared attach / inFlight-registration / onDetach / detach-in-finally machinery out of captureScreenshot into a private helper both methods call, so captureScreenshot's observable behaviour does not change.",
+        "Implement evaluate: attach, sendCommand({ tabId }, \"Runtime.evaluate\", { expression, returnByValue: true, awaitPromise: true }), detach in finally.",
+        "Map the CDP reply to InPageScriptOutcome: exceptionDetails present -> { ok: false, error: exceptionDetails.exception?.description ?? exceptionDetails.text }; otherwise JSON.stringify(result.value), apply the same MAX_EXECUTE_SCRIPT_RESULT_CHARS cap the executeScript handler uses (export the constant from page-actions.ts or move it to a shared module), and return { ok: true, json }; undefined / non-serialisable value -> the same error strings executeScript returns.",
+        "Add co-located unit tests with a stubbed chrome.debugger: successful value read, exceptionDetails -> error, over-large value -> cap error, detach runs on the error path, no attachment leak after either path."
+      ],
+      "boundedContext": "chrome-bridge CDP debugger adapter",
+      "layer": "infrastructure",
+      "blastRadius": "small",
+      "inputs": [
+        "The existing attach/detach/onDetach/inFlight pattern in debugger-ports.ts.",
+        "InPageScriptOutcome and MAX_EXECUTE_SCRIPT_RESULT_CHARS from page-actions.ts.",
+        "CDP Runtime.evaluate parameter semantics (returnByValue, awaitPromise, exceptionDetails)."
+      ],
+      "expectedResult": "DebuggerPorts.evaluate exists with a co-located unit test covering each exported behaviour (per the testguard rule for *-ports.ts files), npm run verify is green, and captureScreenshot's behaviour is unchanged (the diff is additive plus a behaviour-preserving extraction of the shared attach helper).",
+      "dependsOn": [],
+      "rubric": [
+        { "id": "csp-exempt-read-path", "label": "evaluate runs through CDP Runtime.evaluate", "ruleStatement": "The method issues chrome.debugger sendCommand for Runtime.evaluate with returnByValue and awaitPromise, not chrome.scripting or any string-eval, so it is exempt from page CSP by construction.", "passCriteria": ["The implementation calls sendCommand({tabId}, 'Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })", "No chrome.scripting.executeScript and no eval/new Function appear in the method", "A unit test asserts the exact CDP command name and params object"], "failureExamples": ["awaitPromise is omitted, so `await fetch(...)` style expressions return a pending Promise serialised as {}", "returnByValue is omitted, so result.value is undefined and the method returns an unhelpful empty read on every call"], "minScore": 8 },
+        { "id": "outcome-and-cap-parity", "label": "Returns the same outcome shape and size cap as executeScript", "ruleStatement": "evaluate returns InPageScriptOutcome ({ ok, json } | { ok: false, error }); CDP exceptionDetails become an error; a value over MAX_EXECUTE_SCRIPT_RESULT_CHARS becomes the same cap error the executeScript handler produces.", "passCriteria": ["The handler in the next phase can call coerceExecuteScriptOutcome on the result with no adaptation", "exceptionDetails -> { ok: false, error } with a message drawn from the exception", "an over-large stringified value -> { ok: false, error } matching the executeScript cap wording", "the shared constant is imported/moved, not re-hardcoded to a different number"], "failureExamples": ["exceptionDetails is ignored and a thrown page expression resolves as { ok: true, json: 'undefined' }", "the size cap is silently dropped so a 5 MB DOM dump is returned and blows the MCP response"], "minScore": 8 },
+        { "id": "screenshot-behaviour-preserved", "label": "captureScreenshot still works after the refactor", "ruleStatement": "Extracting the shared attach/detach/leak-cleanup helper does not change captureScreenshot's observable behaviour, including its onDetach rejection and its detach-in-finally.", "passCriteria": ["Existing captureScreenshot unit tests pass unchanged", "the onDetach listener is still registered once, not per call", "both methods detach on every path including error"], "failureExamples": ["The shared helper registers a fresh onDetach listener per call, leaking listeners across many evaluate calls", "evaluate's error path returns before detach, leaving the sandbox tab attached and showing the debugging banner permanently"], "minScore": 8 },
+        { "id": "port-test-coverage", "label": "Co-located unit test per exported behaviour", "ruleStatement": "debugger-ports.unit.test.ts covers evaluate's success, exception, over-large, and detach-on-error paths with a stubbed chrome.debugger, satisfying the testguard rule for *-ports.ts files.", "passCriteria": ["Each of the four paths has an assertion", "the test stubs chrome.debugger and never touches a real browser", "the coverage guard passes for the changed file"], "failureExamples": ["Only the happy path is tested; the exceptionDetails mapping ships unverified", "the test asserts the method was called but not what CDP command it issued"], "minScore": 7 }
+      ],
+      "healerHint": "If a dimension fails, check that awaitPromise + returnByValue are both set and exceptionDetails is mapped to an error; the screenshot regression is nearly always a per-call onDetach listener — register it once in the shared helper.",
+      "compensation": "None — additive infrastructure with no external effect; revert the phase's commit to remove it."
+    },
+    {
+      "id": "add-evaluate-page-action",
+      "order": 3,
+      "name": "Add the evaluatePage action end to end",
+      "goal": "Wire a new evaluatePage page action through the protocol tuple, param/result types, raw + guarded handler (calling DebuggerPorts.evaluate on the sandbox tab), TOOL_CATALOG entry, and count-hardcoded tests, bringing PAGE_ACTIONS to 18.",
+      "rationale": "With the CDP Runtime.evaluate port method in place (previous phase) and the dead evalIsolated removed (first phase), the bridge needs a user-facing MCP tool that an AI agent calls to read a value from a strict-CSP page. This follows the exact 'add one page action' shape the project has used seven times: one entry in the single source-of-truth tuple, a named params interface ({ code: string }) and result interface ({ value?: unknown; error?: string }), a handler in both the raw and guarded maps, one TOOL_CATALOG description with required: ['code'], and tests that hardcode the new action count. The handler resolves the dedicated sandbox tab (like every action since horizon 06) and delegates to the CDP port.",
+      "rationaleTerms": "Raw handler map vs guarded return map = the extension defines each handler once, then wraps every one in a guard() that catches throws and normalizes errors before returning; both maps are typed Record<PageAction, Handler> so a missing key fails the type-check.",
+      "filesAffected": [
+        "tools/chrome-bridge/src/protocol/actions.ts",
+        "tools/chrome-bridge/src/protocol/actions.unit.test.ts",
+        "tools/chrome-bridge/src/protocol/types.ts",
+        "tools/chrome-bridge/src/extension/page-actions.ts",
+        "tools/chrome-bridge/src/extension/page-actions.unit.test.ts",
+        "tools/chrome-bridge/src/mcp/tool-catalog.ts",
+        "tools/chrome-bridge/src/mcp/tool-catalog.unit.test.ts",
+        "tools/chrome-bridge/README.md"
+      ],
+      "changes": [
+        "Add \"evaluatePage\" to the PAGE_ACTIONS tuple, immediately after \"executeScript\".",
+        "Add EvaluatePageParams { readonly code: string } and EvaluatePageResult { readonly value?: unknown; readonly error?: string } interfaces plus their entries in the PageActionParams and PageActionResults mapped types.",
+        "Add the raw evaluatePage handler: reject a non-string / empty code with { error }, `const tabId = await sandboxTab.resolveTabId()`, `const outcome = await captureDebugger.evaluate(tabId, params.code)`, `return coerceExecuteScriptOutcome(outcome)`; add it to the guarded return map as `evaluatePage: guard(raw.evaluatePage)`.",
+        "Add TOOL_CATALOG.evaluatePage: description says it evaluates an expression against the real page via Chrome DevTools Protocol and works on strict-CSP sites where executeScript is blocked; inputSchema { code: string }, required: ['code'].",
+        "Update the ordered-tuple assertion and hardcoded counts to 18 in actions.unit.test.ts and tool-catalog.unit.test.ts; add handler tests in page-actions.unit.test.ts (value read, empty/missing code, port-returned error passthrough) using a fake captureDebugger.evaluate.",
+        "README: add evaluatePage to the action enumeration (two spots), bump the counts to eighteen / 18, and add a manual e2e step describing a strict-CSP read."
+      ],
+      "boundedContext": "chrome-bridge page-action protocol",
+      "layer": "interface",
+      "blastRadius": "medium",
+      "inputs": [
+        "The PAGE_ACTIONS tuple and the PageActionParams / PageActionResults mapped types.",
+        "The createPageActionHandlers(ports, sandboxTab, captureDebugger) signature and coerceExecuteScriptOutcome.",
+        "The TOOL_CATALOG Record<PageAction, ToolCatalogEntry> shape and the two count-hardcoded test files."
+      ],
+      "expectedResult": "npm run verify green; evaluatePage present in PAGE_ACTIONS (length 18), both mapped types, both handler maps, and TOOL_CATALOG; the MCP server's listTools derives 18 tools; git diff shows the executeScript handler, its unit block, and coerceExecuteScriptOutcome / MAX_EXECUTE_SCRIPT_RESULT_CHARS untouched.",
+      "dependsOn": ["remove-eval-isolated-action", "add-cdp-evaluate-port"],
+      "rubric": [
+        { "id": "type-locked-parity-surface", "label": "The action is wired in every one of the six coordinated places", "ruleStatement": "evaluatePage appears in PAGE_ACTIONS, both named interfaces, both mapped types, both handler maps, and TOOL_CATALOG, with parity achieved by correct types alone — no cast, no @ts-ignore, no as any.", "passCriteria": ["npm run verify exits 0 with 18-key Record<PageAction, ...> maps", "grep of the diff shows zero @ts-ignore / @ts-expect-error / as any / as unknown escapes", "the count-hardcoded tests assert 18 and name evaluatePage in the ordered tuple", "TOOL_CATALOG.evaluatePage has required: ['code']"], "failureExamples": ["The handler map compiles because evaluatePage is added with `as Handler`, hiding a wrong signature", "PAGE_ACTIONS is bumped to 18 but tool-catalog.unit.test.ts still asserts 17 and is 'fixed' by skipping it"], "minScore": 8 },
+        { "id": "handler-delegates-correctly", "label": "The handler resolves the sandbox tab and delegates to the CDP port", "ruleStatement": "evaluatePage validates code is a non-empty string, resolves the tab via sandboxTab.resolveTabId(), calls captureDebugger.evaluate(tabId, code), and returns coerceExecuteScriptOutcome(outcome) — no new coercion logic.", "passCriteria": ["Unit tests: a value read returns { result: { value } }; empty/missing code returns { error } before any port call; a port-returned { ok: false, error } passes straight through", "the handler body reuses coerceExecuteScriptOutcome, not a hand-rolled mapper", "the guarded map entry is evaluatePage: guard(raw.evaluatePage)"], "failureExamples": ["The handler calls ports.executeScript with world MAIN 'as a fallback', silently reintroducing the CSP failure this action exists to avoid", "empty code reaches the CDP attach and fails with an opaque debugger error instead of a clear validation message"], "minScore": 8 },
+        { "id": "executeScript-untouched", "label": "executeScript is byte-for-byte unchanged", "ruleStatement": "The git diff adds evaluatePage without editing the executeScript handler, its unit block, its TOOL_CATALOG description, or the shared coerceExecuteScriptOutcome / MAX_EXECUTE_SCRIPT_RESULT_CHARS helpers.", "passCriteria": ["git diff on page-actions.ts is additive for executeScript's lines", "the executeScript unit block still asserts { world: 'MAIN' }", "the tool-catalog executeScript description is unchanged"], "failureExamples": ["executeScript's description is reworded to 'use evaluatePage on strict-CSP sites', which is a reasonable doc change but violates the byte-for-byte contract without it being called out", "coerceExecuteScriptOutcome is generalised/renamed, touching executeScript's call site"], "minScore": 8 },
+        { "id": "catalog-description-honest", "label": "The tool description tells an agent when to use it", "ruleStatement": "TOOL_CATALOG.evaluatePage states that it evaluates an expression against the real page via Chrome DevTools Protocol and works on strict-CSP sites where executeScript is blocked, and that it reads (does not reliably mutate) page state.", "passCriteria": ["The description names CDP and the strict-CSP use case", "it does not over-claim trusted input or mutation", "README's enumeration and counts are updated to eighteen / 18"], "failureExamples": ["The description is copied from executeScript verbatim, so an agent cannot tell which to pick", "it claims 'runs any JavaScript including clicks and form fills', inviting misuse for mutation this horizon does not verify"], "minScore": 7 }
+      ],
+      "healerHint": "If parity fails it is a missed one of the six places — add the key, do not cast; if the handler dimension fails, delete any executeScript/MAIN fallback and delegate purely to captureDebugger.evaluate.",
+      "compensation": "Revert this phase's commit to remove the evaluatePage surface if the CDP approach is abandoned."
+    },
+    {
+      "id": "verify-strict-csp-read-live",
+      "order": 4,
+      "name": "Verify strict-CSP value reads in live Chrome",
+      "goal": "Prove evaluatePage returns a real value from a strict-CSP site in a live signed-in Chrome via the chrome-bridge MCP, head-to-head with executeScript still failing on the same expression, and record the result.",
+      "rationale": "Every horizon that changes the extension closes with a real-Chrome end-to-end check rather than shipping done-but-unverified — a binding project decision from horizon 02. Horizon 08's premise died precisely because this check was left for last and then failed; running it here is what keeps horizon 09 honest. The check confirms that CDP Runtime.evaluate is genuinely CSP-exempt in practice, not just in theory.",
+      "rationaleTerms": "Head-to-head = calling both actions with the same expression on the same tab, so any difference is attributable to the CDP-vs-chrome.scripting path and nothing else.",
+      "filesAffected": [
+        "tools/chrome-bridge/README.md (manual-verification section)",
+        "docs/roadmaps/agent-agnostic-browser-bridge/discoveries.md",
+        "docs/roadmaps/agent-agnostic-browser-bridge/blockers.md"
+      ],
+      "changes": [
+        "Rebuild dist/extension; restart the chrome-bridge MCP server so it advertises evaluatePage; remove + re-add the unpacked extension in chrome://extensions (a stale service worker makes a new action time out silently).",
+        "Via the chrome-bridge MCP: navigateTo https://github.com; getTabState to confirm the sandbox tab anchored; evaluatePage { code: \"document.querySelector('h1')?.innerText\" } -> expect a string value; executeScript with the same code -> expect github.com's page-CSP error.",
+        "Repeat the evaluatePage read on one of reddit.com or LinkedIn (signed in).",
+        "Record the measured transcript in README's manual-verification list and as a one-line discoveries.md entry; mark the two horizon-08 evalIsolated blockers resolved in blockers.md.",
+        "If the live check cannot be run in-session, end the phase blocked with MANUAL_CHROME_CHECK_PENDING and the exact rebuild + reload + retry steps."
+      ],
+      "boundedContext": "chrome-bridge live verification",
+      "layer": "cross-cutting",
+      "blastRadius": "small",
+      "inputs": [
+        "The chrome-bridge MCP running against real signed-in Chrome.",
+        "The stale-service-worker reload procedure (remove + re-add dist/extension) from horizon-07 discoveries.",
+        "The strict-CSP site evidence for github.com and reddit.com from horizon-04 discoveries."
+      ],
+      "expectedResult": "A recorded live transcript showing evaluatePage returning a non-error value on at least two strict-CSP sites and executeScript still returning the page's CSP error on the same expression; the outcome written to README and discoveries.md. If unrunnable in-session, a blocked row with MANUAL_CHROME_CHECK_PENDING and precise retry steps — never done-but-unverified.",
+      "dependsOn": ["add-evaluate-page-action"],
+      "rubric": [
+        { "id": "head-to-head-evidence", "label": "evaluatePage succeeds where executeScript fails, same expression", "ruleStatement": "The recorded transcript shows, on the same sandbox tab and expression, evaluatePage returning a non-error value and executeScript returning the page's CSP error — on at least two strict-CSP sites.", "passCriteria": ["github.com plus one of reddit.com / LinkedIn are covered", "each site shows both calls with the identical code string", "evaluatePage's result is an actual page value (e.g. an h1 text), not {} or null-from-error"], "failureExamples": ["Only evaluatePage is run, so there is no proof the CDP path is what made the difference", "the 'value' returned is undefined/empty and is reported as success without noticing"], "minScore": 8 },
+        { "id": "fresh-build-confirmed", "label": "The check ran against the new build, not a stale service worker", "ruleStatement": "dist/extension was rebuilt, the chrome-bridge MCP server restarted, and the unpacked extension remove+re-added before testing; a call that timed out (rather than erroring) was treated as stale-build, not a result.", "passCriteria": ["The transcript notes the rebuild + MCP restart + extension reload", "evaluatePage is a callable tool in the MCP session used", "any 30s timeout was diagnosed as stale build and retried, not recorded as a failure of the action"], "failureExamples": ["evaluatePage 'fails' but the MCP server was the pre-horizon-09 process advertising 17 tools", "a timeout is reported as 'CDP evaluate hangs' without ruling out the stale-SW signature"], "minScore": 8 },
+        { "id": "outcome-recorded", "label": "The result is written where the next horizon will read it", "ruleStatement": "The measured outcome is appended to discoveries.md (one line), the README manual-verification list is updated, and the two horizon-08 evalIsolated blockers are marked resolved in blockers.md.", "passCriteria": ["A dated discoveries.md line states what was measured on which sites", "README reflects evaluatePage as verified", "blockers.md entries for the h08 evalIsolated CSP limitation carry a resolved suffix"], "failureExamples": ["The check passes in-session but nothing is written down, so horizon 10 re-investigates", "a blocked outcome is recorded without the exact rebuild/reload/retry steps a later session needs"], "minScore": 7 }
+      ],
+      "healerHint": "If evidence is thin, re-run both actions on both sites with the identical expression and paste the raw transcript; if the action genuinely does not work, end blocked with REPLAN_REQUIRED naming which CDP assumption failed, not a healer retry.",
+      "compensation": "None — verification only."
+    }
+  ],
+  "successCriteria": [
+    "Reading page-script values on strict-CSP sites (github.com, reddit.com, LinkedIn) works through the chrome-bridge MCP via a CDP-backed evaluatePage action, verified in live Chrome.",
+    "Remove the non-functional evalIsolated action: evalIsolated is absent from every file under tools/chrome-bridge and npm run verify is green.",
+    "Add a CDP Runtime.evaluate port for reading page values: DebuggerPorts.evaluate exists with unit coverage and captureScreenshot is unchanged.",
+    "Add the evaluatePage action end to end: PAGE_ACTIONS length 18, TOOL_CATALOG advertises evaluatePage, executeScript untouched.",
+    "Verify strict-CSP value reads in live Chrome: a recorded transcript shows evaluatePage returning a value on at least two strict-CSP sites while executeScript still fails on the same expression."
+  ],
+  "deferred": [
+    "Trusted synthetic input via CDP Input.dispatch* — greenlit by the horizon-09 decision but not built this horizon; no phase needs it.",
+    "CDP-driven scroll and virtualized-list materialization — deferred to a later horizon now that the CDP door is open.",
+    "Persistent multi-command CDP sessions (vs per-command attach/detach) — deferred until a phase actually needs session continuity.",
+    "Removing or deprecating executeScript now that CDP eval is a functional superset — executeScript stays unchanged this horizon.",
+    "DOM page-model snapshot / findElement-refs (horizon-05, never executed) — still deferred.",
+    "A wait/settle primitive — still deferred.",
+    "Deleting the deliberately-dead active-tab surface — still deferred.",
+    "Relocating the result-size cap to a generic MCP-layer truncation — evaluatePage reuses the existing per-action cap; revisit only if a later action forces it.",
+    "held for the next Planning Horizon to keep this one small and reviewable — the Planning Brief and project memory carry the context forward"
+  ],
+  "revision": 0
+}

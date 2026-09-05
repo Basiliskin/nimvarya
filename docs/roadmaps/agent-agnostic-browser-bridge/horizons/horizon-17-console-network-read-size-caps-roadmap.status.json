@@ -1,0 +1,136 @@
+{
+  "roadmapFile": "docs/roadmaps/agent-agnostic-browser-bridge/horizons/horizon-17-console-network-read-size-caps-roadmap.json",
+  "roadmapTask": "Horizon 17 of agent-agnostic-browser-bridge: add byte-size caps to readConsoleMessages and readNetworkRequests, reusing horizon 16's shared oversize-result pattern.",
+  "createdAt": "2026-09-04T19:39:19Z",
+  "updatedAt": "2026-09-04T20:06:55Z",
+  "roadmapRevision": 0,
+  "phases": [
+    {
+      "phaseId": "measure-live-capture-read-sizes",
+      "status": "done",
+      "attempts": 1,
+      "gateRun": "tools/chrome-bridge: npm run typecheck && npm run lint — both green",
+      "gradeResult": {
+        "phaseId": "measure-live-capture-read-sizes",
+        "dimensionScores": [
+          { "dimensionId": "measurement-evidence-recorded", "score": 10, "pass": true, "evidence": "Both figures are exact measured values (console 76,671 chars / network 2,331,618 chars) with entry counts explicitly stated and both locked at exactly 500 (the MAX_READ_LIMIT) against a genuinely heavy page; a 9 would have exact figures but entry counts merely 'above 400' rather than both pinned at 500." },
+          { "dimensionId": "per-entry-cap-context-cited", "score": 8, "pass": true, "evidence": "The line cites the per-entry caps by exact value (8192/4096), which precisely match the active MAX_CONSOLE_TEXT_BYTES=8192 and MAX_BODY_PREVIEW_BYTES=4096 source constants; it stops short of 9/10 because the constant identifiers are cited by value, not by name, in the persisted line." },
+          { "dimensionId": "no-scope-creep-into-fix", "score": 10, "pass": true, "evidence": "The diff touches only decisions.md (+1 line) and the read-only roadmap ledger .status.json; page-actions.ts and size-limits.ts are byte-for-byte unchanged with zero new MAX_*_READ_RESULT_CHARS constants and zero new checkSizeLimit/buildOversizeResult call sites — leaving the entire fix surface pristine for the next phase." },
+          { "dimensionId": "measurement-methodology-soundness", "score": 9, "pass": true, "evidence": "The line names the source page (wikipedia), the limit (500), and the method (live-measured), and cross-references the horizon-17 roadmap carrying the full tool-call trace; a 10 would name readConsoleMessages / readNetworkRequests explicitly in the persisted line." },
+          { "dimensionId": "decisions-file-format-compliance", "score": 10, "pass": true, "evidence": "The entry is a single 201-char line conforming to the <=240-char cap and is stylistically indistinguishable from its neighbors, including the trailing '-- see horizon-17 roadmap.md' cross-reference mirroring the prior horizon-13 captureTab precedent." }
+        ],
+        "overallPass": true
+      },
+      "compensationInvoked": false,
+      "startedAt": "2026-09-04T19:39:19Z",
+      "completedAt": "2026-09-04T19:41:38Z",
+      "notes": "Measured live on wikipedia sandbox tab via chrome-bridge MCP: 500 console entries = 76,671 chars; 500 network entries = 2,331,618 chars (dropped:true, ring held 520). Network at limit=500 is ~30x console size, so count-based limit alone does NOT bound results — the byte ceiling is genuinely necessary. Grounding fact appended to decisions.md; patch surface untouched for phase 1."
+    },
+    {
+      "phaseId": "add-read-capture-oversize-ceiling",
+      "status": "done",
+      "attempts": 1,
+      "gateRun": "tools/chrome-bridge: npx tsc --noEmit && npx eslint . --max-warnings 0 && npx vitest run (24 files / 379 tests) — all green; check-dead-exports clean",
+      "gradeResult": {
+        "phaseId": "add-read-capture-oversize-ceiling",
+        "dimensionScores": [
+          {
+            "dimensionId": "shared-helpers-reused-not-reimplemented",
+            "score": 9,
+            "pass": true,
+            "evidence": "readCapture's oversize branch is checkSizeLimit(JSON.stringify(result).length, ceiling) then if (!sizeCheck.withinLimit) return { result: buildOversizeResult(sizeCheck) }; imported helpers reused verbatim; grep for tooLarge/actualBytes/limitBytes in page-actions.ts returns none; the only JSON.stringify(...).length is the one fed to checkSizeLimit; size-limits.ts untouched. All 3 passCriteria met; no observable raises it to 10."
+          },
+          {
+            "dimensionId": "oversize-branch-covers-both-channels",
+            "score": 9,
+            "pass": true,
+            "evidence": "Ceiling is a single ternary keyed on channel (MAX_CONSOLE_READ_RESULT_CHARS vs MAX_NETWORK_READ_RESULT_CHARS), each constant used exactly once; readConsoleMessages/readNetworkRequests both route through the same readCapture closure (no forked handler). PassCriteria 1-3 met; clean dual-channel, no extra observable for 10."
+          },
+          {
+            "dimensionId": "count-clamp-preserved-and-check-runs-after-clamp",
+            "score": 9,
+            "pass": true,
+            "evidence": "resolveSince/resolveReadLimit/query/tabId lines unchanged and sit above the store call; the size check measures the exact result returned by captureStore.readConsole/readNetwork (the already-count-clamped CaptureRead). Pre-existing since/limit tests unchanged and pass. PassCriteria 1-3 met."
+          },
+          {
+            "dimensionId": "constants-documented-with-measured-basis",
+            "score": 9,
+            "pass": true,
+            "evidence": "Both constants have JSDoc naming the measured live basis (console ~76,671 / network ~2,331,618 chars, 2026-09-04, en.wikipedia.org), the per-entry cap source (MAX_CONSOLE_TEXT_BYTES=8192 / MAX_BODY_PREVIEW_BYTES=4096), and state the cap bounds the whole serialised CaptureRead, not a single entry; placement/style match existing siblings. PassCriteria 1-3 met."
+          },
+          {
+            "dimensionId": "unit-test-coverage-both-channels-both-branches",
+            "score": 9,
+            "pass": true,
+            "evidence": "Four new tests: console under-cap + network under-cap (deep-equal of full CaptureRead), console over-cap + network over-cap (stubs force JSON.stringify past the REAL constants, mocking at the store level not checkSizeLimit), each asserting tooLarge:true, limitBytes===ceiling, actualBytes>ceiling, entries/nextSince absent. All 114 tests pass. PassCriteria 1-4 met."
+          }
+        ],
+        "overallPass": true
+      },
+      "compensationInvoked": false,
+      "startedAt": "2026-09-04T19:46:13Z",
+      "completedAt": "2026-09-04T19:52:30Z",
+      "notes": "Subagent-graded (no self-grade): 5/5 dimensions 9/9 (minScore 7/8) → overallPass true. No compensation on this phase — nothing invoked. Phase budget 1/1 exhausted."
+    },
+    {
+      "phaseId": "widen-mcp-oversize-error-branch",
+      "status": "done",
+      "attempts": 1,
+      "gateRun": "tools/chrome-bridge: npx tsc --noEmit && npx eslint . --max-warnings 0 && npx vitest run (24 files / 381 tests) — all green",
+      "gradeResult": {
+        "phaseId": "widen-mcp-oversize-error-branch",
+        "dimensionScores": [
+          {
+            "dimensionId": "toolname-guard-widened",
+            "score": 10,
+            "pass": true,
+            "evidence": "Single module-level Set `OVERSIZE_RESULT_TOOL_NAMES` enumerating exactly the four names once, guard is `OVERSIZE_RESULT_TOOL_NAMES.has(toolName)` — matches the rubric's literal 'array/Set membership test' 10 example; no extra toolName in the condition, no duplicated per-tool if-block, zero drift between check and list."
+          },
+          {
+            "dimensionId": "comment-accuracy",
+            "score": 9,
+            "pass": true,
+            "evidence": "The adjacent inline comment and top-of-file doc comment were correctly updated (all four tools named, stale 'read tools' phrase gone, 'never runs' now only the correct captureTab/findElement exclusion), but the unchanged isOversizeResult helper doc comment (server.ts 153-160) still reads 'Both executeScript and evaluatePage return an OversizeResult' — a stricter reviewer sees the new four-tool behavior is not documented at that helper; a 10 would have updated it too."
+          },
+          {
+            "dimensionId": "new-tool-oversize-tests-present",
+            "score": 10,
+            "pass": true,
+            "evidence": "Both readConsoleMessages and readNetworkRequests are covered with isError===true and content checks against the exact serialized oversize fields (tooLarge + actualBytes + limitBytes; readConsoleMessages also asserts NOT 'failed'); both would fail if the guard were reverted (isError would go undefined). Run passes 17/17."
+          },
+          {
+            "dimensionId": "existing-outside-branch-test-preserved",
+            "score": 10,
+            "pass": true,
+            "evidence": "The getPageText outside-branch test is byte-for-byte unchanged (no diff hunk touches it), still asserts isError undefined for a tooLarge-shaped result on a tool outside the four-tool set, and passes in the run — a 10 is untouched + confirmed passing, not a reworded survivor."
+          }
+        ],
+        "overallPass": true
+      },
+      "compensationInvoked": false,
+      "startedAt": "2026-09-04T20:02:21Z",
+      "completedAt": "2026-09-04T20:06:55Z",
+      "notes": "Subagent-graded (no self-grade): 4/4 dimensions pass (minScore 7/8), 3×10 + comment-accuracy 9 → overallPass true. v5.7 all-10 re-score fire: comment-accuracy came back 9 on the isOversizeResult helper doc still naming executeScript/evaluatePage only — corrected post-grade (gates re-run green: 24 files / 381 tests). No compensation on this phase. Phase budget 1/1 exhausted."
+    },
+    {
+      "phaseId": "document-read-tool-size-cap",
+      "status": "done",
+      "attempts": 1,
+      "gateRun": "tools/chrome-bridge: npx tsc --noEmit && npx eslint . --max-warnings 0 && npx vitest run (24 files / 382 tests) — all green",
+      "gradeResult": {
+        "phaseId": "document-read-tool-size-cap",
+        "dimensionScores": [
+          { "dimensionId": "catalog-describes-byte-ceiling-and-error-behavior", "score": 8, "pass": true, "evidence": "Both descriptions add \"An over-large result comes back as a structured too-large error, not a value.\" matching executeScript's own sentence style; stops short of naming the field shape or ceiling inline (that detail lives only in the README)." },
+          { "dimensionId": "catalog-test-asserts-oversize-mentions", "score": 8, "pass": true, "evidence": "New test reads the real listTools() output for both tools and asserts /too-large|too large/ on the description, failing if the sentence is deleted; verified passing (18/18)." },
+          { "dimensionId": "readme-documents-new-byte-ceiling-constants", "score": 9, "pass": true, "evidence": "README states MAX_CONSOLE_READ_RESULT_CHARS=1_000_000 / MAX_NETWORK_READ_RESULT_CHARS=3_000_000 (src/extension/page-actions.ts), byte-for-byte matching the source constants and citing the file, matching the Buffer-caps paragraph's precision." },
+          { "dimensionId": "readme-describes-wholesale-replacement-and-mcp-error-shape", "score": 9, "pass": true, "evidence": "README states the oversize case is replaced wholesale (not trimmed) and surfaced as isError:true with { tooLarge, actualBytes, limitBytes }, paralleling the existing executeScript/evaluatePage isError paragraph, plus 'retry with a smaller limit'." }
+        ],
+        "overallPass": true
+      },
+      "compensationInvoked": false,
+      "startedAt": "2026-09-05T08:30:00Z",
+      "completedAt": "2026-09-05T08:38:00Z",
+      "notes": "Subagent-graded (no self-grade): 4/4 dimensions pass (minScore 6/7), 2×8 + 2×9 → overallPass true. No compensation on this phase. Phase budget 1/1 exhausted. This is the last phase of horizon 17 — all 4 phases now done."
+    }
+  ]
+}

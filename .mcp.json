@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "extension-bridge": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "/Users/dimitrykatz/workspace/boky/extension/devtools/extension-mcp.mjs"
+      ],
+      "env": {}
+    },
+    "chrome-bridge": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "chrome-bridge/bin/mcp.mjs"
+      ],
+      "env": {}
+    }
+  }
+}

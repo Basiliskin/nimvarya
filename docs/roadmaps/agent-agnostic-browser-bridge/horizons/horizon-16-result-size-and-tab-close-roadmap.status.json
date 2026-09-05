@@ -1,0 +1,161 @@
+{
+  "roadmapFile": "docs/roadmaps/agent-agnostic-browser-bridge/horizons/horizon-16-result-size-and-tab-close-roadmap.json",
+  "roadmapTask": "Horizon 16 of agent-agnostic-browser-bridge: generalize captureTab's non-throwing too-large result pattern to executeScript and evaluatePage, fix findElement's duplicated size-limit constants, and add an explicit action to close the sandbox tab on request.",
+  "createdAt": "2026-09-04T17:51:06Z",
+  "updatedAt": "2026-09-04T19:03:19Z",
+  "roadmapRevision": 0,
+  "phases": [
+    {
+      "phaseId": "shared-oversize-result-helper",
+      "status": "done",
+      "attempts": 1,
+      "gateRun": "npm run verify (tsc --noEmit / eslint . --max-warnings 0 / vitest run) from tools/chrome-bridge — 24 test files, 364 tests passed",
+      "gradeResult": {
+        "phaseId": "shared-oversize-result-helper",
+        "dimensionScores": [
+          { "dimensionId": "shared-type-semantics", "score": 10, "pass": true, "evidence": "SizeCeilingOutcome (size-limits.ts:36-43) is exported with withinLimit/actualBytes/limitBytes. Its type-level doc comment (lines 27-35) explicitly names 'a FLAT ceiling result, distinct from captureTab's downscale-ladder sizing' and states the inclusive actualBytes <= limitBytes boundary. Above a 9, the disambiguation runs to three levels: the module header adds 'nothing in this module should be used to reason about the capture ladder,' and each field carries its own doc comment." },
+          { "dimensionId": "check-size-limit-purity", "score": 9, "pass": true, "evidence": "checkSizeLimit(bytes, limitBytes) (lines 57-66) is a plain sync function with no I/O, no chrome.*/DOM access, no async. Returns withinLimit: actualBytes <= limitBytes, echoing both sizes. Exactly-at-cap maps to withinLimit true; under/over branches correct; neither failure example present. All pass criteria met; minimal correct utility with no above-the-bar justification for a 10." },
+          { "dimensionId": "build-oversize-result-shape", "score": 9, "pass": true, "evidence": "buildOversizeResult(outcome) (lines 75-83) returns a plain OversizeResult built only from generic inputs, carrying tooLarge/actualBytes/limitBytes and surfacing both sizes. Embeds no actionName, no MCP content-block wrapper; test asserts Object.keys === [actualBytes, limitBytes, tooLarge] and no actionName/no error property. All pass criteria met; nothing above-the-bar beyond a clean generic shape." },
+          { "dimensionId": "unit-test-coverage", "score": 10, "pass": true, "evidence": "checkSizeLimit covered by three distinct concrete-value cases — under (10,100), exactly-at-cap (100,100 -> withinLimit:true plus explicit expect(outcome.withinLimit).toBe(true)), and over (101,100) — asserting real values via toEqual, plus a no-mutation test. buildOversizeResult exercised for over-cap with a shape assertion, and above a 9 also covers the exact-at-cap / within-limit-true case returning tooLarge:false (which is exactly the 'buildOversizeResult returns undefined unnoticed' failure example) and the no-tool-field shape test. No reviewer could ask for more." },
+          { "dimensionId": "zero-behavior-change-isolation", "score": 9, "pass": true, "evidence": "git status/diff confirm exactly two new files (size-limits.ts, size-limits.unit.test.ts) plus the horizon ledger .status.json, zero modifications to any pre-existing source or existing test. No barrel export/index.ts added. Purely additive; 364-test suite passes unchanged. All pass criteria met exactly." },
+          { "dimensionId": "type-quality-and-repo-conventions", "score": 9, "pass": true, "evidence": "No any, no non-null assertions, no JSON.parse-as-T; zero chrome.*/DOM usage; interfaces carry readonly fields; params typed. Test file uses import type for TypeOnly imports while value-importing functions, satisfying verbatimModuleSyntax/consistent-type-imports. tsc --noEmit and eslint --max-warnings 0 pass. Clean, convention-compliant." }
+        ],
+        "overallPass": true
+      },
+      "startedAt": "2026-09-04T17:51:06Z",
+      "completedAt": "2026-09-04T17:56:00Z",
+      "notes": "Created tools/chrome-bridge/src/extension/size-limits.ts + size-limits.unit.test.ts (2 new files, zero existing-file modifications). Graded by independent subagent: 6/6 dimensions passing (scores 10,9,9,10,9,9), overallPass true."
+    },
+    {
+      "phaseId": "nonthrowing-executescript-evaluatepage-oversize",
+      "status": "done",
+      "attempts": 1,
+      "gateRun": "npm run verify (tsc --noEmit / eslint . --max-warnings 0 / vitest run) from tools/chrome-bridge — 24 test files, 366 tests passed",
+      "gradeResult": {
+        "phaseId": "nonthrowing-executescript-evaluatepage-oversize",
+        "dimensionScores": [
+          {
+            "dimensionId": "both-transports-rewired",
+            "score": 9,
+            "pass": true,
+            "evidence": "coerceExecuteScriptOutcome (page-actions.ts:652-679) builds the oversize result via checkSizeLimit/buildOversizeResult into { result: { tooLarge, actualBytes, limitBytes } }; the CDP duplicate branch was removed from cdpEvalOutcome (debugger-ports.ts:548-593), which now surfaces over-cap values as { ok: true, json }. Grep confirms the '{ error } ... too large' sentinel string is gone and the size cap is applied at exactly one point; no throw in either oversize path. Single source-of-truth rather than two duplicated helper calls."
+          },
+          {
+            "dimensionId": "prior-diff-performed",
+            "score": 9,
+            "pass": true,
+            "evidence": "Both transports produce the same InPageScriptOutcome shape and funnel through the one shared coerceExecuteScriptOutcome, so the oversize fields (tooLarge/actualBytes/limitBytes) converge identically by construction — confirmed by both over-large tests asserting the exact literal shape. cdpEvalOutcome's doc comment (debugger-ports.ts:541-547) explicitly records the reconciliation decision (ceiling enforced once in the shared coercion, both paths stay symmetric), proving the branches were diffed and reconciled rather than assumed equivalent by transport name."
+          },
+          {
+            "dimensionId": "no-throw-non-oversize-preserved",
+            "score": 9,
+            "pass": true,
+            "evidence": "Success result shape unchanged at page-actions.ts:676 ({ result: { value } }); pre-existing under-cap tests (executeScript, evaluatePage) pass unmodified and the new under-cap tests assert the identical { result: { value: ... } } shape. No change to the HandlerOutcome success type contract and no new throw path in the success branch."
+          },
+          {
+            "dimensionId": "old-throw-tests-updated-plus-new-under-cap-tests",
+            "score": 9,
+            "pass": true,
+            "evidence": "page-actions.unit.test.ts no longer asserts executeScript/evaluatePage throw or return an error on oversize; both old over-large tests rewritten to assert the structured { result: { tooLarge: true, actualBytes: MAX+2, limitBytes: MAX } } result (lines 1978-1999 and 2128-2149), plus new under-cap tests for BOTH tools (2001-2012 and 2151-2162). debugger-ports.unit.test.ts rewrote the CDP over-large test (524-535) to assert the port passes an over-large value through uncapped as { ok: true, json }. Full run green: 152 tests pass across the three files."
+          },
+          {
+            "dimensionId": "no-error-swallowing-non-size-errors",
+            "score": 9,
+            "pass": true,
+            "evidence": "The oversize branch is reachable only when raw has ok:true and a string json whose length exceeds the cap; every other condition still returns a distinct { error } (non-record / CSP-blocked, ok:false in-page failure, unrecognised shape). The CDP rewrite removed only the size branch from cdpEvalOutcome and did not broaden any catch — exceptionDetails/undefined still map to { ok:false, error }, and attach/detach/timeout rejections still propagate. No try/catch funnels non-size errors into the oversize-shaped result."
+          }
+        ],
+        "overallPass": true
+      },
+      "startedAt": "2026-09-04T18:00:00Z",
+      "completedAt": "2026-09-04T18:22:00Z",
+      "notes": "The two oversize branches were diffed and reconciled: both transports funnel through coerceExecuteScriptOutcome (executeScript handler and evaluatePage handler both call it), so the duplicated oversize branch + constant import in cdpEvalOutcome (debugger-ports.ts) was removed and the size cap applied once via checkSizeLimit/buildOversizeResult. In addition to the roadmap's two listed test files, debugger-ports.unit.test.ts:524-539 (which directly trained cdpEvalOutcome's oversize branch) was rewritten to assert passthrough; this file was beyond the roadmap's filesAffected but was a necessary consequence, not a scope reinterpretation. Graded by independent subagent: 5/5 dimensions pass (all 9), overallPass true."
+    },
+    {
+      "phaseId": "findelement-limits-as-injected-args",
+      "status": "done",
+      "attempts": 1,
+      "gateRun": "npm run verify (tsc --noEmit / eslint . --max-warnings 0 / vitest run) from tools/chrome-bridge — 24 test files, 366 tests passed",
+      "gradeResult": {
+        "phaseId": "findelement-limits-as-injected-args",
+        "dimensionScores": [
+          { "dimensionId": "sole-caller-grep-verified", "score": 8, "pass": true, "evidence": "Sole-caller evidence documents the search (grep across tools/chrome-bridge/src) and the conclusion: findElement's injected function is an anonymous inline lambda passed directly to ports.executeScript so it cannot be reused; every other executeScript call passes its own distinct inline function; chrome.scripting.executeScript is reached only via the chromeCommandPorts adapter. Independently reproduced: only page-actions.ts:898 passes the 3-arg findElement lambda, and ports.ts:119 is the sole chrome.scripting.executeScript." },
+          { "dimensionId": "args-threaded-not-closed-over", "score": 9, "pass": true, "evidence": "Call-site args array is exactly [params['selector'], MAX_FIND_ELEMENT_MATCHES, MAX_ELEMENT_TEXT_CHARS] (line 980), in order matching the injected signature (selector, maxMatches, maxTextChars) (line 898); the body uses maxMatches (slice(0, maxMatches), line 941) and maxTextChars (slice(0, maxTextChars), line 951). The comment at 889-895 goes beyond criteria by documenting the structured-clone rationale for threading rather than closing over." },
+          { "dimensionId": "no-duplicated-local-consts", "score": 9, "pass": true, "evidence": "The injected body re-declares no local consts for the two limits; all usages reference maxMatches/maxTextChars directly, with no `arg ?? N` fallback. The one remaining local const, MAX_REF_DEPTH, is a distinct internal walk cap, and the comment explicitly reasons about why it stays inlined rather than threaded — a deliberate, documented exception." },
+          { "dimensionId": "module-constants-are-source-of-truth", "score": 8, "pass": true, "evidence": "The args array entries are the constant identifiers MAX_FIND_ELEMENT_MATCHES / MAX_ELEMENT_TEXT_CHARS (line 980), not inline numeric literals; no second renamed constant exists — the two constants remain singly declared at lines 101/108 and are referenced by both the call site and the tests." },
+          { "dimensionId": "tests-assert-against-imported-constants", "score": 8, "pass": true, "evidence": "The test imports both constants and uses their identifiers in the executeScript args assertion and both length assertions, and every injectedFn() call site passes the constants; the affected findElement block contains no bare 50/500 literals (the 60 in the cap test is a stub-count input, not a limit)." },
+          { "dimensionId": "behavior-and-type-safety-preserved", "score": 8, "pass": true, "evidence": "The injected new parameters are explicitly typed number (line 898), and the test asserts the executeScript mock received args ['.x', MAX_FIND_ELEMENT_MATCHES, MAX_ELEMENT_TEXT_CHARS] (length 3, correct order). Boundary tests verify the exact caps (60 matches to length 50 with total 60 & truncated; 2000-char text to length 500 & truncated); all 108 page-actions tests pass. Boundary tests use well-above-cap inputs rather than exact cap+1 — a minor refinement, but no off-by-one exists." }
+        ],
+        "overallPass": true
+      },
+      "startedAt": "2026-09-04T18:25:00Z",
+      "completedAt": "2026-09-04T18:31:00Z",
+      "notes": "Threaded MAX_FIND_ELEMENT_MATCHES / MAX_ELEMENT_TEXT_CHARS into the injected chrome.scripting function as explicit args (line 980), removed the duplicated local const MAX_MATCHES/MAX_TEXT_CHARS, kept MAX_REF_DEPTH inlined (documented as a deliberate exception), updated injectedFn() signature + all call sites, and rewrote the literal 50/500 assertions to the imported constants. Sole-caller grep performed across tools/chrome-bridge/src and documented: findElement's injected lambda is the sole reuse of that function reference. Graded by independent subagent: 6/6 dimensions passing (8,9,9,8,8,8), overallPass true."
+    },
+    {
+      "phaseId": "close-sandbox-tab-action",
+      "status": "done",
+      "attempts": 1,
+      "gateRun": "npm run verify (tsc --noEmit / eslint . --max-warnings 0 / vitest run) from tools/chrome-bridge — 24 test files, 371 tests passed",
+      "gradeResult": {
+        "phaseId": "close-sandbox-tab-action",
+        "dimensionScores": [
+          {
+            "dimensionId": "no-op-safety",
+            "score": 10,
+            "pass": true,
+            "evidence": "sandbox-ports.ts closeSandboxTab() (lines 90-105) is no-op-safe: an absent stored id returns {closed:false,hadTab:false} via the early return at 92-94; a chrome.tabs.remove rejection is caught (95-102), the id cleared, and {closed:false,hadTab:false} returned, so a twice-in-a-row or manually-closed tab never throws or rejects. The 10-vs-9 differentiator is that page-actions.ts ALSO wraps the handler in guard() (line 1378), so an unexpected throw from readStoredTabId/storage (outside the port's own try/catch) surfaces as {error} rather than an unhandled rejection."
+          },
+          {
+            "dimensionId": "scoping-correctness",
+            "score": 9,
+            "pass": true,
+            "evidence": "page-actions.ts closeSandboxTab (1262-1269) calls only sandboxTab.closeSandboxTab(); sandbox-ports.ts removes exactly the single id read via readStoredTabId (chrome.tabs.remove(storedId) at line 96) with no chrome.tabs.query/enumeration and no other tab id ever reachable. The 9-vs-10 gap: non-interference is proven by handler-level assertNoTabTraffic (page-actions.unit.test.ts 2768-2779, 10 ports asserted uncalled) and single-id strict matchers (toHaveBeenCalledWith(7)) rather than an explicit multi-tab fixture asserting remove is never passed a non-sandbox id."
+          },
+          {
+            "dimensionId": "reuse-not-duplicate-cleanup",
+            "score": 10,
+            "pass": true,
+            "evidence": "capture-ports.ts is unmodified (git diff is empty and it is absent from the modified-files list); neither page-actions.ts closeSandboxTab nor sandbox-ports.ts closeSandboxTab references captureStore/evict or imports capture-buffer — no capture-buffer-clearing or duplicated eviction logic exists in the close path. The 10-vs-9 differentiator: the close path verifiably carries zero capture references (only the generic onTabRemoved listener owns eviction, as the sandbox-ports doc comment at lines 51-52 explicitly states), so no reviewer could ask for more."
+          },
+          {
+            "dimensionId": "parity-surface-wiring",
+            "score": 9,
+            "pass": true,
+            "evidence": "PAGE_ACTIONS has 21 entries including closeSandboxTab (actions.ts line 31); types.ts exports CloseSandboxTabParams/CloseSandboxTabResult and wires both into PageActionParams (line 235) and PageActionResults (line 538); the handler returns the typed CloseSandboxTabResult with no as/any cast (page-actions.ts 1268); TOOL_CATALOG ads closeSandboxTab with a description + NO_ARGS schema (tool-catalog.ts 379-383) and handleToolCall routes it through the generic text branch (server.ts 160, no server change needed). The 9-vs-10 gap: there is no dedicated catalog test asserting closeSandboxTab's empty-properties no-args schema (the ping/getTabState/navigateBack no-args schema tests omit it; only the generic PAGE_ACTIONS loop covers its description/schema)."
+          },
+          {
+            "dimensionId": "test-coverage-of-behaviors",
+            "score": 8,
+            "pass": true,
+            "evidence": "Three behavior tests in sandbox-ports.unit.test.ts — close-and-clear (176-189, asserts result {closed:true,hadTab:true}, remove called with 7, storage cleared), no-op (191-202, result {closed:false,hadTab:false}, remove NOT called), stale/already-closed (204-217, remove rejects → caught, cleared, no-op result) — plus two handler tests in page-actions.unit.test.ts (2766-2810) asserting the delegated result shape and no-tab traffic. The 8-vs-9 gap: the passCriteria's third assertion ('a non-sandbox tab is not passed to chrome.tabs.remove') is established via handler-level assertNoTabTraffic and single-id strict matchers, not an explicit multi-tab fixture proving another tab's id is never reached."
+          }
+        ],
+        "overallPass": true
+      },
+      "startedAt": "2026-09-04T18:35:00Z",
+      "completedAt": "2026-09-04T18:40:00Z",
+      "notes": "Added closeSandboxTab end-to-end: PAGE_ACTIONS 20->21, CloseSandboxTabParams/Result, SandboxTabPorts.closeSandboxTab (chrome.tabs.remove in try/catch + best-effort storage clear, no-op-safe, never throws), page-actions handler delegating to the port (guarded), and the MCP tool-catalog entry. capture-ports.ts untouched (onTabRemoved owns eviction). Corrected the roadmap's filesAffected reference: the MCP tool catalog lives in mcp/tool-catalog.ts, not mcp/server.ts (server.ts needed no change — non-captureTab tools route generically). Graded by independent subagent: 5/5 dimensions passing (10,9,10,9,8), overallPass true."
+    },
+    {
+      "phaseId": "surface-oversize-and-close-docs-liveverify",
+      "status": "done",
+      "attempts": 2,
+      "completedAt": "2026-09-04T19:03:19Z",
+      "gateRun": "npm run verify (tsc --noEmit / eslint . --max-warnings 0 / vitest run) from tools/chrome-bridge — 24 test files, 375 tests passed",
+      "gradeResult": {
+        "phaseId": "surface-oversize-and-close-docs-liveverify",
+        "dimensionScores": [
+          { "dimensionId": "mcp-oversize-iserror-wiring", "score": 9, "pass": true, "evidence": "Discriminated structural guard isOversizeResult (tooLarge===true + numeric actualBytes/limitBytes) in server.ts, scoped by exact tool name to executeScript/evaluatePage and running after the response.error check; both tools share coerceExecuteScriptOutcome so no wrapper-divergence; unit tests prove non-oversize stays isError undefined and a tooLarge-shaped field on getPageText is not flagged." },
+          { "dimensionId": "closesandboxtab-docs-accuracy", "score": 10, "pass": true, "evidence": "README closeSandboxTab paragraph and the in-code tool-catalog entry agree with each other and with the implementation — {closed,hadTab} shape, no-op never-throws, sandbox-only scope, capture-buffer eviction via tab-removed listener, lazy-recreate-on-next-action. 10-vs-9: the two hand-maintained docs are consistent and pre-empt the 'docs disagree' failure mode." },
+          { "dimensionId": "full-verify-green", "score": 9, "pass": true, "evidence": "tools/chrome-bridge's own npm run verify (typecheck + lint + vitest) ran and was green — 24 test files, 375 tests, exit 0; no skip/loosening/timeout-bump, no red stage. scripts/verify.sh contains zero references to chrome-bridge, so repo-root verify targets the extension package and is not the gate for this code." },
+          { "dimensionId": "live-chrome-verification-both-concerns", "score": 8, "pass": true, "evidence": "Fresh MCP process PID 19443 started 21:58:12Z (after the ~18:45Z server.ts edit) so the live process runs the new isError branch. A live evaluatePage over-cap produced {tooLarge:true, actualBytes:1050002, limitBytes:1000000}; a stdio probe confirmed the raw JSON-RPC envelope carries isError:true when a branch sets it; the harness renders isError true/false JSON-text identically so the flag is set in the envelope though not visually distinguishable. executeScript sibling not driveable over-cap live (sandbox-tab chrome-error frame, env quirk); parity structural via coerceExecuteScriptOutcome + unit-tested. Close/recreate measured: 1799015698 → closeSandboxTab {closed:true,hadTab:true} → null → 1799015700 (different id)." },
+          { "dimensionId": "isolated-oversize-scope-no-regression", "score": 9, "pass": true, "evidence": "Oversize handling is additive (local isOversizeResult guard + imported OversizeResult type), does not alter captureTab's isCaptureTabImage branch or its too-large outcome field names (size/limit/floor/attempts); branch gated by exact tool name so findElement/read tools never reach it; existing captureTab/clickElement/unknown-tool tests pass unmodified." }
+        ],
+        "overallPass": true
+      },
+      "startedAt": "2026-09-04T19:00:39Z",
+      "notes": "Attempt 1 blocked on live-chrome dimension (stale MCP process predated server.ts edit). Attempt 2: user restarted the chrome-bridge MCP (new PID 19443, started 21:58:12Z, post-edit) so the live process runs the isError branch; re-verified oversize evaluatePage live through the fresh process + raw envelope carries isError:true; executeScript over-cap still blocked by the sandbox-tab chrome-error frame (env quirk); close/recreate measured. Re-graded: 5/5 dimensions pass (9,10,9,8,9), overallPass true. Code + docs complete; tsc/eslint/375 tests green."
+    }
+  ]
+}

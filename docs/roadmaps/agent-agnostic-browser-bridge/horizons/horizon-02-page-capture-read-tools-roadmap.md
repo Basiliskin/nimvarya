@@ -1,0 +1,1026 @@
+# Horizon 2 — Page capture read tools (readConsoleMessages / readNetworkRequests)
+
+Project: **agent-agnostic-browser-bridge** · Horizon **02** · Roadmap twin of `horizon-02-page-capture-read-tools-roadmap.json` · Planned 2026-09-02
+
+## Executive Summary
+
+### 🎯 What are we trying to achieve?
+
+Give any MCP-capable AI tool (Claude Code, Gemini CLI, Crush, Cursor, …) two new tools on the standalone chrome-bridge: **readConsoleMessages** and **readNetworkRequests**. They return what the real Chrome tab logged to its console and which fetch/XHR requests it made, straight from bounded per-tab buffers inside the extension. Each call takes `since` and `limit`, returns a `nextSince` cursor, and never deletes anything, so an agent can poll "what happened since I last looked". Done means the built extension loads in Chrome with two content scripts, the two tools return real entries from a live page, the cursor semantics are unit-tested, adding an action without a handler or tool entry fails `tsc`, and the package's own verify stays green.
+
+### 🧠 Why does this change need to happen?
+
+Horizon 1 shipped a Chrome-control tool that can navigate, read, click, type, and screenshot, but it is blind to what the page itself is doing: an agent debugging a web app cannot see console errors or failed API calls. Chrome extensions cannot observe those from the outside. The only way is to run a small script inside the page's own JavaScript world that wraps `console`, `fetch`, and `XMLHttpRequest`, hand each event to an extension content script (a WebSocket from the content script would be blocked by many sites' Content Security Policy), and store it in the extension's service worker where a tool call can read it back. None of that plumbing exists yet in `tools/chrome-bridge`.
+
+### At a glance
+
+- **Phases:** 7 (the full dependency chain the two tools need; at the hard ceiling by user decision)
+- **Complexity:** Medium — mostly new, well-bounded code; the risky parts are the three-pass Vite build and the first real Chrome load
+- **Main risk:** The extension has never been loaded in a real Chrome. Buffers live in service-worker memory, so if the keepalive alarm does not actually keep the worker alive, reads come back empty. Closing this horizon requires a real Chrome check, so this will be observed, not assumed.
+- **Quality target:** `npm run verify` (tsc + eslint --max-warnings 0 + vitest) green in tools/chrome-bridge; root `npm run verify:fast` untouched and green
+- **Testing focus:** cursor arithmetic at every boundary (dropped / truncated / stale since), UTF-8 byte-cap truncation, nullable fields always `null` never `undefined` (so the shared guard never drops an entry), a never-closing streaming body, import-side-effect-free modules, and the deliberate-omission typecheck proof
+- **Deferred to horizon 3:** README snippet verified against Gemini CLI + Crush (Cursor/Codex documented only), size-cap tuning
+
+---
+
+## Implementation plan
+
+### Order of work
+
+1. **Add capture entry types and message envelope** — nothing to wait for — the shared contract everything else imports
+2. **Add per-tab capture ring buffer** — independent pure data structure; can run in parallel with the contract
+3. **Add MAIN-world console and network wrapper script** — needs the envelope types, byte caps and guard from the contract
+4. **Add content script forwarding captures to worker** — needs the guard from the contract; independent of the page script
+5. **Connect service worker to capture ring buffers** — needs both the contract (validate) and the ring buffer (store)
+6. **Add content-script entries to extension build** — needs both content-script sources to exist before they can be bundled
+7. **Add readConsoleMessages and readNetworkRequests page actions** — needs the store, the read-limit constants, and the built extension for the live Chrome check
+
+```mermaid
+graph TD
+  capture_contract["Add capture entry types and message envelope (capture-contract)"]
+  capture_ring_buffer["Add per-tab capture ring buffer (capture-ring-buffer)"]
+  page_script_wrapper["Add MAIN-world console and network wrapper script (page-script-wrapper)"]
+  capture_forwarder["Add content script forwarding captures to worker (capture-forwarder)"]
+  service_worker_capture_intake["Connect service worker to capture ring buffers (service-worker-capture-intake)"]
+  extension_build_entries["Add content-script entries to extension build (extension-build-entries)"]
+  read_capture_page_actions["Add readConsoleMessages and readNetworkRequests page actions (read-capture-page-actions)"]
+  capture_contract --> page_script_wrapper
+  capture_contract --> capture_forwarder
+  capture_contract --> service_worker_capture_intake
+  capture_ring_buffer --> service_worker_capture_intake
+  page_script_wrapper --> extension_build_entries
+  capture_forwarder --> extension_build_entries
+  capture_ring_buffer --> read_capture_page_actions
+  service_worker_capture_intake --> read_capture_page_actions
+  extension_build_entries --> read_capture_page_actions
+```
+
+### Phase 1 — Add capture entry types and message envelope
+
+Technical ID: `capture-contract` · subsystem: protocol (capture contract) · layer: application · blast radius: small
+
+**Goal** — Create one shared protocol module, src/protocol/capture.ts, that defines what a captured console message and a captured network request look like, the tamper-resistant envelope they travel in from the page to the extension, the byte caps applied to each entry, and a hand-written type guard that every later consumer uses to validate an incoming envelope.
+
+**Why** — Three separate scripts (the page-world wrapper, the content-script forwarder, and the service worker) will all exchange the same records across two untrusted message boundaries. If each defined its own shape, they would drift; putting the shape, the caps, and the validator in one module first means every later phase imports one contract instead of inventing one.
+
+**Changes**
+
+- Create src/protocol/capture.ts exporting `CAPTURE_NAMESPACE` (a non-guessable string constant such as `__chrome_bridge_capture_v1__`, mirroring boky's `__boky_capture_v1__` trust-boundary pattern) and a `CaptureChannel` union of `"console" | "network"`.
+- Define `ConsoleEntry` (`level`: `"log"|"info"|"warn"|"error"|"debug"|"uncaught"`, `text`: args already serialized to one bounded string, `timestamp`: epoch ms, `truncated`: boolean) and `NetworkEntry` (`requestId`, `method`, `url`, `status` (number or null when the request failed), `durationMs`, `contentType` (string or null), `bodyPreview` (string or null), `truncated`, `failed`: boolean, `timestamp`) — field set copied from boky's NetworkActivityFrame minus the WebSocket variants and full-body capture.
+- Define `CaptureEnvelope = { ns: typeof CAPTURE_NAMESPACE; channel: CaptureChannel; entry: ConsoleEntry | NetworkEntry }` as a discriminated union on `channel`, and export a hand-written predicate `isCaptureEnvelope(value: unknown): value is CaptureEnvelope` that checks `ns`, `channel`, and every required field type (no `satisfies`, no casts — both are banned by the package eslint config).
+- Export the byte caps as named constants — `MAX_CONSOLE_TEXT_BYTES` (provisional 8 192) and `MAX_BODY_PREVIEW_BYTES` (provisional 4 096) — plus a pure helper `boundText(text: string, maxBytes: number): { text: string; truncated: boolean }` that cuts on UTF-8 byte length so the cap is enforceable both in the page world before postMessage and defensively in the service worker.
+- Write capture.unit.test.ts naming every export verbatim (the repo coverage guard requires each export name to appear in the co-located test): accept a valid console and network envelope, reject a wrong namespace, wrong channel, missing field, and non-object; `boundText` returns unchanged text under the cap and cuts multi-byte text without splitting a character.
+- Do NOT add anything to PAGE_ACTIONS or the tool catalog in this phase — that happens in the final phase so `npm run typecheck` stays green after every phase.
+
+**Files / areas**
+
+- `tools/chrome-bridge/src/protocol/capture.ts`
+- `tools/chrome-bridge/src/protocol/capture.unit.test.ts`
+
+**How to verify**
+
+- **isCaptureEnvelope rejects each malformed field, not just the happy path** — Open src/protocol/capture.ts and confirm isCaptureEnvelope is a hand-written predicate with signature `(value: unknown): value is CaptureEnvelope` and contains no `as`, `satisfies`, or `!` operators.
+- **boundText cuts on UTF-8 bytes without splitting a code point** — boundText('abc', 3) returns { text: 'abc', truncated: false } — the exact-cap case is not truncated.
+- **Entry types encode nullability and the discriminated union precisely** — In capture.ts, CaptureEnvelope is written as a union of two object types (one with `channel: 'console'; entry: ConsoleEntry`, one with `channel: 'network'; entry: NetworkEntry`), not one object with a union-typed entry.
+- **capture.unit.test.ts exercises behaviour, not just names** — Run `grep -o 'export [a-zA-Z]* [A-Za-z_]*' src/protocol/capture.ts` and confirm every exported name (CAPTURE_NAMESPACE, CaptureChannel, ConsoleEntry, NetworkEntry, CaptureEnvelope, isCaptureEnvelope, MAX_CONSOLE_TEXT_BYTES, MAX_BODY_PREVIEW_BYTES, boundText) appears as a string in capture.unit.test.ts.
+
+**Done when** — src/protocol/capture.ts — the capture contract module (entry types, envelope, namespace, byte caps, `boundText`, `isCaptureEnvelope`) with a green co-located unit test; `npm run verify` in tools/chrome-bridge stays green. Every check under *How to verify* passes its bar.
+
+**Depends on** — nothing — can start immediately
+
+<details><summary>Reference — full rubric and healer hint</summary>
+
+#### guard-rejects-every-field-violation — isCaptureEnvelope rejects each malformed field, not just the happy path (minScore 7)
+
+*Rule:* isCaptureEnvelope must return false for any value whose ns, channel, or any required entry field is missing, null, or of the wrong type, and it must never throw. 10 = every field of both entry shapes is individually checked, nullable fields (status, contentType, bodyPreview) accept null but reject undefined/wrong types, and the channel/entry pairing is enforced (a console entry under channel 'network' is rejected). 8 = all required fields checked but nullable fields or the channel/entry pairing are loosely handled. Below minScore = the guard checks only ns and channel and trusts the entry.
+
+*Pass criteria:*
+- Open src/protocol/capture.ts and confirm isCaptureEnvelope is a hand-written predicate with signature `(value: unknown): value is CaptureEnvelope` and contains no `as`, `satisfies`, or `!` operators.
+- Call isCaptureEnvelope with each of: null, undefined, a string, an array, {} — every call returns false without throwing.
+- Take a valid console envelope and, one field at a time, delete `level`, `text`, `timestamp`, `truncated` — each mutated copy returns false.
+- Take a valid network envelope and, one field at a time, delete `requestId`, `method`, `url`, `durationMs`, `truncated`, `failed`, `timestamp` — each mutated copy returns false.
+- For the nullable fields `status`, `contentType`, `bodyPreview`: a value of null returns true; a value of undefined or a wrong type (e.g. status: '200') returns false.
+- An envelope with `level: 'trace'` (not in the union) returns false; an envelope with `channel: 'network'` but a console-shaped entry returns false.
+- An envelope with a correct-looking ns that differs by one character (e.g. `__chrome_bridge_capture_v2__`) returns false.
+
+*Failure examples:*
+- The guard checks `typeof entry.status === 'number'` and thereby rejects the legitimate `status: null` for failed requests, so every failed fetch is silently dropped by later phases.
+- The guard validates `level` with `typeof level === 'string'` instead of checking membership in the six-value union, so `level: 'trace'` passes and the ring buffer stores a level the read tool's consumers cannot handle.
+- The guard narrows `channel` but then validates the entry against a union of both shapes, so a network entry travelling under `channel: 'console'` is accepted.
+- Missing-field checks use `'text' in obj` without a typeof check, so `{ text: 42 }` passes.
+
+#### boundtext-utf8-correctness — boundText cuts on UTF-8 bytes without splitting a code point (minScore 7)
+
+*Rule:* boundText(text, maxBytes) must measure UTF-8 byte length (not JS string length), return the input unchanged with truncated=false when at or under the cap, and when over the cap return a prefix whose UTF-8 byte length is <= maxBytes that ends on a complete code point (no lone surrogate, no partial multi-byte sequence). 10 = handles 2-, 3-, and 4-byte characters (including astral emoji / surrogate pairs) and the maxBytes=0 edge; 8 = handles multi-byte BMP characters correctly but is untested against surrogate pairs; below minScore = cuts by String.length or slices mid-character.
+
+*Pass criteria:*
+- boundText('abc', 3) returns { text: 'abc', truncated: false } — the exact-cap case is not truncated.
+- boundText('ééé', 5) (each é is 2 bytes) returns text 'éé' (4 bytes) with truncated: true — never a 5-byte result containing a partial character.
+- boundText('😀😀', 5) (each emoji is 4 bytes) returns text '😀' with truncated: true, and the returned string contains no lone surrogate (check: `new TextEncoder().encode(result.text)` length is 4 and `result.text.isWellFormed()` or an equivalent check is true).
+- For any truncated result, `new TextEncoder().encode(result.text).length <= maxBytes` holds — assert this in the test over at least the three cases above.
+- boundText is a pure function: no module-level mutable state, no Date/Math.random, same input yields same output.
+- MAX_CONSOLE_TEXT_BYTES and MAX_BODY_PREVIEW_BYTES are exported numeric constants (8192 and 4096) and each name appears verbatim in capture.unit.test.ts.
+
+*Failure examples:*
+- Implementation uses `text.slice(0, maxBytes)` and reports truncated by comparing `text.length > maxBytes`, so an 8000-character CJK string (24 000 bytes) passes uncut and the service worker later exceeds its byte budget.
+- Implementation encodes to bytes, slices the byte array at maxBytes, and decodes with TextDecoder without `fatal`, producing a trailing U+FFFD replacement character instead of ending on the previous complete code point.
+- Implementation walks by UTF-16 code units and stops at a high surrogate, returning a string ending in a lone surrogate that JSON.stringify will later escape as \ud83d and that postMessage structured-clone may reject.
+- The exact-cap case (byte length === maxBytes) is reported as truncated: true because the comparison uses `>=`.
+
+#### types-model-nullability-exactly — Entry types encode nullability and the discriminated union precisely (minScore 7)
+
+*Rule:* ConsoleEntry, NetworkEntry, and CaptureEnvelope must be declared so that TypeScript itself catches misuse: nullable fields are `T | null` (not optional `?:`), CaptureEnvelope narrows `entry` to the right shape when `channel` is checked, and `ns` is typed as `typeof CAPTURE_NAMESPACE` (a literal, not `string`). 10 = all of the above plus `level` and `channel` are string-literal unions and the constants are `as const`-free literal-typed via explicit annotation; 8 = narrowing works but one nullable field is declared optional; below minScore = CaptureEnvelope is a single object type with `entry: ConsoleEntry | NetworkEntry` that does not narrow on channel.
+
+*Pass criteria:*
+- In capture.ts, CaptureEnvelope is written as a union of two object types (one with `channel: 'console'; entry: ConsoleEntry`, one with `channel: 'network'; entry: NetworkEntry`), not one object with a union-typed entry.
+- Write a scratch snippet (or a type-level test) `if (env.channel === 'network') { env.entry.requestId }` — it typechecks with no cast; the same access under `channel === 'console'` is a compile error.
+- `status`, `contentType`, `bodyPreview` are declared as `number | null` / `string | null` — grep the file for `status?:`, `contentType?:`, `bodyPreview?:` and find none.
+- `CAPTURE_NAMESPACE` is declared with an explicit literal type annotation (e.g. `const CAPTURE_NAMESPACE: '__chrome_bridge_capture_v1__' = ...`) or `as const`, so `typeof CAPTURE_NAMESPACE` is the literal, not `string` — hover/`tsc` shows the literal.
+- No `satisfies` keyword and no `JSON.parse(...) as` appear anywhere in capture.ts or capture.unit.test.ts (`npm run lint` in tools/chrome-bridge is green with --max-warnings 0).
+- capture.ts imports nothing from src/protocol/actions.ts and actions.ts is not modified in this phase (git diff shows only the two files listed in the phase).
+
+*Failure examples:*
+- CaptureEnvelope is declared as `{ ns; channel: CaptureChannel; entry: ConsoleEntry | NetworkEntry }`, so every consumer in later phases must re-guard `'requestId' in entry` and the guard's channel/entry pairing check is unenforceable at the type level.
+- `bodyPreview?: string` is used instead of `string | null`; under exactOptionalPropertyTypes the page script cannot assign `bodyPreview: undefined`, and the guard cannot distinguish 'absent' from 'no body', so the wire format becomes ambiguous.
+- `export const CAPTURE_NAMESPACE = '__chrome_bridge_capture_v1__'` is fine, but a helper widens it via `const ns: string = CAPTURE_NAMESPACE` before comparison, so the guard compiles against `string` and a typo in a later forwarder is not a compile error.
+- Developer adds `readConsoleMessages` to PAGE_ACTIONS 'while they're here', breaking tsc parity until the final phase and violating the phase's explicit exclusion.
+
+#### test-file-is-real-coverage — capture.unit.test.ts exercises behaviour, not just names (minScore 7)
+
+*Rule:* The co-located test must name every export verbatim (coverage-guard requirement) AND assert observable behaviour for each of them; a test file that only imports the symbols or asserts `toBeDefined` does not count. 10 = fixtures are built via small factory helpers so each negative case mutates exactly one field, and both channels have accept + reject cases; 8 = all cases present but negative cases share a hand-copied fixture; below minScore = only happy-path envelopes are asserted or any export is missing from the file.
+
+*Pass criteria:*
+- Run `grep -o 'export [a-zA-Z]* [A-Za-z_]*' src/protocol/capture.ts` and confirm every exported name (CAPTURE_NAMESPACE, CaptureChannel, ConsoleEntry, NetworkEntry, CaptureEnvelope, isCaptureEnvelope, MAX_CONSOLE_TEXT_BYTES, MAX_BODY_PREVIEW_BYTES, boundText) appears as a string in capture.unit.test.ts.
+- The test file contains at least: one `expect(isCaptureEnvelope(validConsole)).toBe(true)`, one `expect(isCaptureEnvelope(validNetwork)).toBe(true)`, and at least five distinct `toBe(false)` cases (wrong ns, wrong channel, missing field, non-object, wrong field type).
+- The test file contains at least three boundText assertions covering: under-cap unchanged, ASCII over-cap, and multi-byte over-cap with a byte-length check via TextEncoder.
+- `cd tools/chrome-bridge && npm run verify` exits 0 (typecheck, lint with zero warnings, and vitest all green).
+- Deleting the body of isCaptureEnvelope and replacing it with `return true` makes at least five tests fail (mutation sanity check); replacing boundText with `return { text, truncated: false }` makes at least two tests fail.
+
+*Failure examples:*
+- Type-only exports (ConsoleEntry, NetworkEntry, CaptureEnvelope, CaptureChannel) are referenced only via `import type` and never appear as a bare string in a test name or comment, so the coverage guard's verbatim-name check fails even though the runtime tests are thorough.
+- Negative tests are written by spreading a valid fixture and setting the bad field to `undefined` — under exactOptionalPropertyTypes this may not compile, so the developer 'fixes' it with a cast and the lint stage goes red.
+- The multi-byte boundText test asserts on `result.text.length` (UTF-16 units) instead of encoded byte length, so a byte-incorrect implementation still passes.
+- All negative guard cases use the console channel only; a bug in the NetworkEntry branch (e.g. never checking `failed`) is not caught.
+
+**Healer hint:** The most likely failure is boundText slicing by String.length or by raw bytes without stepping back to a code-point boundary, or the guard rejecting legitimate null in status/contentType/bodyPreview — fix by encoding with TextEncoder, walking back over continuation bytes (0x80-0xBF) before decoding, and validating nullable fields with `x === null || typeof x === 'number'`.
+
+</details>
+
+### Phase 2 — Add per-tab capture ring buffer
+
+Technical ID: `capture-ring-buffer` · subsystem: capture ring buffer (pure store) · layer: application · blast radius: small
+
+**Goal** — Create a pure-TypeScript bounded ring buffer, src/extension/capture-buffer.ts, that keeps the newest N entries, stamps each with a monotonic sequence number, and answers non-destructive `since` + `limit` window reads reporting `nextSince`, `dropped`, and `truncated` — the single definition of the read semantics every later phase relies on.
+
+**Why** — The two read tools return 'what happened since the caller last looked'; that only works if there is one carefully tested definition of the cursor arithmetic, wrap-around, and what happens when the caller's cursor is stale. Defining it as a pure data structure with no Chrome dependency means it can be exhaustively unit-tested in Node before any browser glue exists.
+
+**Changes**
+
+- Create src/extension/capture-buffer.ts exporting `DEFAULT_MAX_ENTRIES` (provisional 500), `DEFAULT_READ_LIMIT` (100), `MAX_READ_LIMIT` (500), a `CaptureRead<T>` result type `{ entries: ReadonlyArray<T & { seq: number }>; nextSince: number; dropped: boolean; truncated: boolean }`, and a factory `createCaptureRing<T>(maxEntries?: number)` returning `{ push(entry: T): number; read(query: { since: number; limit: number }): CaptureRead<T>; size(): number; clear(): void }`.
+- `push` assigns the next sequence number starting at 1 and, when the buffer is full, overwrites the oldest entry (bounded-array idiom, same spirit as `OUTBOX_LIMIT` in bridge-client.ts); the sequence counter never reuses a number for the life of the buffer.
+- `read` returns entries with `seq > since` in ascending order capped at `limit`; `nextSince` is the `seq` of the last returned entry, or the caller's `since` when nothing new exists; `dropped` is true when the oldest retained `seq` is greater than `since + 1` (the ring overwrote entries the caller never saw); `truncated` is true when more entries matched than `limit`. Reads never remove entries.
+- A stale cursor — `since` greater than the newest `seq` (happens after the service worker restarted and the counter reset) — is treated as 0 so the caller sees everything currently held rather than an error or a permanently empty window. Document this in the module doc comment.
+- Handle `noUncheckedIndexedAccess` explicitly (every `arr[i]` is `T | undefined`) without non-null assertions.
+- Write capture-buffer.unit.test.ts naming every export: fill past capacity and verify oldest-overwritten and `dropped`; since/limit windows at start, middle, and end; `truncated` when limit cuts; `nextSince` advances across successive reads; stale `since` resets to full window; `clear` empties and a later `read` returns an empty-but-valid result (the post-suspension case named in success criterion 5).
+
+**Files / areas**
+
+- `tools/chrome-bridge/src/extension/capture-buffer.ts`
+- `tools/chrome-bridge/src/extension/capture-buffer.unit.test.ts`
+
+**How to verify**
+
+- **since/limit window arithmetic is exact at every boundary** — Push 5 entries into createCaptureRing, call read({since: 2, limit: 100}): entries have seq [3,4,5], nextSince is 5, truncated is false.
+- **Wrap-around keeps the newest N and the dropped flag is off-by-one-exact** — createCaptureRing(3), push 5 entries, then size() returns 3 and read({since:0, limit:10}) returns seq [3,4,5] — seq 1 and 2 are gone, seq 5 is not 2 or 3 (no counter reuse).
+- **Stale cursor resets to a full window; clear() yields an empty-but-valid read** — Push 3 entries, call read({since: 999, limit: 10}): entries have seq [1,2,3] (full window), it does not throw.
+- **Reads never mutate; memory is bounded by construction** — Call read({since: 0, limit: 10}) twice in a row on a populated ring; the two results are deep-equal (toEqual) and size() is identical before and after.
+- **Compiles under the repo's strict rules and every export is named in the co-located test** — `cd tools/chrome-bridge && npm run verify` exits 0 on the branch.
+
+**Done when** — src/extension/capture-buffer.ts — a generic bounded ring buffer with `push`/`read`/`clear` and the documented `since`/`limit`/`nextSince`/`dropped`/`truncated` semantics, fully covered by a green co-located unit test. Every check under *How to verify* passes its bar.
+
+**Depends on** — nothing — can start immediately
+
+<details><summary>Reference — full rubric and healer hint</summary>
+
+#### window-read-arithmetic — since/limit window arithmetic is exact at every boundary (minScore 8)
+
+*Rule:* read({since, limit}) must return exactly the entries with seq > since, ascending, at most `limit` of them, with nextSince equal to the last returned seq (or the caller's since when nothing matched) and truncated true only when strictly more entries matched than were returned. 10 = every boundary (since=0, since=newest, since=newest-1, limit=0, limit=1, limit=matched-count exactly) is provably correct and tested; 8 = ordinary windows and truncation correct, one edge not exercised by a test; below minScore = any window returns a wrong set, wrong order, or a wrong nextSince.
+
+*Pass criteria:*
+- Push 5 entries into createCaptureRing, call read({since: 2, limit: 100}): entries have seq [3,4,5], nextSince is 5, truncated is false.
+- Call read({since: 2, limit: 2}) on the same ring: entries have seq [3,4], nextSince is 4, truncated is true.
+- Push exactly 3 entries and read({since: 0, limit: 3}): truncated is false (limit equal to match count is NOT truncation).
+- Call read({since: 5, limit: 10}) when newest seq is 5: entries is empty, nextSince is 5 (the caller's since is echoed, not 0 and not undefined), dropped is false, truncated is false.
+- Entry objects in the result carry the original payload fields plus a numeric seq; the test asserts on both a payload field and seq for at least one returned entry.
+
+*Failure examples:*
+- truncated is computed as `entries.length === limit`, so a read whose match count happens to equal limit reports truncated=true and the caller loops forever expecting more.
+- nextSince is computed as `since + entries.length` or `since + limit`; correct until the ring wraps, then it silently points into overwritten seq space.
+- An empty read returns nextSince: 0 instead of echoing the caller's since, so the next call re-reads the whole buffer.
+- Entries are returned newest-first because the implementation iterates from the write head backwards.
+
+#### wraparound-and-dropped-flag — Wrap-around keeps the newest N and the dropped flag is off-by-one-exact (minScore 8)
+
+*Rule:* Once maxEntries pushes have happened, each further push must overwrite the oldest entry so size() stays at maxEntries; seq numbers must keep increasing across wraps and never repeat; dropped must be true exactly when the oldest retained seq is greater than since + 1. 10 = both sides of the dropped boundary tested (since = oldest-1 gives false, since = oldest-2 gives true) plus a multi-wrap run; 8 = overwrite and a single dropped=true case tested but the false-side boundary not; below minScore = dropped is wrong on either side or size() exceeds maxEntries.
+
+*Pass criteria:*
+- createCaptureRing(3), push 5 entries, then size() returns 3 and read({since:0, limit:10}) returns seq [3,4,5] — seq 1 and 2 are gone, seq 5 is not 2 or 3 (no counter reuse).
+- With the ring above (oldest retained seq = 3): read({since: 2, limit: 10}) has dropped === false; read({since: 1, limit: 10}) has dropped === true; read({since: 0, limit: 10}) has dropped === true.
+- Push 2 * maxEntries + 1 entries into a small ring (e.g. maxEntries 4) and verify read returns the last 4 seqs contiguous and ascending — proves the write index wraps more than once without corruption.
+- dropped is false on a fresh buffer read with since 0 (nothing was ever overwritten).
+- push returns the seq it assigned, and successive returns are strictly consecutive integers starting at 1.
+
+*Failure examples:*
+- dropped is computed as `oldestSeq > since` rather than `oldestSeq > since + 1`, so a caller whose cursor is exactly the last-evicted seq is falsely told it missed data.
+- The write index is `seq % maxEntries` but entries are stored in an array that was never pre-sized, so after wrap the array holds `undefined` holes and read() skips or throws under noUncheckedIndexedAccess.
+- Buffer uses `arr.push` + `arr.shift()` per insert: correct semantics but O(n) per push; acceptable only if maxEntries is small — if the test file never pushes past capacity, this and a real bug are indistinguishable.
+- dropped is derived from `since < newestSeq - maxEntries` which is right only when the buffer is full; on a half-full buffer it reports dropped=true for since=0.
+
+#### stale-cursor-and-clear — Stale cursor resets to a full window; clear() yields an empty-but-valid read (minScore 7)
+
+*Rule:* A since greater than the newest seq must be treated as 0 (full window, not an error and not a permanent empty), while since equal to the newest seq must stay an empty read; clear() must remove all entries so a subsequent read returns { entries: [], nextSince: since, dropped: false, truncated: false } and size() is 0, and the module doc comment must state the stale-cursor rule. 10 = both the > and == boundaries tested, clear tested with a non-zero since, doc comment present and accurate about why (SW restart resets the counter); 8 = stale reset tested, == boundary or doc comment missing; below minScore = stale since throws, returns empty, or since==newest wrongly resets.
+
+*Pass criteria:*
+- Push 3 entries, call read({since: 999, limit: 10}): entries have seq [1,2,3] (full window), it does not throw.
+- Push 3 entries, call read({since: 3, limit: 10}): entries is empty (equal-to-newest is NOT stale).
+- read({since: 7, limit: 10}) on a brand-new ring with zero pushes returns entries [] and does not throw.
+- After push x3 then clear(): size() is 0, read({since: 0, limit: 10}) returns entries [] with dropped false and truncated false; a push after clear() still works and returns a seq greater than the pre-clear seqs (or the test documents whichever counter policy was chosen after clear).
+- The top of capture-buffer.ts has a doc comment that mentions the stale-since rule and the service-worker-restart reason in plain words a reader can find with grep for 'stale'.
+
+*Failure examples:*
+- Stale check is written as `since >= newestSeq` so a caller whose cursor is exactly the newest seq gets the entire buffer replayed on every poll.
+- Stale detection is skipped when the buffer is empty, so read({since: 7}) on an empty ring returns nextSince 7 and — after new pushes with seq 1..5 — the caller is stuck with an empty window forever (the exact post-suspension bug the phase exists to prevent).
+- clear() resets the array but leaves the head index, so the next push lands mid-array and the first read after clear returns entries in the wrong order.
+- clear() also resets the seq counter to 0, so seq numbers are reused within the lifetime of the buffer, contradicting the phase's never-reuse rule; not necessarily wrong, but only acceptable if a test pins the chosen behavior.
+
+#### non-destructive-and-bounded — Reads never mutate; memory is bounded by construction (minScore 7)
+
+*Rule:* Calling read() any number of times with the same arguments must return deep-equal results and leave size() unchanged; the internal storage must never hold more than maxEntries entries regardless of push count; maxEntries and limit inputs outside their sane range (0, negative, NaN, non-integer, limit > MAX_READ_LIMIT) must be handled by an explicit, tested policy (clamp or throw) rather than by accident. 10 = repeat-read test, a large push count (>= 10x maxEntries) size assertion, and an explicit input-validation test with the policy stated in a comment; 8 = repeat-read and bound tested, invalid inputs unhandled but harmless; below minScore = read mutates state or size can exceed maxEntries.
+
+*Pass criteria:*
+- Call read({since: 0, limit: 10}) twice in a row on a populated ring; the two results are deep-equal (toEqual) and size() is identical before and after.
+- Push 5000 entries into createCaptureRing(500) (or DEFAULT_MAX_ENTRIES); size() is 500 and no internal array grows beyond 500 — check by reading the source: the storage is a fixed-capacity array indexed modulo maxEntries, or a push/shift pair, not an ever-growing array that is sliced on read.
+- createCaptureRing() with no argument uses DEFAULT_MAX_ENTRIES (500) — assert size() after 600 pushes is 500.
+- read({since: 0, limit: 0}) and read({since: 0, limit: -1}) either return an empty result or throw a typed error; the test file pins whichever was chosen. Same for createCaptureRing(0).
+- The returned entries array is not the internal storage array (mutating the result must not change a later read) — a test pushes onto/modifies the returned array and re-reads.
+
+*Failure examples:*
+- read() builds the result by `internal.splice(...)` or by shifting consumed entries, so each poll deletes what it returned and a second reader (the other read tool sharing the buffer, or a retry after a lost response) sees nothing.
+- Implementation stores everything in a growing array and returns `arr.slice(-maxEntries)` on read: size() reports the cap, but memory grows unbounded in a long-lived service worker.
+- limit is passed straight into `slice(start, start + limit)` with no clamp, so limit: -1 yields a bizarre window and limit: Infinity ignores MAX_READ_LIMIT entirely even though the constant is exported.
+- read() returns the live internal array (`return { entries: this.items }`), so a caller that sorts or mutates the result corrupts the buffer.
+
+#### strict-ts-and-test-naming — Compiles under the repo's strict rules and every export is named in the co-located test (minScore 7)
+
+*Rule:* tools/chrome-bridge must pass `npm run verify` (tsc + eslint + vitest) with the two new files, with zero `!` non-null assertions, zero `any`, zero `as` casts around indexed access, and capture-buffer.unit.test.ts must mention each of DEFAULT_MAX_ENTRIES, DEFAULT_READ_LIMIT, MAX_READ_LIMIT, CaptureRead, and createCaptureRing verbatim. 10 = verify green, every export named AND asserted (constants' values checked, CaptureRead used as an explicit type annotation), undefined-from-index handled by narrowing with a comment explaining why the hole cannot occur; 8 = verify green, exports named, some constants only referenced not asserted; below minScore = verify red or an export missing from the test file.
+
+*Pass criteria:*
+- `cd tools/chrome-bridge && npm run verify` exits 0 on the branch.
+- `grep -nE '!\.|!\)|!;|!\[' tools/chrome-bridge/src/extension/capture-buffer.ts` finds no non-null assertions; `grep -n 'as ' capture-buffer.ts` finds no type casts on indexed reads and `grep -n 'satisfies' capture-buffer.ts` finds nothing — `satisfies` is banned repo-wide by the package's `no-restricted-syntax` rule, so an explicit `if (x === undefined)` narrowing (with a comment explaining why the hole cannot occur) is the only permitted way to handle `T | undefined` from indexed access.
+- `grep -c` for each of DEFAULT_MAX_ENTRIES, DEFAULT_READ_LIMIT, MAX_READ_LIMIT, CaptureRead, createCaptureRing in capture-buffer.unit.test.ts is >= 1.
+- The test asserts DEFAULT_MAX_ENTRIES === 500, DEFAULT_READ_LIMIT === 100, MAX_READ_LIMIT === 500, and uses `CaptureRead<...>` as a type annotation on at least one variable so a rename breaks the test.
+- The factory's optional maxEntries parameter is typed `maxEntries?: number` (not `number | undefined`) and the result type's entries field is ReadonlyArray, matching the phase's declared signatures verbatim.
+
+*Failure examples:*
+- Every `arr[i]` is narrowed with `if (entry === undefined) continue;` inside the read loop, which quietly skips a hole and turns a wrap-around bug into a shorter result instead of a failure — compiles clean, hides the defect.
+- CaptureRead is exported but only appears in the test as an import that is never used, tripping noUnusedLocals or eslint's unused-import rule so verify goes red on lint, not on tsc.
+- DEFAULT_READ_LIMIT and MAX_READ_LIMIT are exported and named in the test to satisfy the naming rule, but nothing applies them in this phase — acceptable only because the final phase (read-capture-page-actions) consumes them; no hook enforces the every-export-has-an-importer rule under tools/ (check-dead-exports.mjs never scans it), so a reviewer must confirm the consumer exists by hand.
+- The test file uses `as CaptureRead<Entry>` on a JSON-ish literal to satisfy the naming rule, violating the repo's cast ban.
+
+**Healer hint:** The most likely miss is off-by-one cursor arithmetic (dropped using `oldestSeq > since` instead of `> since + 1`, stale using `>=` instead of `>`, truncated using `length === limit`) — add the explicit both-sides boundary tests from the rubric first, then fix the comparisons until they pass.
+
+</details>
+
+### Phase 3 — Add MAIN-world console and network wrapper script
+
+Technical ID: `page-script-wrapper` · subsystem: page script (MAIN world) · layer: infrastructure · blast radius: medium
+
+**Goal** — Create src/extension/page-script.ts — the script that will run inside the web page's own JavaScript world at document start — which wraps console.log/info/warn/error/debug, window `error` / `unhandledrejection`, `window.fetch`, and `XMLHttpRequest`, serializes each event into a bounded ConsoleEntry or NetworkEntry, and posts it to the page via `window.postMessage` inside the capture envelope.
+
+**Why** — Chrome extensions cannot see a page's console output or its fetch/XHR calls from the outside; the only way is to run code in the page's own world and wrap those APIs before the page uses them. Writing the wrapper as an installer function that receives its `console`/`fetch`/`XMLHttpRequest`/`postMessage` targets as parameters lets it be unit-tested in Node with fakes, since this package has no jsdom.
+
+**Changes**
+
+- Create src/extension/page-script.ts exporting an interface `PageCaptureEnv` ({ console: a minimal console-like object; fetch: typeof fetch; XMLHttpRequest: the XHR constructor; postMessage(envelope: CaptureEnvelope): void; addEventListener for `error`/`unhandledrejection`; now(): number }) and `installPageCapture(env: PageCaptureEnv): void` that replaces the five console methods (calling the original first, then posting a ConsoleEntry with args serialized via a bounded `serializeArgs` helper that handles strings, numbers, Errors (name + message), and JSON-serializable objects with a try/catch fallback to `String(arg)`), and posts an `uncaught` ConsoleEntry for window error / unhandledrejection.
+- Wrap `fetch`: record method, url, start time; on resolve post a NetworkEntry with status, `contentType` from headers, `durationMs`, and a `bodyPreview` obtained ONLY when the content type is text-like (`text/*`, `application/json`, `application/javascript`, `+json`) by reading the FIRST `MAX_BODY_PREVIEW_BYTES` bytes of `response.clone().body` through a stream reader (`getReader()` + TextDecoder, cancel the reader once the cap is reached) — never `clone().text()`, which would buffer whole or streaming bodies in the page; mark `truncated: true` when the cap cut it. On reject post `failed: true` with `status: null`. Never alter the response returned to the page. The entry is posted as soon as headers arrive plus the preview bytes, not after a streaming body ends.
+- Wrap `XMLHttpRequest.prototype.open` / `send` to remember method/url and, on `loadend`, post a NetworkEntry using `status`, `getResponseHeader('content-type')`, and `responseText` only when `responseType` is `''` or `'text'` (reading it otherwise throws).
+- Truncate every text field at capture time in the page world using `boundText` from the capture contract so oversized payloads never cross postMessage — this is where the per-entry byte cap is enforced first.
+- Export `PAGE_CAPTURE_INSTALLED_FLAG` and guard against double installation; at the bottom of the file add a runtime bootstrap guarded by `typeof window !== "undefined"` (same import-side-effect pattern as service-worker.ts) that builds the real env from `window` and calls `installPageCapture` — so importing the module under vitest (node) has no side effect while the built IIFE runs it immediately.
+- Write page-script.unit.test.ts with fake env objects (vi.fn console, a fake fetch returning a Response-like object whose `clone().body` is a ReadableStream, a minimal fake XHR class): each console level posts a valid envelope (`isCaptureEnvelope` true) and still calls the original; long args are truncated with `truncated: true`; fetch success/failed/binary-content-type cases; XHR loadend posts; second install is a no-op.
+- Unit-test the streaming case explicitly: a fake Response whose body is a ReadableStream that yields chunks past the cap and never closes — the wrapper must post the entry with `truncated: true` after reading only the capped prefix, and must cancel the reader.
+
+**Files / areas**
+
+- `tools/chrome-bridge/src/extension/page-script.ts`
+- `tools/chrome-bridge/src/extension/page-script.unit.test.ts`
+
+**How to verify**
+
+- **Console and uncaught-error wrapping preserves original behavior** — In page-script.unit.test.ts, for each of the five console levels there is a test asserting the fake console method was called exactly once with the same args AND that env.postMessage received an object for which `isCaptureEnvelope` from src/protocol/capture.ts returns true.
+- **fetch body preview is stream-read to the cap and never buffers whole bodies** — `grep -n 'clone().text\|\.text()\|\.json()\|arrayBuffer' tools/chrome-bridge/src/extension/page-script.ts` returns no hits inside the fetch wrapper; `getReader()` and `TextDecoder` are present.
+- **Rejected fetch and XHR loadend produce correct NetworkEntry shape** — A test where the fake fetch rejects with a specific Error asserts (a) the wrapped fetch rejects with `Object.is` the same Error, and (b) a NetworkEntry with `failed: true` and `status: null` was posted with the request's method and url.
+- **Every text field is bounded with boundText before postMessage** — `page-script.ts` imports `boundText` (and the cap constants) from `../protocol/capture` and does not define its own truncation helper or magic length numbers.
+- **Module import is side-effect free under vitest and self-installs only in a real window** — `cd tools/chrome-bridge && npm run verify` exits 0 with page-script.ts and page-script.unit.test.ts present.
+
+**Done when** — src/extension/page-script.ts — `installPageCapture(env)` plus its self-bootstrapping guard, wrapping console/uncaught errors/fetch/XHR into bounded capture envelopes (fetch body preview stream-read to the byte cap, never fully buffered), proven by a green co-located unit test using fake globals including a never-ending streaming body. Every check under *How to verify* passes its bar.
+
+**Depends on** — Add capture entry types and message envelope
+
+<details><summary>Reference — full rubric and healer hint</summary>
+
+#### console-wrap-transparency — Console and uncaught-error wrapping preserves original behavior (minScore 7)
+
+*Rule:* Each of console.log/info/warn/error/debug still invokes the original method with the exact original arguments and `this`, and additionally posts one valid capture envelope containing a ConsoleEntry; window `error` and `unhandledrejection` post an `uncaught` entry. 10 = all five levels plus both uncaught paths are covered, the original is called before the post, a throw inside serialization/postMessage never propagates to the page's console call, and installing twice leaves the console calling the original exactly once per call. 8 = all levels and uncaught paths covered and tests prove original-call-once, but the serialization-failure path is not exercised.
+
+*Pass criteria:*
+- In page-script.unit.test.ts, for each of the five console levels there is a test asserting the fake console method was called exactly once with the same args AND that env.postMessage received an object for which `isCaptureEnvelope` from src/protocol/capture.ts returns true.
+- A test dispatches a fake `error` event and a fake `unhandledrejection` event through the env's addEventListener and asserts a ConsoleEntry with level/kind `uncaught` was posted, including the error name and message.
+- A test where env.postMessage throws (or serialization would throw via a self-referencing object) still results in the original console method being called and no exception escaping `console.log(...)`.
+- A test calls `installPageCapture(env)` twice and asserts the underlying original console method is still called exactly once per `console.log` call (not twice) and only one envelope is posted per call; the `PAGE_CAPTURE_INSTALLED_FLAG` is set on the env/window target.
+
+*Failure examples:*
+- Wrapper posts first and then calls the original, so a throwing postMessage (e.g. a DataCloneError from an unserializable arg) silently swallows the page's own console output.
+- Double install is guarded only by a module-level boolean, so two separate script injections (each a fresh IIFE scope) wrap console twice and every message is posted twice.
+- `console.error` wrapper serializes an Error as `{}` via JSON.stringify instead of name + message, so uncaught stack information is lost even though the test only checks that 'an envelope was posted'.
+
+#### fetch-preview-bounded-streaming — fetch body preview is stream-read to the cap and never buffers whole bodies (minScore 7)
+
+*Rule:* The fetch wrapper obtains bodyPreview by reading `response.clone().body` via `getReader()` + TextDecoder, stops after MAX_BODY_PREVIEW_BYTES, cancels the reader, marks `truncated: true`, and never calls `.text()`/`.json()`/`arrayBuffer()` on the clone. 10 = a never-closing streaming fake proves the entry is posted after the capped prefix, `reader.cancel` is asserted called, a multi-byte UTF-8 chunk split at the cap does not produce a mangled trailing character, and a `null` body (204/HEAD) is handled without throwing. 8 = never-ending stream test passes with cancel asserted, but multi-byte boundary and null-body cases are absent.
+
+*Pass criteria:*
+- `grep -n 'clone().text\|\.text()\|\.json()\|arrayBuffer' tools/chrome-bridge/src/extension/page-script.ts` returns no hits inside the fetch wrapper; `getReader()` and `TextDecoder` are present.
+- A unit test constructs a fake Response whose `clone().body` is a ReadableStream (node's global `ReadableStream`) that enqueues chunks forever and never closes; the test awaits the posted NetworkEntry, asserts `truncated === true`, asserts `bodyPreview.length` <= the cap, and asserts the reader's `cancel` was invoked (spy on the stream's cancel or on the reader).
+- A test with a small JSON body (below the cap) asserts `truncated === false` and the full preview text, and a test with a `Content-Type: image/png` (or `application/octet-stream`) asserts the posted entry has `bodyPreview === null` (the contract field is `string | null` — never undefined, never omitted), that `isCaptureEnvelope(postedEnvelope) === true`, and that `clone()` was never called or its body never read.
+- A test with `response.body === null` (e.g. status 204) posts an entry with `bodyPreview === null` (not undefined, not an omitted key), asserts `isCaptureEnvelope(postedEnvelope) === true`, and does not reject.
+- The Response object returned to the caller of the wrapped `fetch` is the identical object the original fetch resolved (assert `Object.is(result, originalResponse)`), and the entry is posted before the original response body is consumed by the page.
+
+*Failure examples:*
+- Implementation calls `response.clone().text()` under a `.slice(0, cap)` — passes the small-body tests but hangs forever (and leaks memory) on the never-closing stream test, or the developer skips that test because the fake is awkward to write.
+- Reader loop breaks when the cap is reached but never calls `reader.cancel()`, so the cloned tee keeps backpressure on the original streaming SSE body and the page's own reader stalls.
+- Content-type gate checks `startsWith('text/')` and `application/json` but not `+json` suffixes (e.g. `application/problem+json`) or `application/javascript`, so those responses get no preview.
+- Decoder created with `new TextDecoder()` and `decode(chunk)` without `{ stream: true }`, so a multi-byte character split across chunks becomes U+FFFD garbage in the preview.
+
+#### fetch-error-and-xhr-paths — Rejected fetch and XHR loadend produce correct NetworkEntry shape (minScore 7)
+
+*Rule:* A rejected fetch posts `failed: true, status: null` and re-throws the same rejection to the page; XHR wraps `open` and `send` on the prototype, posts on `loadend` with status, content-type via getResponseHeader, and `responseText` only when responseType is '' or 'text'. 10 = both paths tested, the rejection reaches the page unchanged (same Error instance), XHR with `responseType: 'json'`/`'blob'` posts without touching responseText, XHR abort/network error (status 0) is posted as failed, and durationMs is computed from env.now(). 8 = fetch-reject and XHR text-loadend tested, responseType gate tested, but abort/status-0 and same-instance rejection not asserted.
+
+*Pass criteria:*
+- A test where the fake fetch rejects with a specific Error asserts (a) the wrapped fetch rejects with `Object.is` the same Error, and (b) a NetworkEntry with `failed: true` and `status: null` was posted with the request's method and url.
+- A test using a minimal fake XMLHttpRequest class (constructor + prototype `open`/`send`/`addEventListener`/`getResponseHeader`, a `responseText` getter that throws when `responseType` is not '' or 'text') asserts: after `open('POST', url)` + `send()` + firing `loadend`, an entry with method 'POST', url, status, contentType, and bodyPreview equal to responseText is posted.
+- A second XHR test sets `responseType = 'json'` (or 'blob') before send and asserts an entry is posted with `bodyPreview === null` (the throwing `responseText` getter was not read), that `isCaptureEnvelope(postedEnvelope) === true`, and that no exception was thrown.
+- `durationMs` in posted entries is derived from `env.now()` (tests advance a fake clock between send and loadend and assert the difference), not from `Date.now()`/`performance.now()` directly.
+- Method defaults to 'GET' when fetch is called with a bare string URL, and a `Request` object input or `URL` object input is normalized to a string url.
+
+*Failure examples:*
+- Fetch wrapper catches the rejection, posts the entry, and rethrows `new Error(String(err))`, so the page's `catch (e) { if (e.name === 'AbortError') ... }` logic breaks.
+- XHR wrapper reads `xhr.responseText` unconditionally inside loadend — works for the default test but throws InvalidStateError on `responseType='json'` requests; since the throw is inside an event listener it only surfaces as an uncaught error on the real page.
+- XHR `open` is wrapped by storing method/url on a module-level variable instead of on the instance, so two concurrent XHRs report each other's url.
+- `fetch(new Request('/x', { method: 'PUT' }))` is recorded as method 'GET' with url '[object Request]'.
+
+#### page-world-byte-bounding — Every text field is bounded with boundText before postMessage (minScore 7)
+
+*Rule:* Console args, error messages, urls, contentType, and bodyPreview are truncated in the page world via `boundText` from src/protocol/capture.ts, so no envelope exceeds the per-entry cap and oversized payloads never cross postMessage; `truncated: true` is set whenever any field was cut. 10 = every text-bearing field goes through boundText, a console call with a 1 MB string and a fetch to a 10 KB url both produce entries within the cap with `truncated: true`, and a test measures `JSON.stringify(envelope).length` against the cap. 8 = args and bodyPreview are bounded and tested; url/contentType bounding not tested.
+
+*Pass criteria:*
+- `page-script.ts` imports `boundText` (and the cap constants) from `../protocol/capture` and does not define its own truncation helper or magic length numbers.
+- A test posts `console.log('x'.repeat(1_000_000))` and asserts the posted entry's serialized args length <= the cap and `truncated === true`; a test with a short string asserts `truncated === false`.
+- A test calls fetch with a url longer than the cap and asserts the entry's `url` is bounded and `truncated === true`.
+- A test with an object arg containing a circular reference (a.self = a) asserts the entry is still posted (fallback to `String(arg)` or a marker) and the original console method was still called.
+- A test asserts `JSON.stringify(postedEnvelope).length` is below a stated overall per-entry ceiling for the worst-case console call (many long args).
+- Cross-phase contract check: the fake `env.postMessage` in page-script.unit.test.ts records every envelope it receives, and an afterEach (or a dedicated test that replays all recorded envelopes) asserts `isCaptureEnvelope(envelope) === true` for EVERY envelope posted across the whole suite — explicitly including the binary-content-type fetch, the `response.body === null` (204) fetch, the rejected fetch (`status: null`), and the XHR `responseType = 'json'` case — so the nullable fields `status`, `contentType`, `bodyPreview` are always `null` (never undefined/omitted) and the forwarder (capture-forwarder phase) and intake (service-worker-capture-intake phase) guards cannot silently drop them.
+
+*Failure examples:*
+- Each of 20 args is individually bounded to the cap, so a single console.log with 20 large args posts an envelope 20x the cap — per-field bounding passes but per-entry bounding is never checked.
+- `serializeArgs` uses JSON.stringify on objects then truncates — a large nested object is fully stringified (allocating MBs in the page) before being cut; bounded output, unbounded work.
+- `truncated` is computed only from bodyPreview, so a truncated url or console arg reports `truncated: false`.
+
+#### node-safe-bootstrap — Module import is side-effect free under vitest and self-installs only in a real window (minScore 7)
+
+*Rule:* Importing page-script.ts in node performs no wrapping and touches no globals; the bottom-of-file bootstrap runs only when `typeof window !== 'undefined'`, builds the env from real window globals, and `npm run verify` (tsc + eslint + vitest) is green with the unit test naming every export verbatim. 10 = a test proves that after importing the module, node's global `fetch`/`console.log` are the original functions (identity check) and the flag is absent from globalThis; the file compiles without `any`/`!`/`as` casts; test file names `installPageCapture`, `PageCaptureEnv`, `PAGE_CAPTURE_INSTALLED_FLAG`, and `serializeArgs` (if exported). 8 = verify green and exports named, but no explicit test that globals are untouched after import.
+
+*Pass criteria:*
+- `cd tools/chrome-bridge && npm run verify` exits 0 with page-script.ts and page-script.unit.test.ts present.
+- A test in page-script.unit.test.ts captures `globalThis.fetch` and `console.log` before `await import('./page-script')` (or at module top) and asserts they are `Object.is`-identical afterwards, and that `globalThis[PAGE_CAPTURE_INSTALLED_FLAG]` is undefined.
+- `grep -nE ': any|as any|as unknown as|\w!\.' tools/chrome-bridge/src/extension/page-script.ts` returns nothing; eslint runs clean on the file with strictTypeChecked.
+- Every `export` identifier in page-script.ts appears verbatim as a string or identifier in page-script.unit.test.ts (the coverage guard's requireSymbolMentions passes).
+- The bootstrap block references `window.fetch`, `window.XMLHttpRequest`, `window.console`, `window.postMessage`, `window.addEventListener`, and `performance.now` explicitly via the window object (not bare globals), and passes `postMessage` bound with targetOrigin `'*'` or `location.origin` wrapped in the capture envelope.
+
+*Failure examples:*
+- Bootstrap is guarded by `typeof window !== 'undefined'` but the file also does `const originalFetch = fetch;` at module top-level — in node 18+ `fetch` exists, so import still captures/replaces a global and the identity test fails.
+- Bootstrap calls `window.postMessage(envelope)` unbound as `const post = window.postMessage; post(env)`, which throws 'Illegal invocation' in the real page while every unit test (using a plain fake function) passes.
+- `XMLHttpRequest` typed as `typeof XMLHttpRequest` in PageCaptureEnv forces DOM lib types into the tsconfig; the developer 'fixes' it with a `// eslint-disable` and an `as` cast that verify's eslint step rejects.
+
+**Healer hint:** The most likely miss is the fetch preview path buffering the body (`clone().text()`) or not cancelling the reader, which the never-closing ReadableStream test exposes as a hang — replace it with a `getReader()` loop that decodes with `{ stream: true }`, breaks at MAX_BODY_PREVIEW_BYTES, and awaits `reader.cancel()` before posting the entry.
+
+</details>
+
+### Phase 4 — Add content script forwarding captures to worker
+
+Technical ID: `capture-forwarder` · subsystem: forwarder (ISOLATED content script) · layer: infrastructure · blast radius: small
+
+**Goal** — Create src/extension/capture-forwarder.ts — the extension's ISOLATED-world content script — that listens for `window.postMessage` events, accepts only messages that come from the page itself and pass `isCaptureEnvelope`, and relays each one unchanged to the extension service worker via `chrome.runtime.sendMessage`.
+
+**Why** — The page-world wrapper cannot talk to the extension directly; Chrome only lets an extension's own content script (which runs in an isolated world with access to `chrome.runtime`) do that. It must use `chrome.runtime.sendMessage` rather than opening its own WebSocket to the relay because Chromium enforces the host page's connect-src Content Security Policy on content-script sockets, which many sites would block (as boky's log-forwarder.ts documents).
+
+**Changes**
+
+- Create src/extension/capture-forwarder.ts exporting an interface `ForwarderDeps` ({ addMessageListener(handler: (event: { source: unknown; data: unknown }) => void): void; sendToWorker(envelope: CaptureEnvelope): void; self: unknown }) and `installCaptureForwarder(deps: ForwarderDeps): void`.
+- The handler drops any event whose `event.source !== deps.self` (only the page's own window may post) or whose `data` fails `isCaptureEnvelope`; otherwise calls `sendToWorker(data)`. Wrap `sendToWorker` errors in try/catch and ignore them (the worker may be suspended; a lost entry is acceptable, a thrown error in a page listener is not).
+- Add a doc-comment header quoting the CSP reason for using `chrome.runtime.sendMessage` instead of a WebSocket, matching this repo's explanatory-header convention.
+- At the bottom of the file add a bootstrap guarded by `typeof window !== "undefined" && typeof chrome !== "undefined"` that wires `window.addEventListener('message', …)`, `chrome.runtime.sendMessage`, and `self: window`, so importing under vitest has no side effect.
+- Write capture-forwarder.unit.test.ts naming every export: a valid envelope from `self` is forwarded; a valid envelope from a different source is dropped; a non-envelope object is dropped; a throwing `sendToWorker` does not propagate.
+
+**Files / areas**
+
+- `tools/chrome-bridge/src/extension/capture-forwarder.ts`
+- `tools/chrome-bridge/src/extension/capture-forwarder.unit.test.ts`
+
+**How to verify**
+
+- **Only same-window, guard-validated envelopes reach sendToWorker** — Open tools/chrome-bridge/src/extension/capture-forwarder.ts and find a comparison of the event's `source` against `deps.self` using `!==` or `===` — not `if (!event.source)`, not a `.origin` string compare, and not a `window.top` check.
+- **Handler never propagates an exception into the page's event loop** — In capture-forwarder.ts the `sendToWorker(...)` call is inside a `try { } catch { }` block; the catch body does not call `console.*` (the page-world wrapper from the earlier phase intercepts console.* and would generate a new capture entry for every failure — a feedback loop).
+- **Importing the module under vitest performs no DOM or chrome wiring** — The file's bottom bootstrap reads `if (typeof window !== 'undefined' && typeof chrome !== 'undefined') { installCaptureForwarder({ ... }) }` — both `typeof` checks present (a `typeof window` check alone passes in jsdom-like shims but then crashes on `chrome.runtime`).
+- **Exports match the contract verbatim and are each named in the co-located test** — `grep -n '^export' tools/chrome-bridge/src/extension/capture-forwarder.ts` shows exactly `export interface ForwarderDeps` and `export function installCaptureForwarder` (or `export const installCaptureForwarder`) and nothing else — helper functions are module-private.
+- **Doc-comment header states the CSP reason for chrome.runtime.sendMessage** — The first non-import lines of tools/chrome-bridge/src/extension/capture-forwarder.ts are a `/** ... */` block (not `//` line comments) placed before any code.
+
+**Done when** — src/extension/capture-forwarder.ts — `installCaptureForwarder(deps)` plus its self-bootstrapping guard, relaying validated capture envelopes to the service worker, with a green co-located unit test. Every check under *How to verify* passes its bar.
+
+**Depends on** — Add capture entry types and message envelope
+
+<details><summary>Reference — full rubric and healer hint</summary>
+
+#### source-and-shape-gate — Only same-window, guard-validated envelopes reach sendToWorker (minScore 8)
+
+*Rule:* Every event delivered to the forwarder's message handler must pass BOTH checks before sendToWorker is called: `event.source === deps.self` (strict identity, not truthiness or structural comparison) AND `isCaptureEnvelope(event.data)` from src/protocol/capture.ts. Scale: 10 = both checks are explicit, identity-based, reuse the shared guard (no re-implemented shape check), and the unit test proves each check independently rejects; 8 = both checks present and tested together; below minScore = either check missing, loose, or untested.
+
+*Pass criteria:*
+- Open tools/chrome-bridge/src/extension/capture-forwarder.ts and find a comparison of the event's `source` against `deps.self` using `!==` or `===` — not `if (!event.source)`, not a `.origin` string compare, and not a `window.top` check.
+- The shape check calls the imported `isCaptureEnvelope` from `../protocol/capture` (grep the import); the forwarder does not contain its own `typeof data === 'object' && 'ns' in data`-style duplicate of that guard.
+- Run `cd tools/chrome-bridge && npx vitest run src/extension/capture-forwarder.unit.test.ts`: there is one test where a well-formed envelope arrives with `source` set to a different object than `deps.self` and `sendToWorker` is asserted NOT called, and a separate test where `source === deps.self` but `data` is a non-envelope (e.g. `{ ns: 'chrome-bridge' }` missing fields, or a string) and `sendToWorker` is asserted NOT called.
+- A test where `source === deps.self` and `data` is a valid envelope asserts `sendToWorker` was called exactly once with the SAME object reference (`toBe`, not just `toEqual`) — proving the envelope is relayed unchanged, not re-wrapped or cloned with fields dropped.
+
+*Failure examples:*
+- Developer writes `if (event.source !== window)` directly instead of `deps.self`, so the identity check bypasses the injected dependency and the test can only pass by mocking globals — works in Chrome, untestable in node.
+- Developer uses `event.source == deps.self` or checks `event.data?.ns === 'chrome-bridge'` as a shortcut instead of the shared `isCaptureEnvelope`, so a message from an iframe with the right namespace string but wrong payload shape is forwarded.
+- The valid-envelope test only asserts `toHaveBeenCalled()` without checking the argument, so a forwarder that wraps the envelope as `{ type: 'capture', payload: data }` still passes even though the service worker in phase 4 expects the raw envelope.
+- The 'different source' test passes `source: null`; a check written as `if (event.source && event.source !== deps.self) return` would wrongly forward it and still pass the test.
+
+#### never-throws-into-page — Handler never propagates an exception into the page's event loop (minScore 8)
+
+*Rule:* The registered message handler must never throw, regardless of what sendToWorker does or what event arrives — a thrown error from a content-script `message` listener surfaces as an uncaught error in the host page. Scale: 10 = try/catch wraps the sendToWorker call, catch discards silently (no console.error that could itself recurse into the console wrapper), and a test with a throwing sendToWorker asserts the handler returns normally AND a subsequent valid envelope is still forwarded; 8 = try/catch present with a test asserting no throw; below minScore = no test proves the swallow.
+
+*Pass criteria:*
+- In capture-forwarder.ts the `sendToWorker(...)` call is inside a `try { } catch { }` block; the catch body does not call `console.*` (the page-world wrapper from the earlier phase intercepts console.* and would generate a new capture entry for every failure — a feedback loop).
+- Unit test: `sendToWorker` is a `vi.fn(() => { throw new Error('worker suspended') })`; invoking the captured handler with a valid same-source envelope is wrapped in `expect(() => handler(event)).not.toThrow()`.
+- In the same or a following test, after the throwing call, `sendToWorker` is swapped to a non-throwing mock (or the throw is conditional on first call) and a second valid envelope is asserted forwarded — proving the forwarder did not latch into a broken state or unregister itself after one failure.
+- The try/catch does not also wrap the `event.source` / `isCaptureEnvelope` checks in a way that would turn a guard bug into silent drops of every message — the guard runs outside the try, or the test for a valid envelope would catch it regardless.
+
+*Failure examples:*
+- Developer adds `catch (err) { console.warn('[capture-forwarder] send failed', err) }` — reasonable-looking logging that, in a real tab, feeds the MAIN-world console wrapper and generates an endless stream of capture entries while the worker is suspended.
+- try/catch is present but the only test is `expect(sendToWorker).toHaveBeenCalled()` with a non-throwing mock; the throwing path is never exercised, and a later refactor to `await sendToWorker(...)` without try/catch would go unnoticed.
+- Developer uses `void chrome.runtime.sendMessage(...).catch(() => {})` in the bootstrap but `deps.sendToWorker` is typed as sync `void`, so a synchronous throw (e.g. 'Extension context invalidated' after reload) still escapes the handler.
+
+#### side-effect-free-import — Importing the module under vitest performs no DOM or chrome wiring (minScore 7)
+
+*Rule:* The bootstrap at the bottom of the file must be guarded so that `import './capture-forwarder'` in a node vitest process (no `window`, no `chrome`) neither throws nor registers anything, while in Chrome it wires `window.addEventListener('message', …)`, `chrome.runtime.sendMessage`, and `self: window`. Scale: 10 = guard checks both `window` and `chrome` via `typeof`, the wiring is a call to the exported `installCaptureForwarder` (not a second inline copy of the logic), and a test asserts the import has no side effect; 8 = guard correct and import test present; below minScore = a bare `window.addEventListener` at module top level or the bootstrap duplicates the handler logic.
+
+*Pass criteria:*
+- The file's bottom bootstrap reads `if (typeof window !== 'undefined' && typeof chrome !== 'undefined') { installCaptureForwarder({ ... }) }` — both `typeof` checks present (a `typeof window` check alone passes in jsdom-like shims but then crashes on `chrome.runtime`).
+- Inside the guard, the `addMessageListener` dep is implemented as `(h) => window.addEventListener('message', h)` and `sendToWorker` as a call to `chrome.runtime.sendMessage(envelope)`; the handler logic itself is NOT re-implemented inline — grep for a second `isCaptureEnvelope(` call in the bootstrap block and find none.
+- The unit test file contains a test that does `await import('./capture-forwarder')` (or relies on the top-level import) in the default node environment and asserts it resolves without error — and `vitest.config` / the test file does NOT set `// @vitest-environment jsdom` to make it pass.
+- `npx tsc --noEmit -p tools/chrome-bridge` is green: the bootstrap references `chrome.runtime.sendMessage` with a return type that satisfies eslint's `no-floating-promises` (e.g. `void chrome.runtime.sendMessage(...)` or `.catch(() => {})`) — inspect for a lint suppression comment and find none.
+
+*Failure examples:*
+- Developer guards with `if (typeof window !== 'undefined')` only, forgetting `chrome`; a future test file that stubs `globalThis.window` for another reason makes the import throw `chrome is not defined`.
+- The bootstrap passes `self: globalThis` instead of `self: window` — identical in the isolated world today, but it breaks the documented contract 'event.source === window' and would forward messages from the extension's own frames if the script is ever injected into an iframe context.
+- Developer copies the source+guard logic inline into the bootstrap 'for clarity' so the file has two implementations; the tested `installCaptureForwarder` is correct but the shipped bootstrap silently diverges.
+- `chrome.runtime.sendMessage(envelope)` is called bare; eslint `@typescript-eslint/no-floating-promises` fails on the returned Promise and the developer adds `// eslint-disable-next-line` instead of `void` or a `.catch`.
+
+#### export-naming-and-test-coverage — Exports match the contract verbatim and are each named in the co-located test (minScore 8)
+
+*Rule:* The module exports exactly the interface `ForwarderDeps` (with fields `addMessageListener`, `sendToWorker`, `self`, typed as in the phase contract) and the function `installCaptureForwarder(deps: ForwarderDeps): void`, and `capture-forwarder.unit.test.ts` mentions each export name so the repo's coverage guard passes (the dead-export rule is hand-reviewed for tools/chrome-bridge — no hook scans it). Scale: 10 = exact names and signatures, `ForwarderDeps` used as an `import type` in the test to satisfy `consistent-type-imports`, and no extra exports; 8 = names correct and test green under `npm run verify`; below minScore = a renamed export, a missing export, or verify red.
+
+*Pass criteria:*
+- `grep -n '^export' tools/chrome-bridge/src/extension/capture-forwarder.ts` shows exactly `export interface ForwarderDeps` and `export function installCaptureForwarder` (or `export const installCaptureForwarder`) and nothing else — helper functions are module-private.
+- `ForwarderDeps.addMessageListener` accepts a handler typed `(event: { source: unknown; data: unknown }) => void` — the test can call the captured handler with a plain object literal, no `MessageEvent` construction (which does not exist in node) required.
+- `grep -c 'ForwarderDeps\|installCaptureForwarder' tools/chrome-bridge/src/extension/capture-forwarder.unit.test.ts` reports both names present; `ForwarderDeps` is imported with `import type` or `import { type ForwarderDeps }`.
+- `cd tools/chrome-bridge && npm run verify` exits 0 with the new test file counted in the vitest summary (test count increases by at least 4 vs. the previous commit).
+- The test captures the handler by making `addMessageListener` a `vi.fn` that stores its argument, then invokes the stored handler directly — there is no `window.dispatchEvent` or `new MessageEvent(...)` in the test.
+
+*Failure examples:*
+- Developer types the handler parameter as `MessageEvent` because it is 'more accurate', so the test must construct a `MessageEvent` — which does not exist in the node vitest environment — and either fails or forces a jsdom switch.
+- `ForwarderDeps` is exported and used in the implementation but the test only imports `installCaptureForwarder`; the coverage guard's `requireSymbolMentions` flags `ForwarderDeps` as untested and `npm run verify` goes red at the guard stage.
+- Developer exports an extra `createMessageHandler` helper to test it directly; it is not imported anywhere else, so a reviewer flags it under the README's hand-maintained every-export-has-an-importer rule (no scanner enforces this for tools/chrome-bridge).
+- Test imports `ForwarderDeps` with a value import (`import { ForwarderDeps, installCaptureForwarder }`); `verbatimModuleSyntax` + `consistent-type-imports` reject it under eslint `--max-warnings 0`.
+
+#### csp-rationale-header — Doc-comment header states the CSP reason for chrome.runtime.sendMessage (minScore 7)
+
+*Rule:* The file opens with a block doc-comment that explains WHY the forwarder relays through `chrome.runtime.sendMessage` rather than opening its own WebSocket to the relay — specifically that Chromium applies the host page's `connect-src` CSP to sockets opened by content scripts — following the same explanatory-header convention as boky's extension/src/infrastructure/bridge/log-forwarder.ts. Scale: 10 = names `connect-src`, names the ISOLATED-world / page-world split, and cites the concrete consequence (many sites would block the socket); 8 = names `connect-src` and the sendMessage-vs-WebSocket choice; below minScore = a generic 'content script that forwards messages' summary with no CSP mention.
+
+*Pass criteria:*
+- The first non-import lines of tools/chrome-bridge/src/extension/capture-forwarder.ts are a `/** ... */` block (not `//` line comments) placed before any code.
+- `grep -n 'connect-src' tools/chrome-bridge/src/extension/capture-forwarder.ts` returns a hit inside that header block.
+- The header explicitly contrasts the two options — contains both the phrase `chrome.runtime.sendMessage` (or `runtime.sendMessage`) and the word `WebSocket` — so a reader understands a socket was considered and rejected, not merely omitted.
+- The header mentions that the script runs in the ISOLATED world / as a content script and that the page-world wrapper cannot reach `chrome.runtime` itself (the reason a forwarder exists at all).
+
+*Failure examples:*
+- Developer writes a correct but generic header — 'Content script: forwards capture envelopes from the page to the service worker' — omitting the CSP reasoning; six months later someone 'simplifies' it into a direct WebSocket and it breaks on any site with a strict CSP.
+- Header mentions 'CSP' in passing but not `connect-src`, so the specific directive a future debugger would grep for when the socket fails is absent.
+- The rationale is placed as a `//` comment next to the `sendToWorker` call in the bootstrap rather than as the file's opening doc-comment, so it is not discoverable from the file header the repo convention points readers to.
+
+**Healer hint:** The most likely miss is the throwing-sendToWorker path — either no try/catch, or a catch that logs via console.* and feeds the MAIN-world console wrapper; wrap only the sendToWorker call in a silent try/catch and add a test with `vi.fn(() => { throw ... })` asserting `not.toThrow()` and that a subsequent envelope still forwards.
+
+</details>
+
+### Phase 5 — Connect service worker to capture ring buffers
+
+Technical ID: `service-worker-capture-intake` · subsystem: service-worker capture intake · layer: infrastructure · blast radius: medium
+
+**Goal** — Add a capture store in the extension service worker that keeps one console ring buffer and one network ring buffer per browser tab, fills them from the runtime messages the forwarder sends (keyed by the sending tab's id), and evicts a tab's buffers when the tab is closed — installed inside `startServiceWorker` behind a small new Chrome-API port so it stays unit-testable.
+
+**Why** — Captured entries must accumulate somewhere the read tools can query later; the service worker is the only long-lived extension context. The existing `ChromePorts` abstraction only covers four tab/script calls and has no way to receive runtime messages or tab-removal events, so a small additional port for those two Chrome surfaces is required, and buffers must be scoped per tab so a chatty tab cannot pollute another tab's results.
+
+**Changes**
+
+- Create src/extension/capture-ports.ts (the `*ports.ts` name keeps it exempt from the co-located-test rule, as ports.ts documents) exporting `CapturePorts` = { onRuntimeMessage(listener: (message: unknown, senderTabId: number | undefined) => void): void; onTabRemoved(listener: (tabId: number) => void): void } and `chromeCapturePorts(): CapturePorts` wrapping `chrome.runtime.onMessage.addListener` (reading `sender.tab?.id`) and `chrome.tabs.onRemoved.addListener`.
+- Create src/extension/capture-store.ts exporting `CaptureStore` and `createCaptureStore(maxEntries?: number)` returning { ingest(tabId: number, envelope: CaptureEnvelope): void; readConsole(tabId, query): CaptureRead<ConsoleEntry>; readNetwork(tabId, query): CaptureRead<NetworkEntry>; evict(tabId: number): void } — lazily creating a `createCaptureRing` pair per tabId; `ingest` defensively re-applies `boundText` with the contract caps to `text`/`bodyPreview` (a forged or oversize message must not bloat the worker); reads on an unknown tab return an empty-but-valid `CaptureRead` (nextSince 0, dropped false) rather than throwing.
+- Export `installCaptureIntake(ports: CapturePorts, store: CaptureStore): void` from capture-store.ts that subscribes `onRuntimeMessage` (ignoring messages that fail `isCaptureEnvelope` or arrive without a tab id) and `onTabRemoved` → `store.evict`.
+- Extend `ServiceWorkerDeps` in service-worker.ts with `capturePorts: CapturePorts`; inside `startServiceWorker` create the store, call `installCaptureIntake`, and return/expose the store alongside the existing BridgeClient so the final phase can hand it to the page-action handlers; keep the top-level `typeof chrome !== "undefined"` guard and pass `chromeCapturePorts()` there. Nothing capture-related touches the bridge-client outbox (no observation frames are emitted — pull-only delivery).
+- Update service-worker.unit.test.ts for the new dep (a fake CapturePorts capturing the registered listeners) and write capture-store.unit.test.ts naming every export: ingest routes console vs network envelopes to the right buffer per tab; two tabs stay isolated; oversize text is re-bounded; evict then read returns empty-but-valid; a non-envelope runtime message and a message without tab id are ignored.
+
+**Files / areas**
+
+- `tools/chrome-bridge/src/extension/capture-store.ts`
+- `tools/chrome-bridge/src/extension/capture-store.unit.test.ts`
+- `tools/chrome-bridge/src/extension/capture-ports.ts`
+- `tools/chrome-bridge/src/extension/service-worker.ts`
+- `tools/chrome-bridge/src/extension/service-worker.unit.test.ts`
+
+**How to verify**
+
+- **Per-tab isolation and console/network routing** — In tools/chrome-bridge/src/extension/capture-store.ts, buffers are keyed by tabId and lazily created on first ingest for that tab — no module-level single ring shared across tabs.
+- **Eviction on tab close and reads of unknown tabs** — capture-store.unit.test.ts has a test that ingests for a tab, calls evict(tabId), then asserts readConsole and readNetwork both return an empty entries array, nextSince 0 and dropped false.
+- **Defensive validation and re-bounding at intake** — installCaptureIntake's onRuntimeMessage listener calls isCaptureEnvelope from src/protocol/capture.ts before ingest; a test sends `{ foo: 1 }` and a string and asserts the store stays empty.
+- **Service-worker wiring stays injectable and side-effect-free on import** — tools/chrome-bridge/src/extension/service-worker.ts: ServiceWorkerDeps includes `capturePorts: CapturePorts` and startServiceWorker calls installCaptureIntake(deps.capturePorts, store) — verified by reading the function body.
+- **npm run verify green with every export named in co-located tests** — Run `cd tools/chrome-bridge && npm run verify` — exit code 0 with tsc, eslint and vitest all reported green.
+
+**Done when** — src/extension/capture-store.ts — a per-tab capture store (`createCaptureStore`, `installCaptureIntake`) wired into `startServiceWorker` via the new `CapturePorts` dep, with green unit tests for routing, tab isolation, eviction, and defensive byte re-bounding. Every check under *How to verify* passes its bar.
+
+**Depends on** — Add capture entry types and message envelope; Add per-tab capture ring buffer
+
+**Rollback** — Remove `capturePorts` from ServiceWorkerDeps and the `installCaptureIntake` call in startServiceWorker, delete capture-store.ts / capture-ports.ts and their tests; the service worker returns to its horizon-1 behaviour with no other file affected.
+
+<details><summary>Reference — full rubric and healer hint</summary>
+
+#### per-tab-isolation-and-routing — Per-tab isolation and console/network routing (minScore 7)
+
+*Rule:* Entries ingested for one tab are visible only through reads of that same tab, and console envelopes land only in the console ring while network envelopes land only in the network ring. 10 = isolation holds for every combination including interleaved ingest across tabs and rings with independent seq/nextSince cursors per (tab, ring); 8 = two-tab and console-vs-network separation are correct and tested; below minScore = any cross-tab or cross-ring leak, or a shared cursor between rings.
+
+*Pass criteria:*
+- In tools/chrome-bridge/src/extension/capture-store.ts, buffers are keyed by tabId and lazily created on first ingest for that tab — no module-level single ring shared across tabs.
+- A test in capture-store.unit.test.ts ingests console and network envelopes for tab 1 and tab 2 interleaved (1,2,1,2), then asserts readConsole(1) returns only tab-1 console entries and readNetwork(2) returns only tab-2 network entries.
+- readConsole and readNetwork for the same tab report independent nextSince values (ingest 3 console + 1 network, then assert the console read's nextSince is not affected by the network count).
+- readConsole(tabId, query) and readNetwork(tabId, query) forward `since` and `limit` unchanged to the underlying ring's read so windowing behaviour proven in the ring-buffer phase applies per tab.
+
+*Failure examples:*
+- Console and network entries share one seq counter per tab, so nextSince from readConsole skips over network entries and a follow-up readConsole(since) silently misses messages.
+- Store keys buffers by `String(tabId)` in one place and by number elsewhere, so tab 1 ingest and tab 1 read hit different map entries and reads come back empty.
+- The test only ingests for tab 1 and asserts tab 2 is empty; it never ingests for both tabs, so a bug that routes every envelope to the most recently seen tab would pass.
+
+#### eviction-and-unknown-tab-reads — Eviction on tab close and reads of unknown tabs (minScore 7)
+
+*Rule:* Closing a tab frees both of its rings and a read of any tab with no buffers (never seen, or evicted) returns an empty-but-valid CaptureRead without throwing. 10 = eviction is provably a map delete (re-ingest after evict starts a fresh ring with seq restarted, and no stale map key remains), unknown-tab reads return exactly {entries: [], nextSince: 0, dropped: false}, and the evict listener is registered via CapturePorts.onTabRemoved; 8 = all of these are implemented and tested except the re-ingest-after-evict case; below minScore = evict leaves an entry in the map, or an unknown-tab read throws or returns undefined.
+
+*Pass criteria:*
+- capture-store.unit.test.ts has a test that ingests for a tab, calls evict(tabId), then asserts readConsole and readNetwork both return an empty entries array, nextSince 0 and dropped false.
+- A test calls readConsole(999, {}) on a tab that was never ingested and asserts the same empty-but-valid shape rather than expecting a throw.
+- evict(tabId) removes the tab's key from the store's map (not just clears the ring) — verified by a test that evicts, re-ingests, and asserts the first new entry's seq restarts at the ring's initial value.
+- In installCaptureIntake, the fake CapturePorts test captures the onTabRemoved listener, invokes it with a tabId, and asserts a subsequent read of that tab is empty.
+- Calling evict on a tab that has no buffers does not throw.
+
+*Failure examples:*
+- evict() calls ring.clear() but keeps the map entry, so a page that opens and closes thousands of tabs leaks an empty ring object per tab for the worker's lifetime.
+- readConsole on an unknown tab returns `undefined` because the code does `this.rings.get(tabId)?.read(query)` with no fallback, and the page-action handler in the last phase crashes serialising it.
+- The onTabRemoved wiring is present in installCaptureIntake but the test only checks the listener was registered (spy called once), never that firing it actually evicts.
+
+#### defensive-intake-validation — Defensive validation and re-bounding at intake (minScore 7)
+
+*Rule:* The service worker never trusts the forwarded message: non-envelope messages and messages with no sender tab id are dropped, and text/bodyPreview are re-bounded with the contract caps regardless of what the sender claimed. 10 = every rejection path is exercised by a test, re-bounding is applied via the shared boundText helper from src/protocol/capture.ts (not a locally re-declared cap), and an oversize field is truncated to exactly the contract cap in a test; 8 = all three rejection/rebound behaviours exist with tests for the main cases; below minScore = an oversize or forged message reaches a ring untouched, or a tab-less message is ingested under tabId undefined/NaN.
+
+*Pass criteria:*
+- installCaptureIntake's onRuntimeMessage listener calls isCaptureEnvelope from src/protocol/capture.ts before ingest; a test sends `{ foo: 1 }` and a string and asserts the store stays empty.
+- A test invokes the captured onRuntimeMessage listener with a valid envelope and senderTabId undefined and asserts nothing was ingested (no ring created for any key).
+- createCaptureStore.ingest passes text (console) and bodyPreview (network) through the boundText helper imported from src/protocol/capture.ts with the contract's cap constants — grep shows no separately hard-coded byte limit in capture-store.ts.
+- A test ingests an envelope whose text is longer than the contract cap and asserts the stored entry's UTF-8 byte length (via TextEncoder) is <= MAX_CONSOLE_TEXT_BYTES and `truncated` is true; the same for a network entry's bodyPreview against MAX_BODY_PREVIEW_BYTES.
+- The listener's return value / behaviour does not call sendResponse or return true, so the runtime message channel is not held open for pull-only intake.
+
+*Failure examples:*
+- ingest trusts the envelope's own `truncated: true` flag and skips re-bounding, so a hand-crafted 5 MB runtime message from a compromised content script sits in the ring at full size.
+- boundText is applied to console text but bodyPreview on network entries is copied as-is because the developer assumed the page script already bounded it.
+- The listener ignores messages without sender.tab (correct for popup/devtools senders) but still ingests when sender.tab.id is -1 (chrome.tabs.TAB_ID_NONE), creating a phantom tab bucket.
+
+#### service-worker-wiring-no-side-effects — Service-worker wiring stays injectable and side-effect-free on import (minScore 7)
+
+*Rule:* startServiceWorker takes capturePorts as a dep, installs intake, exposes the store to callers, and the production chromeCapturePorts() is only referenced inside the existing `typeof chrome !== 'undefined'` guard; importing the module under vitest performs no chrome.* access. 10 = ServiceWorkerDeps has `readonly capturePorts: CapturePorts`, startServiceWorker's return type is a named object/interface exposing both the BridgeClient and the CaptureStore (not a tuple or mutable module variable), service-worker.unit.test.ts asserts intake listeners were registered on the fake CapturePorts, and no capture code touches the bridge-client outbox; 8 = wiring and test present, store exposed, but return shape is ad hoc; below minScore = chromeCapturePorts() is called at module top level, or the store is reachable only through a module-level `let`.
+
+*Pass criteria:*
+- tools/chrome-bridge/src/extension/service-worker.ts: ServiceWorkerDeps includes `capturePorts: CapturePorts` and startServiceWorker calls installCaptureIntake(deps.capturePorts, store) — verified by reading the function body.
+- startServiceWorker's return value gives the caller access to the created CaptureStore alongside the BridgeClient; service-worker.unit.test.ts reads the store from the return value and asserts a read on it is the empty-but-valid shape.
+- chromeCapturePorts() appears in service-worker.ts only inside the `if (typeof chrome !== 'undefined' …)` block; `grep -n chromeCapturePorts service-worker.ts` shows no call outside it.
+- service-worker.unit.test.ts's fake CapturePorts records the onRuntimeMessage and onTabRemoved listeners, and the test asserts each was registered exactly once after startServiceWorker.
+- No file under src/extension/ that is capture-related imports or calls bridge-client send/outbox APIs — `grep -n 'send\|outbox\|observation' capture-store.ts capture-ports.ts` returns nothing relevant.
+- capture-ports.ts contains no top-level chrome.* access; chrome.runtime / chrome.tabs are referenced only inside the chromeCapturePorts function body.
+
+*Failure examples:*
+- The store is created at module top level (`const store = createCaptureStore()`) so it is shared across calls to startServiceWorker and every unit test observes the previous test's entries.
+- chromeCapturePorts() wraps chrome.runtime.onMessage but the listener wrapper reads `sender.tab.id` without optional chaining, throwing on messages from the extension's own popup (no tab) and killing all subsequent capture.
+- startServiceWorker now returns `{ client, store }` but the existing test and the production guard still treat the result as a BridgeClient, so tsc passes only because the result is discarded and the change is silently unverified.
+
+#### verify-green-and-test-naming — npm run verify green with every export named in co-located tests (minScore 8)
+
+*Rule:* tsc, eslint (strictTypeChecked) and vitest all pass and every export of capture-store.ts is referenced verbatim in capture-store.unit.test.ts. 10 = verify green, CaptureStore, createCaptureStore and installCaptureIntake each appear in the test file, capture-ports.ts is named `*ports.ts` so it is legitimately exempt, and no eslint-disable comments were added; 8 = verify green with all exports named but one exemption comment; below minScore = verify red or an export missing from the test file.
+
+*Pass criteria:*
+- Run `cd tools/chrome-bridge && npm run verify` — exit code 0 with tsc, eslint and vitest all reported green.
+- `grep -c 'createCaptureStore\|installCaptureIntake\|CaptureStore' src/extension/capture-store.unit.test.ts` shows each of the three names present (a type-only export like CaptureStore may be named via `import type`).
+- `grep -rn 'eslint-disable\|@ts-expect-error\|@ts-ignore\|as unknown as' src/extension/capture-store.ts src/extension/capture-ports.ts src/extension/service-worker.ts` returns no new hits compared with the base commit.
+- The only new file without a co-located test is capture-ports.ts, and its filename ends in `ports.ts`.
+
+*Failure examples:*
+- The developer names the file `capture-ports.ts` but tests import the type from `./ports.js` by mistake, so the coverage guard flags CapturePorts as an unnamed export on the wrong file.
+- A `Map<number, ...>` lookup returns `T | undefined` under noUncheckedIndexedAccess and the developer resolves it with a non-null `!` that eslint then rejects, leaving verify red on lint while tests pass.
+- The fake CapturePorts in the test stores listeners in a `let listener: ... | undefined` and calls it with `listener!(...)`, banned by the repo's no-non-null-assertion rule.
+
+**Healer hint:** The most common miss is the store treating an unknown or just-evicted tab as an error (returning undefined or throwing from `map.get(tabId)?.read`) and skipping bodyPreview re-bounding on network entries — fix by giving readConsole/readNetwork an explicit `{ entries: [], nextSince: 0, dropped: false }` fallback and routing both text and bodyPreview through boundText in ingest, then re-run `npm run verify`.
+
+</details>
+
+### Phase 6 — Add content-script entries to extension build
+
+Technical ID: `extension-build-entries` · subsystem: extension build · layer: cross-cutting · blast radius: medium
+
+**Goal** — Extend the extension build so `npm run build:extension` emits dist/extension/ with service-worker.js (ES module, as today), page-script.js and capture-forwarder.js (both classic non-module IIFE bundles, because Chrome injects manifest content scripts as classic scripts), and a manifest.json that declares the page script in the MAIN world and the forwarder in the ISOLATED world, both at `document_start` on all URLs.
+
+**Why** — The two new scripts only take effect if Chrome injects them into every page before the page's own code runs, which requires both a manifest declaration and a build that produces them in the classic-script format Chrome accepts. The current build is deliberately single-entry with `inlineDynamicImports`, which cannot produce a second IIFE entry, so the build needs separate passes.
+
+**Changes**
+
+- Change vite.extension.config.ts to `defineConfig(({ mode }) => …)` selecting one of three entries by mode: `service-worker` (current settings, `emptyOutDir: true`, runs the manifest-copy plugin), `page-script` (input src/extension/page-script.ts, `format: "iife"`, `entryFileNames: "page-script.js"`, `emptyOutDir: false`), and `capture-forwarder` (same, `capture-forwarder.js`). Update the header comment that currently says 'this horizon ships no content scripts'.
+- Change package.json `build:extension` to chain the three passes in that order (`vite build -c vite.extension.config.ts --mode service-worker && … --mode page-script && … --mode capture-forwarder`) so the emptying pass runs first and never wipes the others.
+- Add to extension/manifest.json a `content_scripts` array with two entries, both `matches: ["<all_urls>"]`, `run_at: "document_start"`, `all_frames: false`: `{ js: ["page-script.js"], world: "MAIN" }` and `{ js: ["capture-forwarder.js"] }` (ISOLATED is the default). No new permissions and no `web_accessible_resources` are needed (existing `host_permissions: <all_urls>` suffices).
+- If a new root-level config file is introduced instead of the mode switch, add it to the `allowDefaultProject` list in eslint.config.mjs; otherwise no eslint change is needed.
+- Verify: run `npm run build:extension`, confirm the three JS files plus manifest.json exist, `head -c 200 dist/extension/page-script.js` shows an IIFE (no `import`/`export` statements), and load dist/extension unpacked in chrome://extensions — no manifest errors; record whether a real Chrome session was available. Update the README's 'built extension' paragraph (currently 'answers the eight page-action commands … nothing else') to describe the three files and the two content scripts.
+
+**Files / areas**
+
+- `tools/chrome-bridge/vite.extension.config.ts`
+- `tools/chrome-bridge/extension/manifest.json`
+- `tools/chrome-bridge/package.json`
+- `tools/chrome-bridge/eslint.config.mjs`
+- `tools/chrome-bridge/README.md`
+
+**How to verify**
+
+- **Content scripts are self-contained classic IIFE bundles** — After `cd tools/chrome-bridge && npm run build:extension`, `head -c 200 dist/extension/page-script.js` and `head -c 200 dist/extension/capture-forwarder.js` each begin with `(function` / `(() =>` / `!function` — an IIFE, not `import`/`export`.
+- **manifest.json declares both content scripts correctly and loads unpacked** — `jq '.content_scripts' tools/chrome-bridge/dist/extension/manifest.json` shows an array of exactly two entries; the entry with `js: ["page-script.js"]` has `"world": "MAIN"`, the entry with `js: ["capture-forwarder.js"]` has no `world` key (or `"ISOLATED"`), and both have `matches: ["<all_urls>"]`, `run_at: "document_start"`, `all_frames: false`.
+- **Three-pass build is repeatable and never wipes its own output** — `grep build:extension tools/chrome-bridge/package.json` shows three chained `vite build -c vite.extension.config.ts --mode …` invocations joined by `&&`, with `--mode service-worker` first.
+- **Repo verify pipeline stays green with the new build config** — `cd tools/chrome-bridge && npm run verify` exits 0.
+
+**Done when** — dist/extension/ produced by `npm run build:extension` containing service-worker.js, page-script.js (IIFE), capture-forwarder.js (IIFE), and a manifest.json declaring both content scripts at document_start (MAIN + ISOLATED), loadable unpacked without manifest errors. Every check under *How to verify* passes its bar.
+
+**Depends on** — Add MAIN-world console and network wrapper script; Add content script forwarding captures to worker
+
+**Rollback** — Revert vite.extension.config.ts, the `build:extension` script, and the manifest `content_scripts` block; the build returns to the horizon-1 single-entry output and the extension loads exactly as before.
+
+<details><summary>Reference — full rubric and healer hint</summary>
+
+#### content-script-bundle-format — Content scripts are self-contained classic IIFE bundles (minScore 7)
+
+*Rule:* page-script.js and capture-forwarder.js in dist/extension/ must be classic (non-module) scripts Chrome can inject via manifest content_scripts: no top-level import/export, no code-split chunk references, no dynamic import(), and each file fully self-contained. 10 = both files open with an IIFE, contain zero `import`/`export`/`import(` tokens, dist/extension has exactly three .js files, and vite sourcemap/minify settings match the service-worker pass; 8 = correct format with a minor untidiness (e.g. a leftover `//# sourceMappingURL` comment or differing minify setting); below 7 = either script is an ES module or references a chunk file that Chrome will fail to load.
+
+*Pass criteria:*
+- After `cd tools/chrome-bridge && npm run build:extension`, `head -c 200 dist/extension/page-script.js` and `head -c 200 dist/extension/capture-forwarder.js` each begin with `(function` / `(() =>` / `!function` — an IIFE, not `import`/`export`.
+- `grep -nE '^\s*(import|export)\b|\bimport\(' dist/extension/page-script.js dist/extension/capture-forwarder.js` prints nothing.
+- `ls dist/extension/*.js` lists exactly service-worker.js, page-script.js, capture-forwarder.js — no `chunk-*.js`, `index-*.js` or `assets/` directory.
+- `head -c 200 dist/extension/service-worker.js` still shows an ES module (the existing `format: "es"` output is unchanged) and manifest.json still says `"type": "module"` for the background worker.
+
+*Failure examples:*
+- page-script.ts and capture-forwarder.ts both import a shared `src/protocol/capture-envelope.ts`; the developer adds both as entries to a single rollup `input` object and Vite emits a shared `chunk-XXXX.js` that the IIFE cannot load at injection time.
+- The forwarder pass is copied from the service-worker pass and keeps `format: "es"`; the file builds fine and tsc passes, but Chrome logs 'Cannot use import statement outside a module' at document_start on every page.
+- Vite emits `page-script.js` with `inlineDynamicImports: true` but a `format: "iife"` bundle whose entry has a named export leaves a `var pageScript = (function(){...})()` global that shadows a page variable — technically loads but leaks into the MAIN world unnamed.
+
+#### manifest-content-script-declarations — manifest.json declares both content scripts correctly and loads unpacked (minScore 7)
+
+*Rule:* dist/extension/manifest.json must declare page-script.js in the MAIN world and capture-forwarder.js in the ISOLATED world, both at document_start on all URLs, with no new permissions and no web_accessible_resources, and the extension must load unpacked in chrome://extensions with zero manifest errors. 10 = both entries exactly as specified, `all_frames: false` explicit, permissions block byte-identical to before, README or phase record notes a real unpacked-load check with Chrome version; 8 = correct declarations but unpacked load not recorded (or only 'not available'); below 7 = a world is wrong, run_at is not document_start, or a permission/web_accessible_resources entry was added.
+
+*Pass criteria:*
+- `jq '.content_scripts' tools/chrome-bridge/dist/extension/manifest.json` shows an array of exactly two entries; the entry with `js: ["page-script.js"]` has `"world": "MAIN"`, the entry with `js: ["capture-forwarder.js"]` has no `world` key (or `"ISOLATED"`), and both have `matches: ["<all_urls>"]`, `run_at: "document_start"`, `all_frames: false`.
+- `jq '.permissions, .host_permissions, .web_accessible_resources' dist/extension/manifest.json` shows the permissions unchanged from git HEAD (`tabs, activeTab, scripting, storage, alarms`; host `<all_urls>`) and `null` for web_accessible_resources.
+- `diff tools/chrome-bridge/extension/manifest.json tools/chrome-bridge/dist/extension/manifest.json` is empty — the built manifest is a byte copy of the hand-written one, not a build-time-patched variant.
+- Every file named in `content_scripts[].js` and `background.service_worker` exists in dist/extension/ (`jq -r '.content_scripts[].js[], .background.service_worker' … | xargs -I{} test -f dist/extension/{}`).
+- The phase record / README states whether dist/extension was loaded unpacked in a real Chrome and reports 'no manifest errors' or 'Chrome unavailable' explicitly.
+
+*Failure examples:*
+- The developer writes the forwarder entry first and page-script second, then adds `"world": "MAIN"` to the wrong array element — console/fetch wrapping runs in the ISOLATED world and captures nothing from the page.
+- `run_at` is left at Chrome's default (`document_idle`) on the forwarder because 'it only listens' — the page script posts its first envelopes before the forwarder's listener exists and early console output is lost.
+- The manifest copy plugin is moved to the last pass for tidiness, but the service-worker pass also still copies it; a manual edit to one copy path drifts and the built manifest is the stale one.
+
+#### build-repeatability-and-pass-ordering — Three-pass build is repeatable and never wipes its own output (minScore 7)
+
+*Rule:* `npm run build:extension` run twice from a clean state must produce identical dist/extension contents, and the pass that empties the output directory must run first so no later pass deletes earlier artefacts; running the build with a pre-populated stale dist must leave no stale files. 10 = two consecutive builds are byte-identical, only the service-worker mode has `emptyOutDir: true`, stale files in dist are removed, and an unknown `--mode` fails loudly; 8 = repeatable and ordered correctly but an unknown mode silently falls back to one of the entries; below 7 = a pass with `emptyOutDir: true` runs after another pass, or two builds differ.
+
+*Pass criteria:*
+- `grep build:extension tools/chrome-bridge/package.json` shows three chained `vite build -c vite.extension.config.ts --mode …` invocations joined by `&&`, with `--mode service-worker` first.
+- In vite.extension.config.ts only the service-worker branch sets `emptyOutDir: true`; the page-script and capture-forwarder branches set `emptyOutDir: false` explicitly.
+- `rm -rf dist/extension && npm run build:extension && find dist/extension -type f -exec md5 {} + | sort > /tmp/a && npm run build:extension && find dist/extension -type f -exec md5 {} + | sort > /tmp/b && diff /tmp/a /tmp/b` prints nothing.
+- `touch dist/extension/stale.js && npm run build:extension && ls dist/extension/stale.js` reports no such file.
+- `npx vite build -c vite.extension.config.ts --mode bogus` exits non-zero with a message naming the unknown mode (not a silent service-worker build).
+
+*Failure examples:*
+- The developer uses `defineConfig(({ mode }) => mode === 'page-script' ? … : mode === 'capture-forwarder' ? … : serviceWorkerConfig)` — an unrecognised or missing mode silently runs the emptying service-worker pass, so a typo in package.json wipes the content scripts without any error.
+- The `&&` chain is written as `;` or the three commands are split across `build:extension`, `build:page-script`, `build:forwarder` npm scripts run via `npm-run-all -p` — in parallel, the emptying pass races the others and intermittently deletes page-script.js.
+- Vite's default `emptyOutDir` behaviour is relied on implicitly for the two later passes; because outDir is inside root Vite defaults to emptying, and the second build silently removes service-worker.js.
+
+#### lint-and-verify-green — Repo verify pipeline stays green with the new build config (minScore 7)
+
+*Rule:* `npm run verify` in tools/chrome-bridge (tsc + eslint + vitest) must pass after the change, and any new root-level config file must be registered in eslint's allowDefaultProject. 10 = verify green, no eslint-disable added, no new root config file (mode switch used) or new file listed in allowDefaultProject with the header comment in vite.extension.config.ts updated to describe the three passes; 8 = verify green but the stale 'this horizon ships no content scripts' comment remains; below 7 = verify red or a new root config file is unlisted in allowDefaultProject.
+
+*Pass criteria:*
+- `cd tools/chrome-bridge && npm run verify` exits 0.
+- `git diff --name-only -- tools/chrome-bridge/*.config.* tools/chrome-bridge/*.mjs tools/chrome-bridge/*.ts` lists no new root-level file, OR every new root-level file appears in the `allowDefaultProject` array in tools/chrome-bridge/eslint.config.mjs.
+- `grep -rn 'eslint-disable' tools/chrome-bridge/vite.extension.config.ts tools/chrome-bridge/eslint.config.mjs` prints nothing new versus git HEAD.
+- The header comment of vite.extension.config.ts no longer contains the phrase 'ships no content scripts' and names the three modes and which one empties the output directory.
+- tools/chrome-bridge/README.md's 'built extension' paragraph names service-worker.js, page-script.js, capture-forwarder.js and describes the MAIN-world page script and ISOLATED forwarder (grep for 'capture-forwarder' in the README returns at least one hit).
+
+*Failure examples:*
+- The developer splits the build into vite.page-script.config.ts and vite.forwarder.config.ts for clarity; tsc and the build pass, but eslint's typed-linting fails on the two unlisted root files with 'file not included in any project' — verify goes red only in CI.
+- A `modes` lookup table is typed as `Record<string, BuildOptions>` and indexed with `mode`; under `noUncheckedIndexedAccess` the result is `BuildOptions | undefined` and the developer resolves it with a `!` non-null assertion, which the repo's eslint config forbids.
+- The README sentence 'answers the eight page-action commands … nothing else' is left in place because only the paragraph above it was edited, so docs now contradict the shipped manifest.
+
+**Healer hint:** The most likely miss is Chrome refusing page-script.js or capture-forwarder.js because a shared import was split into a chunk or the pass kept format "es" — fix by giving each content-script mode its own single `input` with `format: "iife"` and `inlineDynamicImports: true`, then re-run `grep -nE '^\s*(import|export)\b' dist/extension/*.js` to confirm only service-worker.js matches.
+
+</details>
+
+### Phase 7 — Add readConsoleMessages and readNetworkRequests page actions
+
+Technical ID: `read-capture-page-actions` · subsystem: page-action / MCP tool surface · layer: interface · blast radius: medium
+
+**Goal** — Register the two read tools as page actions end to end: add them to PAGE_ACTIONS and the per-action param/result types, implement their handlers (active-tab resolution, `since`/`limit` validation, query against the capture store), add their MCP tool-catalog entries with a shared `since`/`limit` schema, and document them in the README — proving with a deliberate-omission check that leaving either out of the handler map or the catalog fails `npm run typecheck`.
+
+**Why** — Until an action is in the single source-of-truth list and has a handler and a tool-catalog entry, no MCP client can call it; the package's design makes those three sites compile-time-coupled, so they must land together. This is the phase that turns the buffered captures into something Claude Code (or any MCP client) can actually ask for.
+
+**Changes**
+
+- Append `readConsoleMessages` and `readNetworkRequests` to `PAGE_ACTIONS` in src/protocol/actions.ts (8 → 10 actions; note the existing action is `navigateTo`, not `navigate`). Add `ReadCaptureParams { since?: number; limit?: number }` and `ReadConsoleMessagesResult = CaptureRead<ConsoleEntry>` / `ReadNetworkRequestsResult = CaptureRead<NetworkEntry>` (entries, required `nextSince`, `dropped`, `truncated`) to `PageActionParams` / `PageActionResults` in types.ts, importing the entry types from src/protocol/capture.ts.
+- In page-actions.ts change `pageActionHandlers(ports)` to `pageActionHandlers(ports, captureStore: CaptureStore)` and add two handlers in the `guard()` list: hand-validate `since` (optional non-negative integer, default 0) and `limit` (optional positive integer, default `DEFAULT_READ_LIMIT`, clamped to `MAX_READ_LIMIT`) returning `{ error }` on bad input, resolve the active tab via `ports.queryActiveTab()` (returning `NO_ACTIVE_TAB` like every other handler), and return `captureStore.readConsole(tab.id, query)` / `readNetwork(...)`. Update service-worker.ts to pass the store created in the previous phase, and update page-actions.unit.test.ts (fake store; valid/invalid since/limit; no active tab; empty buffer returns nextSince 0).
+- In src/mcp/tool-catalog.ts add a shared `SINCE_LIMIT_PROPERTIES` const (mirroring `MAX_CHARS_PROPERTY`) and two `TOOL_CATALOG` entries with plain-language descriptions that explain the cursor: 'pass the `nextSince` from the previous result as `since` to get only newer entries; reads never delete entries'. No server.ts change is needed — results fall through to the JSON text path. Update tool-catalog.unit.test.ts (listTools returns 10 tools; schema has since/limit with `additionalProperties: false`).
+- Deliberate-omission check (record the outcome in the phase notes): temporarily delete the `readNetworkRequests` handler entry → `npm run typecheck` must fail; restore; temporarily delete its `TOOL_CATALOG` entry → typecheck must fail; restore. Note that `PageActionParams`/`PageActionResults` are plain interfaces, so an omission there is only caught where `Command` maps over PageAction — accepted for this horizon.
+- Update README.md at all four sites that hardcode 'eight' actions / '8 tools' (MCP client config section, manual check step 3, built-extension paragraph, tool list) to ten and document both tools: fields returned, `since`/`nextSince`/`limit`/`dropped`/`truncated` semantics, the buffer caps (`DEFAULT_MAX_ENTRIES`, `MAX_CONSOLE_TEXT_BYTES`, `MAX_BODY_PREVIEW_BYTES`), the in-memory / lost-on-worker-suspension caveat, and extend the existing 'Manual end-to-end check' (do not add a third section) with: open a page that logs to console and issues fetch/XHR, call `readConsoleMessages` then `readNetworkRequests`, call again with the returned `nextSince` and confirm only newer entries come back.
+- REQUIRED manual end-to-end check in a real Chrome session (the horizon cannot close without it — user decision at the Alignment Preview): load dist/extension unpacked, start `npm run relay`, open a page that logs to console and issues fetch/XHR, call `readConsoleMessages` and `readNetworkRequests` from Claude Code, then call again with the returned `nextSince` and confirm only newer entries return. Record the observed result (entry counts, whether the keepalive kept buffers alive across ~1 minute idle) in the phase notes and as one `discoveries.md` line. If no Chrome session is available during execution, the phase ends `blocked` with reason `MANUAL_CHROME_CHECK_PENDING`, not `done`.
+
+**Files / areas**
+
+- `tools/chrome-bridge/src/protocol/actions.ts`
+- `tools/chrome-bridge/src/protocol/types.ts`
+- `tools/chrome-bridge/src/extension/page-actions.ts`
+- `tools/chrome-bridge/src/extension/service-worker.ts`
+- `tools/chrome-bridge/src/mcp/tool-catalog.ts`
+- `tools/chrome-bridge/README.md`
+
+**How to verify**
+
+- **Real Chrome end-to-end read with nextSince cursor** — Phase notes contain a dated record of the manual check naming the page URL used, the number of entries returned by `readConsoleMessages` and by `readNetworkRequests` on the first call, and the `nextSince` value each returned.
+- **`since`/`limit` input validation matches the documented contract** — `page-actions.unit.test.ts` has cases for `since` = -1, 1.5, NaN, and "3" (string) each yielding an `{ error }` result rather than a thrown exception or a successful read.
+- **Deliberate-omission typecheck proof recorded** — Phase notes contain a pasted `tsc` error mentioning `readNetworkRequests` and `page-actions.ts` (property missing in the handler map type) produced by temporarily deleting that handler entry.
+- **MCP tool schemas are strict and self-explanatory** — `src/mcp/tool-catalog.ts` defines a single `SINCE_LIMIT_PROPERTIES` const (declared `as const`, like `MAX_CHARS_PROPERTY`) spread into both entries; grep finds `since:` defined once, not twice.
+- **README documents the ten tools and the cursor semantics accurately** — `grep -n -i 'eight\|8 tools\|8 page' tools/chrome-bridge/README.md` returns no matches; the four previously hardcoded sites (MCP client config, manual check step 3, built-extension paragraph, tool list) now say ten.
+
+**Done when** — The two page actions `readConsoleMessages` and `readNetworkRequests` registered end to end — in PAGE_ACTIONS, param/result types, the extension handler map, and the MCP TOOL_CATALOG (10 tools listed) — with the deliberate-omission typecheck failure recorded, `npm run verify` green, the README documenting both tools and their query semantics, and the manual Chrome end-to-end check passed and recorded (real entries returned from a live page). Every check under *How to verify* passes its bar.
+
+**Depends on** — Add per-tab capture ring buffer; Connect service worker to capture ring buffers; Add content-script entries to extension build
+
+**Rollback** — Remove the two entries from PAGE_ACTIONS, the two param/result types, the two handlers (and the store argument), and the two catalog entries; tsc parity guarantees no dangling reference survives, and the README counts revert to eight.
+
+<details><summary>Reference — full rubric and healer hint</summary>
+
+#### live-chrome-cursor-roundtrip — Real Chrome end-to-end read with nextSince cursor (minScore 8)
+
+*Rule:* Against the built extension loaded unpacked in a real Chrome session with the relay running, both MCP tools return entries actually produced by a live page, and a second call passing the first result's `nextSince` as `since` returns only entries newer than the first call. Scale: 10 = phase notes plus a discoveries.md line record concrete counts for both tools, the exact nextSince values across both calls, a ~1 minute idle test showing buffers survived (or a documented loss), and at least one entry whose content is traceable to the test page (a recognisable console string, a fetch URL); 8 = both tools and the cursor round-trip recorded with counts but the idle test or the traceable-content detail is thin; below minScore = the check was done in unit tests or a fake only, one tool was skipped, or the status is `done` without a Chrome session.
+
+*Pass criteria:*
+- Phase notes contain a dated record of the manual check naming the page URL used, the number of entries returned by `readConsoleMessages` and by `readNetworkRequests` on the first call, and the `nextSince` value each returned.
+- Phase notes record a second call to each tool with `since` set to the previous `nextSince`, and the returned entries' `seq` values are all strictly greater than that `since` (no entry from the first call appears again).
+- At least one returned console entry's text and one network entry's URL are quoted in the notes and match what the test page actually logged/fetched (not a generic 'entries came back').
+- The notes state what happened to the buffers after about one minute of idle (entries still present, or lost with the reason), and `docs/roadmaps/agent-agnostic-browser-bridge/discoveries.md` has one new line summarising the outcome.
+- If no Chrome session was available, the phase status JSON reads `blocked` with reason `MANUAL_CHROME_CHECK_PENDING` and none of the above is fabricated; a status of `done` without the recorded counts fails this dimension outright.
+
+*Failure examples:*
+- The executor ran the unit tests with a fake CaptureStore and wrote 'end-to-end verified' in the notes without loading dist/extension into Chrome.
+- The second call is made with `since` omitted (or with the first call's `since`, not its `nextSince`), so the same entries come back again and the executor reports 'cursor works' because the call succeeded.
+- Only `readConsoleMessages` was exercised live because the test page had no network traffic; `readNetworkRequests` returned an empty array and this was accepted as passing.
+- The check was done against an extension build from before the handler change (stale dist/), so the tools time out and the executor marks the phase `done` with a note to re-check later.
+
+#### since-limit-validation — `since`/`limit` input validation matches the documented contract (minScore 7)
+
+*Rule:* Each read handler hand-validates `since` (optional non-negative integer, default 0) and `limit` (optional positive integer, default DEFAULT_READ_LIMIT, silently clamped to MAX_READ_LIMIT) and returns an `{ error }` outcome for anything else, with unit tests proving every boundary. Scale: 10 = every boundary below has a named test and the error message names the offending field; 8 = the happy path plus negative/zero/non-integer cases tested but one edge (e.g. `Infinity`, `NaN`, `1.5`, `limit` over the max) is untested or handled by accident; below minScore = a string like "5" or a negative `since` is silently coerced or crashes inside the store.
+
+*Pass criteria:*
+- `page-actions.unit.test.ts` has cases for `since` = -1, 1.5, NaN, and "3" (string) each yielding an `{ error }` result rather than a thrown exception or a successful read.
+- `since` omitted and `since: 0` both read from the start of the buffer; `since` equal to the current `nextSince` yields an empty `entries` array with `nextSince` unchanged.
+- `limit` = 0, -1, 1.5, and a string each yield `{ error }`; `limit` omitted uses DEFAULT_READ_LIMIT; `limit` greater than MAX_READ_LIMIT is clamped (the test asserts the store received MAX_READ_LIMIT, not that the call errored).
+- When `ports.queryActiveTab()` resolves to no tab, both handlers return the same `NO_ACTIVE_TAB` outcome object shape as the existing handlers (compare against `getPageText`'s no-tab result in the same test file).
+- Both handlers are wrapped in `guard()` in the handler map, so a store that throws is surfaced as an `{ error }` outcome, and a test asserts this.
+
+*Failure examples:*
+- `since` is validated with `typeof since === 'number' && since >= 0`, which accepts `1.5` and `NaN` (NaN >= 0 is false, but `Infinity` passes) and the store then returns nothing or everything with no error.
+- `limit` above MAX_READ_LIMIT returns `{ error }` in the handler while the README says it is clamped, so an MCP client following the docs gets an error.
+- The handlers validate correctly but are added to the map as `raw.readConsoleMessages` instead of `guard(raw.readConsoleMessages)`, so a rejected promise from the store escapes as an unhandled exception in the service worker.
+- The `readConsoleMessages` handler is copied to `readNetworkRequests` but still calls `captureStore.readConsole`, and no test distinguishes the two because the fake store returns the same fixture for both.
+
+#### typecheck-parity-proof — Deliberate-omission typecheck proof recorded (minScore 7)
+
+*Rule:* The three compile-time-coupled sites (PAGE_ACTIONS, the handler map in page-actions.ts, TOOL_CATALOG) are wired so that removing either new action's handler entry or catalog entry makes `npm run typecheck` fail, and the phase notes quote the actual tsc error for both omissions. Scale: 10 = both omissions' exact tsc error lines (file, line, missing property name) are pasted in the notes and the final tree typechecks; 8 = both omissions were tried and described in prose without the verbatim error; below minScore = only one site tested, or the notes claim it fails without evidence, or the test was done on `readConsoleMessages` only.
+
+*Pass criteria:*
+- Phase notes contain a pasted `tsc` error mentioning `readNetworkRequests` and `page-actions.ts` (property missing in the handler map type) produced by temporarily deleting that handler entry.
+- Phase notes contain a second pasted `tsc` error mentioning `readNetworkRequests` and `tool-catalog.ts` produced by temporarily deleting that TOOL_CATALOG entry.
+- `git diff` of the final tree shows both entries restored and `npm run typecheck` exits 0; the notes state the restore was verified (not just 'restored').
+- `PAGE_ACTIONS` in `src/protocol/actions.ts` has exactly ten entries with the two new names spelled identically to the handler-map keys and catalog keys (no `readConsoleMessage` singular / `readNetworkRequest` drift).
+- `listTools()` in `tool-catalog.unit.test.ts` is asserted to return exactly 10 tools whose names equal `PAGE_ACTIONS` in order.
+- `npm run verify:fast` at the repo root exits 0 and `git diff --name-only` for this horizon contains no path under extension/ or services/ — boky's own extension, relay, and devtools stay untouched.
+
+*Failure examples:*
+- The handler map is typed with an index signature or built via `Object.fromEntries`, so deleting a handler entry still typechecks; the executor notes 'parity holds' without actually running the omission.
+- The omission check was run only on `readConsoleMessages`; a typo in `readNetworkRequests` (e.g. `readNetworkRequest`) in the catalog would produce an extra key error rather than a missing key, and the recorded evidence does not cover it.
+- The executor tried the omission, saw an error, but the error was actually from the unit test file referencing the handler, not from the `Record<PageAction, …>` type — the note does not show the file/line so the reviewer cannot tell.
+
+#### mcp-schema-strictness — MCP tool schemas are strict and self-explanatory (minScore 7)
+
+*Rule:* Both TOOL_CATALOG entries share one `SINCE_LIMIT_PROPERTIES` const whose JSON Schema fully constrains `since` and `limit` (integer, minimum, defaults stated), sets `additionalProperties: false`, and whose descriptions let an MCP client with no README use the cursor correctly. Scale: 10 = schema has `type: integer`, `minimum` (0 for since, 1 for limit), the default and max stated in each description, and the tool description explains that `nextSince` is passed back as `since` and that reads never delete; 8 = all constraints present but the description omits the non-destructive-read note or the max limit; below minScore = `additionalProperties` missing, a property typed `number`, or the two tools have independently duplicated (and now divergent) property blocks.
+
+*Pass criteria:*
+- `src/mcp/tool-catalog.ts` defines a single `SINCE_LIMIT_PROPERTIES` const (declared `as const`, like `MAX_CHARS_PROPERTY`) spread into both entries; grep finds `since:` defined once, not twice.
+- In the shared schema, `since` has `type: "integer"` and `minimum: 0`; `limit` has `type: "integer"` and `minimum: 1`; each description names the default value and (for `limit`) the maximum clamp.
+- Both entries' `inputSchema` have `additionalProperties: false` and no `required` array (both params optional), and `tool-catalog.unit.test.ts` asserts this for both tool names.
+- Each tool description contains, in plain language, that the caller should pass the returned `nextSince` as the next `since`, and that reading does not remove entries from the buffer.
+- Running `npm run mcp` (or the equivalent server entry) and issuing `tools/list` shows ten tools, and the two new tools' schemas match the catalog constants byte-for-byte (no server.ts-side transformation).
+
+*Failure examples:*
+- `since` and `limit` are typed `number` because the developer copied a numeric property from another schema; an MCP client sends `1.5` and the handler's integer validation rejects what the schema allowed.
+- Both tools have `additionalProperties: false` but the descriptions say only 'sequence cursor'; a client has no way to know `nextSince` is the value to feed back and re-reads from 0 each time.
+- `SINCE_LIMIT_PROPERTIES` exists but `readNetworkRequests` was written first with its own inline block and never switched to the shared const, so the two `limit` descriptions state different defaults.
+
+#### readme-accuracy — README documents the ten tools and the cursor semantics accurately (minScore 7)
+
+*Rule:* tools/chrome-bridge/README.md no longer claims eight actions/8 tools anywhere, documents both read tools' result fields and query semantics with values that match the code constants, and the existing 'Manual end-to-end check' section (not a new one) contains the cursor round-trip step. Scale: 10 = every number in the README (tool count, DEFAULT_READ_LIMIT, MAX_READ_LIMIT, DEFAULT_MAX_ENTRIES, MAX_CONSOLE_TEXT_BYTES, MAX_BODY_PREVIEW_BYTES) is verified equal to the exported constant and the caveat about in-memory loss on worker suspension is present; 8 = counts and semantics correct but one cap value is stated from memory and differs from code; below minScore = any 'eight'/'8 tools' remains, or a third manual-check section was added.
+
+*Pass criteria:*
+- `grep -n -i 'eight\|8 tools\|8 page' tools/chrome-bridge/README.md` returns no matches; the four previously hardcoded sites (MCP client config, manual check step 3, built-extension paragraph, tool list) now say ten.
+- The README lists `readConsoleMessages` and `readNetworkRequests` with their result fields `entries`, `nextSince`, `dropped`, `truncated` and explains each in one sentence.
+- Every numeric cap stated in the README (default/max limit, max entries per tab, console text bytes, body preview bytes) equals the value of the correspondingly named exported constant in `src/protocol/capture.ts` or the ring-buffer module (check by grep, not by trust).
+- The README states that buffers are in-memory in the service worker and are lost when the worker is suspended or the tab is closed.
+- The section headed 'Manual end-to-end check' contains steps to open a page that logs and fetches, call both tools, then call again with the returned `nextSince` and expect only newer entries; `grep -c 'end-to-end' README.md` shows the heading count did not grow.
+
+*Failure examples:*
+- Three of the four 'eight' sites were updated but the sentence in the built-extension paragraph ('answers the eight page-action commands') still lists the old names.
+- The README says `limit` defaults to 100 and maxes at 1000 because the developer wrote the docs before finalising the constants at 200/500 in the ring-buffer phase.
+- The cursor semantics are documented under the tool list but the 'Manual end-to-end check' section was left untouched, so a reader following the README's own verification steps never exercises the new tools.
+- The README documents `nextSince` as 'the seq of the last entry returned', but the implementation returns the buffer's head seq even when `entries` is empty, and the doc does not mention the empty-buffer case.
+
+**Healer hint:** The most likely failure is marking the phase done on unit-test evidence alone or with a stale dist/ build in Chrome — rebuild the extension, reload it unpacked, hit a page that both logs and fetches, and paste the two calls' entry counts and nextSince values into the phase notes, or set the status to blocked with MANUAL_CHROME_CHECK_PENDING.
+
+</details>
+
+## Discovery Findings
+
+| Area | Finding | File | Implication |
+|---|---|---|---|
+| protocol/actions | PAGE_ACTIONS contains EIGHT entries, not seven: `ping`, `navigateTo`, `getPageText`, `readPage`, `findElement`, `clickElement`, `typeText`, `captureTab`. Also note the action is named `navigateTo`, not `navigate` as the task text says. | `tools/chrome-bridge/src/protocol/actions.ts` | Plan phases and README edits must say 8→10 actions, and any new naming should follow the `verbNoun` convention (`readConsoleMessages`/`readNetworkRequests` fit). Correct the task's '7 page actions'/'navigate' wording in the roadmap so a phase does not chase a nonexistent action. |
+| protocol/types — tsc parity surface | Adding an action requires edits in FIVE places, not two: `PAGE_ACTIONS` (actions.ts:10-19), `PageActionParams` (types.ts:57-66), `PageActionResults` (types.ts:110-119), the handler map in page-actions.ts (both the `raw` literal AND the explicit re-listing at lines 229-238), and `TOOL_CATALOG` (tool-catalog.ts:55-144). | `tools/chrome-bridge/src/protocol/types.ts` | The 'deliberate-omission proves tsc parity' success criterion should enumerate all five sites. Note `PageActionParams`/`PageActionResults` are plain interfaces, NOT `Record<PageAction,…>` — omitting a key there is silently allowed by tsc except where `Command` maps over PageAction, so the plan should either convert them to `Record<PageAction,…>` or accept weaker parity there. |
+| protocol/types — Observation already exists | `Observation` is fully defined with `observationType: "console" \| "network" \| "page-error"`, `tabId`, `timestamp`, `payload: unknown`, plus `isObservation` guard and inclusion in `BridgeMessage`/`isBridgeMessage`. | `tools/chrome-bridge/src/protocol/types.ts` | Confirms the analysis risk: pull-only delivery leaves this frame defined-but-unused. It also already has a guard and unit test, so it will not be flagged as dead by tooling — no phase is needed to remove it; just record the decision. There is no `page` field and no ObservationSource variants in this package (that is boky's shape, not chrome-bridge's). |
+| extension/ports | `ChromePorts` abstracts exactly four calls — `queryActiveTab`, `executeScript`, `updateTab`, `captureVisibleTab`. There is NO `runtime.onMessage`, NO `tabs.onRemoved`, and no direct `tabs.query` exposure. | `tools/chrome-bridge/src/extension/ports.ts` | Capture needs two new chrome surfaces (inbound runtime messages from the forwarder, and tab-removal eviction). Plan an explicit phase to extend `ChromePorts` (or add a sibling `CapturePorts`) — this is a real interface change, not an additive detail, and every existing `fakePorts` helper in tests must gain the new members. |
+| extension/ports — testguard exemption | `ports.ts` is exempted from the co-located-test requirement by the `/ports\.ts$` ignore pattern, and the file's own doc comment (lines 14-16) says it is named `ports.ts` specifically to earn that exemption. | `.testguard.json` | New chrome-API glue for capture should live in a `*ports.ts`-named file to stay exempt; any other new .ts file under tools/ needs a co-located `.unit.test.ts` mentioning every export by name. A page-script source authored as a non-`ports` TS module WILL require a unit test. |
+| extension/service-worker wiring | `startServiceWorker` takes `{alarms, ports, socketFactory, url?}` and wires keepalive + dispatcher + bridge client at module top level, guarded by `typeof chrome !== "undefined" && typeof WebSocket !== "undefined"` so importing under vitest has no side effect. | `tools/chrome-bridge/src/extension/service-worker.ts` | Ring-buffer installation and the runtime.onMessage listener must be added to `ServiceWorkerDeps` and installed inside `startServiceWorker`, keeping the import-side-effect guard. The buffers must be created here and passed into `pageActionHandlers` so the two read handlers can query them — meaning `pageActionHandlers(ports)` gains a second argument, touching its existing test file. |
+| extension/page-actions | Every handler resolves the target via `ports.queryActiveTab()` and returns the shared `NO_ACTIVE_TAB` error sentinel; handlers validate params by hand and are wrapped in `guard()` which converts throws to `{error}`. `ping` is deliberately NOT wrapped. | `tools/chrome-bridge/src/extension/page-actions.ts` | The two read handlers should follow the same shape: hand-rolled `since`/`limit` validation returning `{error}`, active-tab resolution, and inclusion in the `guard()` list at lines 229-238. Confirms the analysis assumption that tab targeting is active-tab-only. |
+| build — vite.extension.config.ts | The current build is deliberately single-entry: one rollup input (`service-worker.ts`), `format: "es"`, `inlineDynamicImports: true`, `entryFileNames: "service-worker.js"`, plus a `closeBundle` plugin that COPIES the hand-written manifest. The header comment (lines 4-7) explicitly states 'this horizon ships no content scripts'. | `tools/chrome-bridge/vite.extension.config.ts` | Confirms the build-shape risk is real: `inlineDynamicImports` plus a single `input` cannot produce a second IIFE entry. Plan a dedicated build phase — either multiple `vite build -c` passes chained in the `build:extension` script (note `emptyOutDir: true` would wipe earlier passes, so ordering/flags matter) or a config array. |
+| build — manifest patch trick is NOT required | boky's `closeBundle` manifest patch exists ONLY because `crx()` derives Rollup entries from every `content_scripts[].js` path and cannot resolve a synthesized string asset (vite.config.ts lines 33-41). chrome-bridge uses plain Vite with a hand-copied manifest. | `extension/vite.config.ts` | Confirms the analysis assumption: chrome-bridge's hand-written `extension/manifest.json` can declare `world: "MAIN"`, `run_at: "document_start"` directly under `content_scripts`. No manifest patching and no `web_accessible_resources` entry are needed — drop any planned phase for that. |
+| extension/manifest.json | The shipped manifest has no `content_scripts` and no `web_accessible_resources` at all; permissions are `["tabs","activeTab","scripting","storage","alarms"]` with `host_permissions: ["<all_urls>"]`. | `tools/chrome-bridge/extension/manifest.json` | A `content_scripts` array with two entries (MAIN + ISOLATED, both `document_start`, `matches: ["<all_urls>"]`) is a purely additive manifest edit. Existing permissions already suffice — no new permission is required for capture. |
+| boky sniffer-source pattern | boky's page-world script is a 440-line TypeScript module exporting `pageWorldSnifferSource: { readonly source: string }` — a literal ES5-style JS string (var, function, no imports) interpolating `PAGE_BRIDGE_NAMESPACE`/`CHANNEL` constants, idempotence-guarded via `window.__bokySnifferInstalled`, wrapping fetch (response.clone().text()), XHR open/send, AND WebSocket. | `extension/src/infrastructure/recorder/sniffer-source.ts` | Two viable authoring styles exist. Because chrome-bridge's manifest can declare the MAIN script directly, a real .ts file compiled by a second Vite IIFE pass is simpler than boky's string-literal trick and avoids the eslint pain of a giant untyped string. Recommend the compiled-file approach and drop WebSocket wrapping per the out-of-scope list. |
+| boky page-bridge trust boundary | boky uses a non-guessable namespace constant `__boky_capture_v1__` plus a separate `channel` discriminant so two bridges share one namespace, with an explicit doc note that a page could forge an envelope if the namespace were guessable, and the recorder additionally checks `event.source === window`. | `extension/src/infrastructure/recorder/page-bridge.ts` | Copy this exactly: one chrome-bridge namespace constant plus `channel: "console"` / `channel: "network"`, a hand-written type-guard predicate, and the `event.source === window` check in the forwarder. This is a shared-contract module both the page script and forwarder import — good phase-1 material. |
+| boky network frame shape | `NetworkActivityFrame` is a discriminated union (`request`/`response`/`response-failed`/`ws-*`) carrying `requestId`, `url`, `method`, `status`, `protocol`, `contentType`, `bodySnippet`, `truncated`; the doc explicitly states bodies are pre-truncated in the page world before crossing the bridge. | `extension/src/infrastructure/recorder/network-activity-frame.ts` | A proven field set to copy for `readNetworkRequests`, minus ws-*. Critically, truncation happens at capture time in the page world — adopt that so the byte cap is enforced before postMessage, matching the analysis's per-entry byte cap requirement. |
+| boky log-forwarder rationale | The doc comment (lines 12-20) states the reason content scripts must use a sink over `chrome.runtime` rather than a WebSocket: Chromium enforces the HOST PAGE's `connect-src` CSP against a content-script WebSocket, and some provider hosts block `ws://localhost:*` outright. | `extension/src/infrastructure/bridge/log-forwarder.ts` | Confirms the analysis's transport assumption with a first-party citation. The forwarder must use `chrome.runtime.sendMessage`, never a direct relay socket — worth quoting in the new module's doc comment since this repo's convention is heavy explanatory headers. |
+| MCP tool-catalog shape | `TOOL_CATALOG: Record<PageAction, ToolCatalogEntry>` holds `{description, inputSchema}` where inputSchema is a `JsonSchemaObject` with `additionalProperties: false` and an index signature; `listTools()` maps over `PAGE_ACTIONS` (never `Object.keys`). A shared `MAX_CHARS_PROPERTY` const is reused across two tools. | `tools/chrome-bridge/src/mcp/tool-catalog.ts` | This IS a true `Record<PageAction,…>`, so omitting a catalog entry is a real tsc error — the strongest parity site. Add a shared `SINCE_LIMIT_PROPERTIES` const mirroring `MAX_CHARS_PROPERTY`. Note `additionalProperties: false` means the `since`/`limit` schema must be finalized before client verification, per the analysis risk. |
+| MCP server result rendering | `handleToolCall` renders everything as `JSON.stringify(result, null, 2)` in one text block, except a hardcoded `if (toolName === "captureTab")` branch returning an image block. There is NO size cap in the MCP layer — the 200k cap lives only in the extension handler (`DEFAULT_MAX_CHARS`). | `tools/chrome-bridge/src/mcp/server.ts` | The two read tools need no server.ts change — they fall through to the JSON text path automatically. But the size-cap tuning item (scope 3) has no server-side knob to tune; any cap work means a new extension-side default or a new MCP-layer truncation, which is a design decision, not a tweak. |
+| eslint constraints on new code | The package runs `tseslint.configs.strictTypeChecked` with `no-explicit-any: error`, `no-non-null-assertion: error`, separate type-imports enforced, and custom `no-restricted-syntax` rules BANNING both `JSON.parse(x) as T` and ALL `satisfies` expressions. | `tools/chrome-bridge/eslint.config.mjs` | Envelope validation crossing postMessage/runtime boundaries must be hand-written type guards returning `value is T` — no `satisfies`, no casts. Also, any new root-level config file (e.g. a second vite config) must be added to the `allowDefaultProject` array at lines 22-26 or lint fails. |
+| tsconfig strictness | `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noUnusedLocals/Parameters`, and `verbatimModuleSyntax` are all on; `include` is `["src"]` only, and `lib` includes DOM. | `tools/chrome-bridge/tsconfig.json` | Ring-buffer index arithmetic will produce `T \| undefined` at every `arr[i]` — budget for that in the buffer implementation. `exactOptionalPropertyTypes` means an optional `since?: number` cannot be assigned `undefined` explicitly, which affects the result-shape design (`nextSince` should be required, not optional). |
+| vitest config | `include: ["src/**/*.unit.test.ts", "src/**/*.int.test.ts"]` with `environment: "node"` — there is no jsdom environment configured and jsdom is not a dependency. | `tools/chrome-bridge/vitest.config.ts` | Unlike boky (which executes its sniffer string in jsdom), chrome-bridge cannot test a page-world wrapper against a real DOM without adding jsdom. Either add jsdom as a devDependency + per-file `@vitest-environment` pragma, or design the wrapper so the capture logic is a pure function tested in node with fake `console`/`fetch` objects. Prefer the latter — it matches the existing fake-ports style. |
+| existing test pattern | Tests use a `fakePorts(overrides: Partial<ChromePorts>)` helper that builds a full `vi.fn()`-backed base and re-spies overrides via `Reflect.set`, with test-only escape hatches like `resetBridgeKeepaliveForTests()` for module-level singletons. | `tools/chrome-bridge/src/extension/page-actions.unit.test.ts` | New capture code must follow this: dependency-injected fakes, no chrome global stubbing, and an explicit `resetXForTests()` export if any module-level state (like an installed listener guard) is introduced. Extending `ChromePorts` requires updating this helper's base object. |
+| keepalive — module-level singleton | `installBridgeKeepalive` uses a module-level `installed` boolean and a 0.5-minute alarm; the listener body is an intentional no-op. Its doc notes the alarm firing is itself the keepalive. | `tools/chrome-bridge/src/extension/keepalive.ts` | Confirms the analysis's dominant-failure-mode risk: buffers are in-memory and survive only as long as the worker. This is unverified in a real browser. The read tools must return an empty-but-valid result (not an error) after a suspension, and that should be an explicit unit-tested case. |
+| bridge-client bound | The outbox is bounded at `OUTBOX_LIMIT = 100` frames with oldest-dropped semantics (`while (outbox.length > OUTBOX_LIMIT) outbox.shift()`). | `tools/chrome-bridge/src/extension/bridge-client.ts` | A precedent for the bounded-buffer idiom and for exporting the cap as a named const so tests can reference it. Under pull-only delivery nothing capture-related touches the outbox, so a chatty page cannot pressure it — worth stating as the evidence for success criterion (5). |
+| repo hooks — check-tests scope | `check-tests.mjs` operates on git-diff/staged paths repo-wide (not a fixed src dir) and merges `.testguard.json` over its defaults; the catch-all rule `{match: ".*", suffix: ".unit.test.ts"}` therefore applies to every changed .ts under tools/. `requireSymbolMentions: true` means each export name must appear verbatim in the test file. | `.claude/hooks/check-tests.mjs` | Every new capture module needs a co-located `.unit.test.ts` that literally names each export. Plan phases so no phase leaves an untested exported symbol, and prefer few, well-named exports over many small ones. |
+| repo hooks — dead-exports scope | `check-dead-exports.mjs` sets `SRC_ROOT = existsSync('extension/src') ? 'extension/src' : 'src'` — since `extension/src` exists, it NEVER scans `tools/chrome-bridge`. | `.claude/hooks/check-dead-exports.mjs` | Confirms the README's claim (line 35-36) that the every-export-has-an-importer rule is hand-maintained here. No hook will catch an orphaned export in the new capture modules — make it a review checklist item rather than assuming automation. |
+| root .mcp.json | The `chrome-bridge` entry uses the RELATIVE path `"tools/chrome-bridge/bin/mcp.mjs"`, while the older `extension-bridge` entry uses an absolute `/Users/dimitrykatz/...` path. | `.mcp.json` | Claude Code resolves relative args from the project root, but Gemini CLI and Crush are configured GLOBALLY (~/.config) with no project root — the README snippet for those clients must use an absolute path or the launcher will not be found. This is a concrete, verifiable README correction for scope item 2. |
+| client config — Gemini CLI | `~/.gemini/settings.json` exists and gemini is installed at ~/.nvm/versions/node/v22.14.0/bin/gemini, but the file has NO `mcpServers` key at all (only security/general/ui/tools sections). | `~/.gemini/settings.json` | Gemini has never had an MCP server registered on this machine. Verification requires adding an `mcpServers` block (or running `gemini mcp add`) — it is a first-time setup, so budget for a possible schema surprise rather than assuming a copy-paste into an existing block. |
+| client config — Crush | `~/.config/crush/crush.json` exists and uses a top-level `"mcp"` key (NOT `mcpServers`), containing `extension-bridge` with `{type: "stdio", command: "node", args: [absolute path], env: {}}` — line 257 onward. crush is installed. | `~/.config/crush/crush.json` | Crush's key is `mcp`, not `mcpServers` — a README snippet reusing the .mcp.json shape verbatim would be wrong for Crush. There is a working absolute-path precedent to copy directly; this makes Crush the cheapest of the two verifications. |
+| client config — Cursor / Codex | `~/.cursor/mcp.json` does NOT exist (the ~/.cursor dir has only argv.json, extensions, projects, agents). Neither `cursor-agent` nor `codex` is on PATH. |  | Confirms the analysis: Cursor and Codex shapes are documentable only, not verifiable. Do not plan a Cursor verification step; the success criterion should say 'documented from official docs' for both. |
+| register-mcp.mjs encoded shapes | The script encodes three shapes: gemini and qwen both via a `mcp add <name> <command> [args...]` CLI subcommand, and crush via appending a `mcp add <name> --command node --args <path>` line to a project-local `.crushrc` DSL file — which contradicts the actual installed crush config, a JSON `mcp` object in ~/.config/crush/crush.json. | `extension/scripts/register-mcp.mjs` | The `.crushrc` approach in this script appears stale relative to the installed crush. Do not copy its crush shape into the chrome-bridge README; use the observed JSON `mcp` object instead. Also confirms the out-of-scope decision to leave this boky script untouched is right — it is already divergent. |
+| README surface to update | The README hardcodes 'eight page actions' and the full action list in FOUR places: the MCP client config section (line 48-49), the manual check step 3 ('8 tools', line 80), and the built-extension paragraph (lines 89-91), plus a 'Full usage docs land in a later horizon' closer. | `tools/chrome-bridge/README.md` | A README phase must update all four sites to ten, not just the tool list. There are already two overlapping manual-check sections ('Manual end-to-end check' and 'Manual smoke test') — the capture manual check should extend one rather than adding a third. |
+
+## Out of Scope
+
+- Observation-frame streaming of console/network entries to controllers and a `tail` CLI — the user chose pull-only delivery; the `observation` frame kind stays defined but unused this horizon.
+- Forwarding the extension's own service-worker console (port of boky's log-forwarder.ts) as a separate capture source — deferred; this horizon captures page-world console only.
+- WebSocket traffic capture — the vision names fetch/XHR only; boky's WebSocket interception is not copied.
+- Full request/response body capture or LLM-stream reassembly — boky's sniffer semantics are the wrong default for a generic tool; only bounded text previews are recorded.
+- Persisting capture buffers across service-worker suspension (chrome.storage.session or similar) — accepted loss; adds storage-quota and serialization concerns that are not needed for the first version.
+- Multi-tab or explicit tabId targeting in the read tools — every existing action targets the active tab; adding tab selection is a protocol-wide change for a later horizon.
+- Parameterizing extension/scripts/register-mcp.mjs for the new server — the README documents the config snippets instead; the script is boky's and stays untouched per the horizon-1 decision.
+- Verifying against Codex CLI or the Cursor agent — Codex is not installed and cursor-agent is absent; their config shapes are documented only.
+- Wiring tools/chrome-bridge into scripts/verify.sh or the root pipeline — horizon-1 decision keeps the package self-verified via its own `npm run verify`.
+- Any change to boky's extension, BridgeRelayModule, extension-mcp.mjs, or check-command-parity.mjs — binding horizon-1 decision: boky is never migrated onto the new tool.
+- A DOM-mutation or page-error observer beyond window `error`/`unhandledrejection` — not part of the vision's tool set.
+- Verify the README MCP config snippet by hand against Gemini CLI and Crush (including the absolute-path correction for globally-configured clients and Crush's top-level `mcp` key) and document Cursor / Codex CLI config shapes from official docs — held for the next Planning Horizon (this horizon is 7 phases, over the ~5-phase budget the user set for including it).
+- Size-cap tuning: empirical check of readPage's 200k-char default and captureTab's image block against installed clients, and any new extension-side or MCP-layer truncation knob — held for the next Planning Horizon (lowest priority per task; discovery shows there is no MCP-layer cap to tune, so this is a design decision, not a tweak).
+- Convert `PageActionParams` / `PageActionResults` from plain interfaces to `Record<PageAction, …>` for full five-site tsc parity — YAGNI gate 2 (not needed now: the handler map and TOOL_CATALOG are already true Records and catch omissions; the weaker parity on the two interfaces is accepted and recorded).
+- Add jsdom as a devDependency to execute the page script against a real DOM in tests — YAGNI gate 3/4 (the wrapper is authored as an installer over injected globals so node-only vitest covers it).
+
+## Required Materials
+
+| Name | Kind | Why needed | How to acquire |
+|---|---|---|---|
+| Live Chrome session with the built chrome-bridge extension loaded unpacked | tool | Success criteria (2) manifest loads without errors, (3) readConsoleMessages/readNetworkRequests return real entries, and the untested horizon-1 relay hello + keepalive path cannot be verified without a real browser; horizon 1 recorded 'no browser', so this is the first real exercise of the whole stack and the dominant-failure-mode risk (buffer loss on worker suspension) can only be observed here. | On this machine: build with `npm run build:extension` in tools/chrome-bridge, open chrome://extensions, enable Developer mode, Load unpacked -> tools/chrome-bridge/dist/extension; start `npm run relay` (127.0.0.1:8766); open a page that logs to console and issues fetch/XHR (a static HTML fixture with known console strings and fetch URLs is the most reliable choice). Needed by success criteria (2) and (3). If no Chrome session is available during execution, the final phase ends `blocked` with reason MANUAL_CHROME_CHECK_PENDING — it is never recorded as done-but-unverified. |
+
+## Success Criteria
+
+- Done means all of the following hold locally in tools/chrome-bridge/: (1) `PAGE_ACTIONS` contains the existing entries plus `readConsoleMessages` and `readNetworkRequests`, and `npm run typecheck` fails if either the extension handler map or the MCP tool catalog omits one of them (proven by a deliberate-omission check recorded in the phase notes); (2) `npm run build:extension` emits `dist/extension/` containing the service worker, a MAIN-world page script built as a non-module IIFE, an ISOLATED content-script bundle, and a manifest declaring both under `content_scripts` with `run_at: document_start` (MAIN world for the wrapper), and the built extension loads unpacked in Chrome without manifest errors; (3) after loading the extension and opening a page that logs to console and issues fetch/XHR calls, calling the `readConsoleMessages` MCP tool from Claude Code returns those console entries (level, args-as-text, timestamp, sequence) and `readNetworkRequests` returns those requests (method, url, status, duration, bounded body preview or none per the recorded policy), scoped to the active tab; (4) `since` and `limit` behave per one documented, unit-tested semantic — `since` is a monotonic per-buffer sequence cursor returned in every result as `nextSince`, reads are non-destructive, `limit` caps the returned count and results report `dropped`/`truncated` when the ring overwrote or the cap cut entries; (5) each ring buffer has a hard entry-count cap and a per-entry byte cap enforced in pure TS with unit tests for wrap-around, since/limit windows, eviction on tab removal, and byte truncation; a chatty page cannot grow the service worker unboundedly because no capture entry is ever forwarded as an observation frame; (6) `npm run verify` (tsc --noEmit, eslint --max-warnings 0, vitest) is green in tools/chrome-bridge, the repo coverage guard passes for every changed .ts, and `npm run verify:fast` at the repo root remains green with boky's extension, relay, and devtools untouched; (7) the README's tool list and manual check section document the two new tools, their query semantics, and the buffer caps. README multi-client verification (Gemini CLI + Crush) and size-cap tuning are explicitly deferred to horizon 3 (user decision at the Alignment Preview).
+- Add capture entry types and message envelope: src/protocol/capture.ts — the capture contract module (entry types, envelope, namespace, byte caps, `boundText`, `isCaptureEnvelope`) with a green co-located unit test; `npm run verify` in tools/chrome-bridge stays green.
+- Add per-tab capture ring buffer: src/extension/capture-buffer.ts — a generic bounded ring buffer with `push`/`read`/`clear` and the documented `since`/`limit`/`nextSince`/`dropped`/`truncated` semantics, fully covered by a green co-located unit test.
+- Add MAIN-world console and network wrapper script: src/extension/page-script.ts — `installPageCapture(env)` plus its self-bootstrapping guard, wrapping console/uncaught errors/fetch/XHR into bounded capture envelopes (fetch body preview stream-read to the byte cap, never fully buffered), proven by a green co-located unit test using fake globals including a never-ending streaming body.
+- Add content script forwarding captures to worker: src/extension/capture-forwarder.ts — `installCaptureForwarder(deps)` plus its self-bootstrapping guard, relaying validated capture envelopes to the service worker, with a green co-located unit test.
+- Connect service worker to capture ring buffers: src/extension/capture-store.ts — a per-tab capture store (`createCaptureStore`, `installCaptureIntake`) wired into `startServiceWorker` via the new `CapturePorts` dep, with green unit tests for routing, tab isolation, eviction, and defensive byte re-bounding.
+- Add content-script entries to extension build: dist/extension/ produced by `npm run build:extension` containing service-worker.js, page-script.js (IIFE), capture-forwarder.js (IIFE), and a manifest.json declaring both content scripts at document_start (MAIN + ISOLATED), loadable unpacked without manifest errors.
+- Add readConsoleMessages and readNetworkRequests page actions: The two page actions `readConsoleMessages` and `readNetworkRequests` registered end to end — in PAGE_ACTIONS, param/result types, the extension handler map, and the MCP TOOL_CATALOG (10 tools listed) — with the deliberate-omission typecheck failure recorded, `npm run verify` green, the README documenting both tools and their query semantics, and the manual Chrome end-to-end check passed and recorded (real entries returned from a live page).
+
+## Alignment Preview
+
+Three advisory concerns were shown before the expensive stages. The user accepted the 7-phase preview on the first round (no redirect) and made three decisions that were folded into the phases:
+- Keep 7 phases rather than merging to 5; README client verification and size-cap tuning move to horizon 3.
+- A real Chrome end-to-end check is **required** to close the horizon (final phase ends `blocked` with `MANUAL_CHROME_CHECK_PENDING` if no browser is available).
+- The fetch body preview is stream-read to the byte cap, never `clone().text()`, so streaming replies are not buffered twice.
+
+## Quality Gate
+
+- Path: full (Discovery, Materials, Preview concerns, critic/heal gate).
+- Iteration 1: 1 major failed — `testable-rubrics` (page-script rubric said `bodyPreview` undefined while the contract requires `null`; a rubric suggested the banned `satisfies`). Healed with 5 targeted patches. No blockers, so no adversarial verification ran.
+- Iteration 2: all 10 dimensions pass (scores 7–9). Final verdict: **PASS**.
+- Orchestrator-applied minor corrections after the gate: stale `clone().text()` hint in phase 3's changes; material acquisition note still citing deferred criteria; bytes-vs-chars wording in phase 5's re-bounding criterion; two rubric texts claiming a dead-export scanner runs on tools/ (it does not); root `verify:fast` check added to phase 7's parity rubric.
+- Accepted debt (minor, not healed): phase 7 bundles README edits with the compile-coupled registration; phase 5 spans five files; the ring buffer exports read-limit constants consumed only by phase 7; `PageCaptureEnv` does not declare where the installed flag lives; no URL byte cap constant exists in the contract (bound urls with MAX_CONSOLE_TEXT_BYTES); `clear()` on the ring has no consumer (eviction deletes the map entry).
+- Two unconsumed materials (Gemini/Cursor/Codex config shapes) were dropped from the roadmap; they live in the Planning Brief for horizon 3.
+
+## Full analysis
+
+**Domain shape:** technical — The work is developer-tooling machinery — a MAIN-world console/fetch wrapper, an MV3 content-script forwarder, in-memory ring buffers, Vite build entries, and MCP tool schemas — with no business entities or rules a domain expert would recognize.
+
+**Objective:** Extend tools/chrome-bridge with pull-only page-capture: a MAIN-world console/fetch/XHR wrapper plus an ISOLATED forwarder feed bounded per-tab ring buffers in the extension service worker, exposed as two new page actions and MCP tools, readConsoleMessages and readNetworkRequests, each accepting `since` + `limit` and wired through PAGE_ACTIONS / TOOL_CATALOG so tsc parity covers them — with the multi-client README verification (Gemini CLI + Crush) and size-cap tuning included only if the horizon stays within ~5 phases.
+
+**Success definition:** Done means all of the following hold locally in tools/chrome-bridge/: (1) `PAGE_ACTIONS` contains the existing entries plus `readConsoleMessages` and `readNetworkRequests`, and `npm run typecheck` fails if either the extension handler map or the MCP tool catalog omits one of them (proven by a deliberate-omission check recorded in the phase notes); (2) `npm run build:extension` emits `dist/extension/` containing the service worker, a MAIN-world page script built as a non-module IIFE, an ISOLATED content-script bundle, and a manifest declaring both under `content_scripts` with `run_at: document_start` (MAIN world for the wrapper), and the built extension loads unpacked in Chrome without manifest errors; (3) after loading the extension and opening a page that logs to console and issues fetch/XHR calls, calling the `readConsoleMessages` MCP tool from Claude Code returns those console entries (level, args-as-text, timestamp, sequence) and `readNetworkRequests` returns those requests (method, url, status, duration, bounded body preview or none per the recorded policy), scoped to the active tab; (4) `since` and `limit` behave per one documented, unit-tested semantic — `since` is a monotonic per-buffer sequence cursor returned in every result as `nextSince`, reads are non-destructive, `limit` caps the returned count and results report `dropped`/`truncated` when the ring overwrote or the cap cut entries; (5) each ring buffer has a hard entry-count cap and a per-entry byte cap enforced in pure TS with unit tests for wrap-around, since/limit windows, eviction on tab removal, and byte truncation; a chatty page cannot grow the service worker unboundedly because no capture entry is ever forwarded as an observation frame; (6) `npm run verify` (tsc --noEmit, eslint --max-warnings 0, vitest) is green in tools/chrome-bridge, the repo coverage guard passes for every changed .ts, and `npm run verify:fast` at the repo root remains green with boky's extension, relay, and devtools untouched; (7) the README's tool list and manual check section document the two new tools, their query semantics, and the buffer caps. Conditionally, only if the plan stays within ~5 phases: (8) the README MCP config snippet is verified by hand against Gemini CLI and Crush (each lists the chrome-bridge tools and completes a getPageText call), with Cursor and Codex CLI config shapes documented but not verified; and (9) readPage's 200k-char default and captureTab's image block are empirically checked against at least the installed clients and any observed limit is recorded in discoveries.md. If (8)/(9) do not fit, they are explicitly deferred to horizon 3 in state.md/next-horizon-brief.md rather than half-done.
+
+### Ubiquitous language
+
+| Term | Meaning |
+|---|---|
+| page action | One entry of PAGE_ACTIONS in src/protocol/actions.ts; the single source of truth from which the extension handler map and the MCP tool catalog are derived via Record<PageAction, …>. |
+| page script (MAIN world) | The non-module IIFE injected at document_start into the page's own JS world that wraps console.*, window.fetch and XMLHttpRequest and posts capture entries via window.postMessage under the chrome-bridge namespace. |
+| forwarder (ISOLATED content script) | The content script that listens for namespaced postMessage envelopes from the page script, validates them with a type guard, and relays them to the service worker via chrome.runtime.sendMessage. |
+| capture entry | One serialized console message or network request record (with tabId, monotonic seq, timestamp, and bounded payload) as it sits in a ring buffer. |
+| ring buffer | The bounded, per-tabId, in-memory store in the service worker that keeps the newest N capture entries, overwrites the oldest, and is evicted on tabs.onRemoved. |
+| since cursor | The monotonic per-buffer sequence number a caller passes as `since` and receives back as `nextSince`; reads are non-destructive windows over the buffer, capped by `limit`. |
+| read tool | Either readConsoleMessages or readNetworkRequests — the only two consumers of ring buffers, exposed as page actions and as discrete MCP tools (pull-only delivery). |
+| tsc parity | The compile-time guarantee that adding an action to PAGE_ACTIONS without a matching handler and tool-catalog entry is a type error — the mechanism the two new actions must be wired through. |
+
+### Assumptions
+
+- Horizon 1's package layout is stable: PAGE_ACTIONS in src/protocol/actions.ts, per-action param/result maps in src/protocol/types.ts, handler map in src/extension/page-actions.ts + command-dispatch.ts, tool catalog in src/mcp/tool-catalog.ts, and the plain-Vite single-entry build in vite.extension.config.ts; the capture work extends these rather than restructuring them.
+- The manifest is hand-written (extension/manifest.json) and can declare the MAIN-world page script and ISOLATED content script directly under `content_scripts` (Chrome 111+ supports `world: MAIN` in manifest content_scripts), so no closeBundle manifest-patch or web_accessible_resources trick is required; the Vite build is extended to a multi-config or multi-pass build producing an IIFE for the page script (rollup `format: 'iife'` cannot share one multi-entry ES build with inlineDynamicImports, so separate build passes or configs are expected).
+- Page-world to content-script transport copies boky's pattern (window.postMessage with a new namespaced envelope, `event.source === window` guard, type-guard predicate) under a chrome-bridge-specific namespace; content-script to service-worker transport uses chrome.runtime.sendMessage (host-page connect-src CSP forbids a WebSocket from the content script, as boky's log-forwarder documents).
+- Ring buffers are keyed by tabId (from `sender.tab.id` on runtime messages), evicted on `chrome.tabs.onRemoved`, and the two read tools query the buffer of the active tab of the current window — matching how every existing page action resolves its target; entries from never-queried tabs simply sit in their bounded buffer until eviction.
+- `since` is a monotonic per-buffer sequence number (not a wall-clock timestamp, not an opaque token); reads are non-destructive; the caller advances its watermark with the returned `nextSince`. 'clear-since' in the vision is interpreted as this watermark semantics, not as a destructive drain.
+- Network capture records request metadata (method, url, status, timing, resource kind) and a bounded text-only body preview (a few KB) for response bodies; boky's full LLM-stream body capture is not copied. WebSocket interception from boky's sniffer is dropped — the vision names fetch/XHR only.
+- Ring-buffer state lives in service-worker memory only; an MV3 service-worker suspension loses it, and that is accepted for this horizon (the keepalive alarm mitigates it; the read tools report an empty buffer rather than erroring).
+- Console capture wraps console.log/info/warn/error/debug plus window `error` / `unhandledrejection` in the MAIN world; entries are serialized to bounded strings at capture time (no live object references cross the postMessage boundary).
+- The repo coverage guard (.testguard.json catch-all) requires a co-located `.unit.test.ts` for every changed .ts under tools/; pure ring-buffer / wrapper-source / forwarder logic is written to be unit-testable with fake ports, as horizon 1 did for chrome.* glue.
+- Manual verification clients are Gemini CLI and Crush (both installed under nvm node v22); the Cursor app is installed but only checked if cheap; Codex CLI is not installed and its config.toml shape is documented from official docs only.
+- Horizon 1's manual Chrome load and after-suspension reconnect were never actually run (the status notes say 'no browser'); this horizon's first real Chrome load will also be the first real exercise of the relay hello + keepalive path.
+
+### Risks
+
+- MAIN-world wrapper fidelity on real sites: pages that freeze `console`, replace `window.fetch` before document_start, or use strict CSP may yield partial or empty capture; success is measured against a controlled test page plus a real site, not a fidelity guarantee for every site (blocker from horizon 1, still open).
+- Vite/rollup build shape: an IIFE MAIN-world entry cannot coexist with the ES service-worker entry in one rollup build using inlineDynamicImports; a wrong build layout produces an ES-module page script that Chrome refuses at document_start, or a code-split chunk that 404s in the worker. Blocker from horizon 1 still open.
+- Body-preview and console-serialization caps that are too generous can bloat the postMessage/runtime-message traffic and the worker heap on chatty pages; caps that are too tight make the tools useless for debugging. The byte/count caps are provisional and untuned.
+- MV3 service-worker lifetime: buffers are in-memory, so a worker suspension between page activity and the read call silently returns an empty buffer; if the horizon-1 keepalive turns out not to work in the new manifest (never verified), this becomes the dominant failure mode.
+- Sequence-cursor semantics across tabs and worker restarts: after an eviction or restart the cursor resets, and a stale `since` from the caller must not error or hide new entries; getting this wrong makes results non-deterministic for the calling agent.
+- Changing tool input schemas later is costly because Codex/Cursor are strict about schema shape — `since`/`limit` and the result shape must be settled before the catalog phase, not after client verification.
+- Task text's third scope item (size-cap tuning) and vision criterion (4) (four-client snippet, two verified) are budget-gated; if capture takes all ~5 phases, criterion (4) slips to horizon 3 and the vision's success remains partially unmet after this horizon.
+- Decision conflict to watch: the horizon-1 decision keeps the `observation` frame kind in the wire protocol, but this horizon's pull-only decision means nothing emits console/network observations; the frame stays defined-but-unused rather than removed, which a reviewer may flag as dead protocol surface.
+- Repo-level hooks: the PostToolUse lint hook and the coverage guard scan tools/ files; a page-script written as a TS string literal or as a separately-built file must still satisfy `no-explicit-any`, `import type`, and the co-located-test rule, which constrains how the wrapper source is authored.
+- Manual client verification depends on the extension being loaded in a real Chrome session on this machine; with no browser session available during execution (as in horizon 1), criteria (3), (8), (9) can only be recorded as README steps, not verified.

@@ -1,0 +1,9 @@
+node_modules/
+extension/.tmp-axe-profile/
+services/workflow-engine/dist/
+*.log
+docs/roadmaps/.tmp/
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo

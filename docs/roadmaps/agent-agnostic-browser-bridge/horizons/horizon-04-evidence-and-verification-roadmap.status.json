@@ -1,0 +1,162 @@
+{
+  "roadmapFile": "docs/roadmaps/agent-agnostic-browser-bridge/horizons/horizon-04-evidence-and-verification-roadmap.json",
+  "roadmapTask": "Plan horizon 4 of the agent-agnostic-browser-bridge project — a VERIFICATION-ONLY horizon that records empirical evidence in a real Chrome session (MAIN-world eval vs page CSP; clickAt/hover vs real framework handlers), measures result sizes against real target clients, and ships one hand-verified MCP config snippet in the README — with the 16 page-action surface untouched and all deferred feature work unimplemented.",
+  "createdAt": "2026-09-03T00:00:00.000Z",
+  "updatedAt": "2026-09-03T12:00:00.000Z",
+  "roadmapRevision": 1,
+  "phases": [
+    {
+      "phaseId": "real-chrome-event-fidelity-check",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-09-03T00:00:00.000Z",
+      "completedAt": "2026-09-03T07:00:00.000Z",
+      "gateRun": "cd tools/chrome-bridge && npm run verify (typecheck + eslint --max-warnings 0 + vitest run) -> green, 19 files / 234 tests; page actions exercised via throwaway WS controller on the running relay ws://127.0.0.1:8766 (session MCP server was a stale 10-tool build, bypassed)",
+      "gradeResult": {
+        "phaseId": "real-chrome-event-fidelity-check",
+        "dimensionScores": [
+          {
+            "dimensionId": "csp-eval-real-site-record",
+            "score": 8,
+            "pass": true,
+            "evidence": "github.com real deployment; script-src verbatim from raw curl -D - header dump AND authenticated variant from Chrome's error text, both noted lacking 'unsafe-eval'; executeScript outcome quoted verbatim as a command error with Chrome's CSP message (not {value}, not the graceful sentinel); non-CSP baseline returns {value}. <10: authenticated CSP read from error string not a dedicated curl (self-flagged)."
+          },
+          {
+            "dimensionId": "synthetic-gesture-probe-record",
+            "score": 8,
+            "pass": true,
+            "evidence": "clickAt on react.dev + hover on mui.com, both React SPAs; selector + x/y + {found,dispatched} per gesture; ~2s settle then page-side probe (.DocSearch-Container 0->2 + activeElement INPUT.DocSearch-Input; [role=tooltip]/.MuiTooltip-popper 0->1 text 'Delete'); proof is the probe. <10: clickAt pre-click container baseline inferred not dedicated (self-flagged)."
+          },
+          {
+            "dimensionId": "evidence-in-project-memory-files",
+            "score": 8,
+            "pass": true,
+            "evidence": "discoveries.md +2 h4 lines naming github.com/react.dev/mui.com with core outcomes and roadmap.md pointers per the 240-char rule; blockers.md appended annotation on the h3 blocker; full CSP header + coords in the committed roadmap .md twin. <10: verbatim header/coords only in the twin."
+          },
+          {
+            "dimensionId": "deferred-decisions-stay-open",
+            "score": 9,
+            "pass": true,
+            "evidence": "blockers.md annotation leads 'ANNOTATION (all still OPEN)'; decisions.md byte-unchanged; git diff implements no decision; every conclusion bullet tagged 'recommendation input, not a decision'."
+          },
+          {
+            "dimensionId": "sixteen-action-surface-untouched",
+            "score": 9,
+            "pass": true,
+            "evidence": "git status: only docs/roadmaps/agent-agnostic-browser-bridge/ files; src/protocol/actions.ts still exactly 16 PAGE_ACTIONS and not in the diff; no dist/ committed; npm run verify independently reproduced green (19 files / 234 tests)."
+          }
+        ],
+        "overallPass": true
+      },
+      "compensationInvoked": false,
+      "notes": "Phase has no compensation. Executed via throwaway WS controller (tools/chrome-bridge/__probe.mjs, created and deleted within the phase — not shipped). Evidence: horizon-04 roadmap.md 'Evidence — Phase 1' section; discoveries.md 2026-09-03 lines; blockers.md 2026-09-03 annotation. Key findings: (1) executeScript fully defeated by strict page CSP (github.com), fails loudly with Chrome's verbatim CSP error, not the graceful sentinel; (2) synthetic clickAt/hover DID reach real React handlers on react.dev and mui.com. All 3 deferred decisions remain OPEN. Graded by subagent (no self-grade): 8/8/8/9/9, overallPass true."
+    },
+    {
+      "phaseId": "measure-result-sizes-against-clients",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-09-03T08:00:00.000Z",
+      "completedAt": "2026-09-03T08:30:00.000Z",
+      "gateRun": "cd tools/chrome-bridge && npm run verify -> GREEN (19 files / 234 tests); git diff docs-only. Page actions exercised via the executing session's own chrome-bridge MCP (Claude Code client) + a throwaway WS controller on ws://127.0.0.1:8766 for executeScript boundary probes and captureTab byte-sizing.",
+      "gradeResult": {
+        "phaseId": "measure-result-sizes-against-clients",
+        "dimensionScores": [
+          {
+            "dimensionId": "measured-byte-sizes",
+            "score": 8,
+            "pass": true,
+            "evidence": "All 3 probe families as exact integers + units + probe config: captureTab 275,536 B base64 (206,651 B PNG), readConsole 33,212 B@100 / 165,793 B@500, readNetwork 124,068 B@100 / 187,969 B@500; sizes are the pretty-printed MCP block. <10: ~4MB console worst case acknowledged but only reached 166KB."
+          },
+          {
+            "dimensionId": "two-client-coverage",
+            "score": 4,
+            "pass": false,
+            "evidence": "All measurements from the Claude Code session only; Gemini CLI half not done (no GEMINI_API_KEY/OAuth in exec env). Honest, but the two-client bar is unmet. OVERRIDDEN by user."
+          },
+          {
+            "dimensionId": "executescript-boundary-exact",
+            "score": 9,
+            "pass": true,
+            "evidence": "OK at exactly 1,000,000 chars, ERROR at 1,000,001 with verbatim 'executeScript result is too large (1000001 chars; limit 1000000)', bracketed at 999,992 / 1,000,002; measures serialized result of 'a'.repeat(n), live-crossed not extrapolated. <10: over-large error exercised only via WS controller."
+          },
+          {
+            "dimensionId": "client-behavior-recorded",
+            "score": 7,
+            "pass": true,
+            "evidence": "Every Claude Code table row carries a delivery column (inline vs redirected-to-file at ~124KB+; captureTab inline no truncation); record states bridge did no delivery-side cutting; recommendation distinguishes self-defending clients. At the bar because only one client covered."
+          },
+          {
+            "dimensionId": "records-only-decision-open",
+            "score": 8,
+            "pass": true,
+            "evidence": "git diff docs-only; verify green; PAGE_ACTIONS 16; decisions.md result-size/CDP/tabId unchanged + OPEN; blockers.md annotated + unresolved; cap text marked 'Recommendation input, not a decision'. <10: diff also carries the roadmap .md evidence section."
+          }
+        ],
+        "overallPass": false
+      },
+      "override": {
+        "authorizedBy": "user",
+        "at": "2026-09-03T08:30:00.000Z",
+        "dimensionIds": [
+          "two-client-coverage"
+        ],
+        "reason": "User instruction: 'lets skip gemini and other cli from testing'. Gemini CLI is unavailable in the execution environment (no API key / OAuth) and codex/cursor have no binary; the two-client bar blocks progress on evidence the Claude Code session already produced in full. Recorded as a binding project scope decision in decisions.md 2026-09-03.",
+        "gradeResultBefore": {
+          "phaseId": "measure-result-sizes-against-clients",
+          "dimensionScores": [
+            {
+              "dimensionId": "measured-byte-sizes",
+              "score": 8,
+              "pass": true
+            },
+            {
+              "dimensionId": "two-client-coverage",
+              "score": 4,
+              "pass": false
+            },
+            {
+              "dimensionId": "executescript-boundary-exact",
+              "score": 9,
+              "pass": true
+            },
+            {
+              "dimensionId": "client-behavior-recorded",
+              "score": 7,
+              "pass": true
+            },
+            {
+              "dimensionId": "records-only-decision-open",
+              "score": 8,
+              "pass": true
+            }
+          ],
+          "overallPass": false
+        }
+      },
+      "compensationInvoked": false,
+      "notes": "Done WITH AN OVERRIDE (two-client-coverage). Phase has no compensation. Evidence: roadmap.md 'Evidence — Phase 2'; discoveries.md 2026-09-03 (3 lines); blockers.md 2026-09-03 annotation; scope decision in decisions.md 2026-09-03. Grader (subagent, no self-grade): 8/4/9/7/8, overallPass false pre-override; 4/5 dims pass on their own merits. decisions.md result-size-cap entry still OPEN (recommendation input only). No source or build artifact changed; PAGE_ACTIONS still 16."
+    },
+    {
+      "phaseId": "ship-hand-verified-mcp-config-snippet",
+      "status": "done",
+      "attempts": 2,
+      "startedAt": "2026-09-03T11:00:00.000Z",
+      "completedAt": "2026-09-03T12:00:00.000Z",
+      "gateRun": "cd tools/chrome-bridge && npm run verify -> GREEN (typecheck + eslint --max-warnings 0 + vitest: 19 files / 234 tests). Hand-verification: chrome-bridge MCP (repo-root .mcp.json entry, node tools/chrome-bridge/bin/mcp.mjs) in the executing Claude Code session against relay ws://127.0.0.1:8766 (PID 74257) + unpacked tools/chrome-bridge/dist/extension: ping ok; navigateTo https://react.dev/ -> {navigated:true}; getPageText maxChars=400 -> {text:\"React\\nv19.2\\nSearch\\n...\", totalChars:6590, truncated:true}.",
+      "gradeResult": {
+        "phaseId": "ship-hand-verified-mcp-config-snippet",
+        "dimensionScores": [
+          { "dimensionId": "snippet-matches-mcp-json-field-for-field", "score": 9, "pass": true, "evidence": "Exactly one chrome-bridge snippet, fields match repo-root .mcp.json field-for-field; args path resolves to bin/mcp.mjs; no competing snippet." },
+          { "dimensionId": "four-clients-distinct-status", "score": 9, "pass": true, "evidence": "Four separate bullets; Claude Code hand-verified, Gemini config-documentation-only (explicit no live call), Codex + Cursor documentation-only each with own not-installed reason; no shared status word." },
+          { "dimensionId": "no-blanket-any-client-claim", "score": 9, "pass": true, "evidence": "'works for any other MCP client' deleted; grep for blanket phrasings returns nothing; 'hand-verified' used only for Claude Code; section header states the other three are documentation not test results." },
+          { "dimensionId": "claude-code-hand-verification-named", "score": 9, "pass": true, "evidence": "getPageText (non-trivial), arg maxChars:400, exact payload {text,totalChars:6590,truncated:true} vs https://react.dev/, relay + unpacked extension running, call path command node args tools/chrome-bridge/bin/mcp.mjs named." },
+          { "dimensionId": "blockers-annotation-in-place-not-resolved", "score": 9, "pass": true, "evidence": "Horizon-2 Gemini line edited in place (one line changed, no new entry/deletion); 'still OPEN, NOT resolved'; names observed evidence; states pasted-block path untested & out of scope; never asserts success." },
+          { "dimensionId": "docs-only-no-scope-leak", "score": 8, "pass": true, "evidence": "Shipped diff only README.md + blockers.md; no src/bin/.mcp.json/test changes; PAGE_ACTIONS still exactly 16; npm run verify green; CHROME_BRIDGE_URL + import.meta.url paragraph unchanged." }
+        ],
+        "overallPass": true
+      },
+      "compensationInvoked": false,
+      "notes": "Done (no override). Attempt 1 (pre-REPLAN) ended blocked REPLAN_REQUIRED; roadmap revised to rev1 making Gemini CLI config-documentation-only; attempt 2 executed the revised contract. Phase has no compensation. Deliverable: tools/chrome-bridge/README.md 'MCP client config' section now ships one .mcp.json-matching stdio snippet + a 'Per-client status' block (Claude Code hand-verified via a named live getPageText call; Gemini CLI config-documentation-only with `gemini mcp add chrome-bridge -- node tools/chrome-bridge/bin/mcp.mjs`; Codex CLI + Cursor documentation-only / not installed); the 'works for any other MCP client' overclaim is removed; CHROME_BRIDGE_URL + import.meta.url paragraph untouched. blockers.md horizon-2 Gemini-registration line annotated in place, still OPEN. Graded by subagent (no self-grade): 9/9/9/9/9/8, overallPass true."
+    }
+  ]
+}

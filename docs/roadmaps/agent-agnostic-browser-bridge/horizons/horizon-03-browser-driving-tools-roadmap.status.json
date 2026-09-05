@@ -1,0 +1,135 @@
+{
+  "roadmapFile": "docs/roadmaps/agent-agnostic-browser-bridge/horizons/horizon-03-browser-driving-tools-roadmap.json",
+  "roadmapTask": "Plan horizon 3 of the agent-agnostic-browser-bridge project (tools/chrome-bridge/). Horizons 1-2 shipped the standalone package and the page-capture read tools. This horizon extends toward full claude-in-browser parity by adding the browser-driving tools that are missing: execute arbitrary JavaScript in the page's MAIN world, go back/forward in history, reload the active tab, and click/hover at page coordinates (screenshots already ship as captureTab).",
+  "createdAt": "2026-09-02T00:00:00.000Z",
+  "updatedAt": "2026-09-03T00:05:00.000Z",
+  "roadmapRevision": 0,
+  "phases": [
+    {
+      "phaseId": "execute-script",
+      "status": "done",
+      "attempts": 1,
+      "gateRun": "cd tools/chrome-bridge && npm run verify (tsc --noEmit && eslint . --max-warnings 0 && vitest run) — green, 213 tests pass",
+      "gradeResult": {
+        "phaseId": "execute-script",
+        "dimensionScores": [
+          { "dimensionId": "action-parity-seam", "score": 9, "pass": true, "evidence": "executeScript is the last PAGE_ACTIONS entry and a literal key in PageActionParams, PageActionResults, the Record<PageAction,Handler> return map, and TOOL_CATALOG; no cast/widened Record. Not 10: handler map is a hand-listed literal, not mapped from PAGE_ACTIONS." },
+          { "dimensionId": "main-world-execution", "score": 9, "pass": true, "evidence": "handler calls ports.executeScript(tab.id, fn, [code], { world: 'MAIN' }); port forwards world only when defined so other handlers default to isolated. Not 10: relies on chrome.scripting implicit default for isolated." },
+          { "dimensionId": "serialization-guard", "score": 9, "pass": true, "evidence": "success returns { result: { value } }; in-page closure returns { ok:false } for undefined/function/DOM node/circular; coerce + guard() resolve missing envelope, over-large, ok:false and throws to { error }, never throws. Not 10: over-large rejected outright, not capped+reported." },
+          { "dimensionId": "protocol-contract", "score": 9, "pass": true, "evidence": "ExecuteScriptParams { code: string } required; ExecuteScriptResult { value: unknown; error?: string }; registered under executeScript key; inputSchema code:string, required ['code'], additionalProperties false. Not 10: nothing beyond exact spec." },
+          { "dimensionId": "co-located-unit-test", "score": 9, "pass": true, "evidence": "new executeScript describe: asserts queryActiveTab, executeScript(7, fn, [code], { world:'MAIN' }), serialisable → { result:{value} }, bad code → error w/o port, CSP undefined → error, ok:false → error, over-large → error, no-tab → NO_ACTIVE_TAB; nested block runs the extracted injected fn for value/throw/circular. actions + tool-catalog tests updated to 11. Not 10: extracted-fn test skips DOM-node branch (Node undefined under vitest)." }
+        ],
+        "overallPass": true
+      },
+      "compensationInvoked": false,
+      "startedAt": "2026-09-02T00:00:00.000Z",
+      "completedAt": "2026-09-02T22:00:00.000Z",
+      "notes": "Graded by general-purpose subagent (no self-grade). ChromePorts.executeScript gained an optional 4th arg { world?: 'ISOLATED' | 'MAIN' } — additive, existing 4-method fake ports still satisfy it. No compensation on this phase."
+    },
+    {
+      "phaseId": "navigate-back",
+      "status": "done",
+      "attempts": 1,
+      "gateRun": "cd tools/chrome-bridge && npm run verify (tsc --noEmit && eslint . --max-warnings 0 && vitest run) — green, 217 tests pass",
+      "gradeResult": {
+        "phaseId": "navigate-back",
+        "dimensionScores": [
+          { "dimensionId": "chrome-port-wiring", "score": 9, "pass": true, "evidence": "ChromePorts declares goBack(tabId): Promise<void>; chromeCommandPorts implements goBack:(tabId)=>chrome.tabs.goBack(tabId); both fakes (page-actions + service-worker) updated; handler/port never call goForward. Not 10: no direct integration test asserting the chrome.tabs.goBack call." },
+          { "dimensionId": "parity-seam-drift", "score": 9, "pass": true, "evidence": "navigateBack is last in PAGE_ACTIONS and propagates into raw+guarded handler maps, TOOL_CATALOG, PageActionParams, PageActionResults; dropping any is a tsc error; no @ts-ignore/as unknown as/partial cast. Not 10: standard seam wiring only." },
+          { "dimensionId": "no-history-error-path", "score": 9, "pass": true, "evidence": "New navigateBack describe block: success resolves tab + calls ports.goBack(7) + returns {result:{moved:true}}; goBack rejection → asserts NOT {moved:true} and error matches /back history/; no-active-tab → NO_ACTIVE_TAB and goBack not called. Not 10: exact sentinel string not pinned." },
+          { "dimensionId": "protocol-types-shape", "score": 9, "pass": true, "evidence": "NavigateBackParams { readonly _?: never } matches no-args convention; NavigateBackResult { readonly moved: true } is a true-literal not boolean; both registered under navigateBack in PageActionParams/Results. Not 10: conventional, nothing extra." },
+          { "dimensionId": "mcp-catalog-and-docs", "score": 10, "pass": true, "evidence": "TOOL_CATALOG.navigateBack full description + shared NO_ARGS schema; tests updated (length 12, required [], dedicated strict no-args test); README updated at every touchpoint incl. a new manual-check step 8 exercising both the success and no-earlier-entry error path — more end-to-end doc verification than a 9." }
+        ],
+        "overallPass": true
+      },
+      "compensationInvoked": false,
+      "startedAt": "2026-09-02T21:44:00.000Z",
+      "completedAt": "2026-09-02T21:46:00.000Z",
+      "notes": "Graded by general-purpose subagent (no self-grade). ChromePorts gained goBack(tabId); noHistoryOutcome(direction) helper added (param kept generic for the sibling navigate-forward phase but only 'back' wired here). No compensation on this phase."
+    },
+    {
+      "phaseId": "navigate-forward",
+      "status": "done",
+      "attempts": 1,
+      "gateRun": "cd tools/chrome-bridge && npm run verify (tsc --noEmit && eslint . --max-warnings 0 && vitest run) — green, 220 tests pass",
+      "gradeResult": {
+        "phaseId": "navigate-forward",
+        "dimensionScores": [
+          { "dimensionId": "chrome-port-wiring", "score": 9, "pass": true, "evidence": "ChromePorts declares goForward(tabId): Promise<void>; chromeCommandPorts implements goForward:(tabId)=>chrome.tabs.goForward(tabId); both fakes (page-actions + service-worker) updated; handler/port never call goBack. Not 10: no integration test asserting the chrome.tabs.goForward call." },
+          { "dimensionId": "parity-seam-drift", "score": 9, "pass": true, "evidence": "navigateForward last in PAGE_ACTIONS, propagates into raw+guarded handler maps, TOOL_CATALOG, PageActionParams, PageActionResults; dropping any is a tsc error; no @ts-ignore/as cast; verify green. Not 10: standard seam wiring only." },
+          { "dimensionId": "no-history-error-path", "score": 10, "pass": true, "evidence": "All three required assertions present; success test also asserts ports.goBack NOT called, catching mirrored copy-paste on the success branch beyond what the rubric requires." },
+          { "dimensionId": "protocol-types-shape", "score": 9, "pass": true, "evidence": "NavigateForwardParams { readonly _?: never } no-args convention; NavigateForwardResult { readonly moved: true } true-literal not boolean; both registered under navigateForward. Not 10: conventional, nothing extra." },
+          { "dimensionId": "mcp-catalog-and-docs", "score": 9, "pass": true, "evidence": "TOOL_CATALOG.navigateForward NO_ARGS schema + full description; tests updated (length 13, required [], strict no-args test loops back+forward); actions tuple/length 13; README updated at every touchpoint incl. manual-check step 8. Not 10: mirrors the navigateBack entry, no extra doc verification." }
+        ],
+        "overallPass": true
+      },
+      "compensationInvoked": false,
+      "startedAt": "2026-09-02T22:10:00.000Z",
+      "completedAt": "2026-09-02T22:12:00.000Z",
+      "notes": "Graded by general-purpose subagent (no self-grade). ChromePorts gained goForward(tabId); reused the noHistoryOutcome('forward') branch of the helper added by navigate-back. No compensation on this phase."
+    },
+    {
+      "phaseId": "reload-tab",
+      "status": "done",
+      "attempts": 1,
+      "gateRun": "cd tools/chrome-bridge && npm run verify (tsc --noEmit && eslint . --max-warnings 0 && vitest run) — green, 223 tests pass",
+      "gradeResult": {
+        "phaseId": "reload-tab",
+        "dimensionScores": [
+          { "dimensionId": "tsc-parity-seam", "score": 8, "pass": true, "evidence": "reloadTab added to PAGE_ACTIONS, PageActionParams, PageActionResults, TOOL_CATALOG; ordered-tuple + both count tests (13→14) updated; no cast/@ts-ignore; tsc green." },
+          { "dimensionId": "reload-calls-chrome-port", "score": 9, "pass": true, "evidence": "Handler queryActiveTab → NO_ACTIVE_TAB → ports.reload(tab.id) → {result:{reloaded:true}}, nothing else; tests assert reload(7), updateTab/executeScript/captureVisibleTab not called, rejecting-port → {error}, no-active-tab structural-equality vs shared sentinel; rejection batch test includes reloadTab." },
+          { "dimensionId": "readme-tool-count", "score": 9, "pass": true, "evidence": "Count fixed in all three spots + service-worker enumeration; new manual step 9 exercises reloadTab with concrete observables, old step 9 renumbered to 10; dedicated prose paragraph added." },
+          { "dimensionId": "chrome-port-method-and-fakes", "score": 8, "pass": true, "evidence": "ChromePorts.reload(tabId):Promise<void> declared; chromeCommandPorts implements chrome.tabs.reload(tabId); both fake fixtures implement reload with no cast; rejecting override covered." },
+          { "dimensionId": "catalog-schema-strictness", "score": 8, "pass": true, "evidence": "reloadTab uses shared NO_ARGS (type object, properties {}, additionalProperties false, no required); description names action + active-tab target; tests add required.get('reloadTab')→[] and strict no-args loop; length 14." }
+        ],
+        "overallPass": true
+      },
+      "compensationInvoked": false,
+      "startedAt": "2026-09-02T23:00:00.000Z",
+      "completedAt": "2026-09-02T23:10:00.000Z",
+      "notes": "Graded by general-purpose subagent (no self-grade). ChromePorts gained reload(tabId) backed by chrome.tabs.reload; handler has no no-history branch (unlike navigate-back/forward) so a rejected port flows through guard() to a generic { error }. No compensation on this phase."
+    },
+    {
+      "phaseId": "click-at",
+      "status": "done",
+      "attempts": 1,
+      "gateRun": "cd tools/chrome-bridge && npm run verify (tsc --noEmit && eslint . --max-warnings 0 && vitest run) — green, 229 tests pass",
+      "gradeResult": {
+        "phaseId": "click-at",
+        "dimensionScores": [
+          { "dimensionId": "coordinate-dispatch-path", "score": 9, "pass": true, "evidence": "Injected-fn test block stubs document.elementFromPoint to a spied node; fn(10,20) asserts elementFromPoint(10,20), captured events ['pointerdown','pointerup','click'] with clientX/Y 10/20, return {found:true,dispatched:3}; null branch → {found:false,dispatched:0} with no dispatch. Handler test asserts executeScript called with explicit [x,y]. Not 10: injected fn returns a hardcoded dispatched:3, not a counted value." },
+          { "dimensionId": "parity-seam-tsc", "score": 9, "pass": true, "evidence": "clickAt added to PAGE_ACTIONS; ClickAtParams/ClickAtResult registered in PageActionParams/PageActionResults; TOOL_CATALOG Record<PageAction,…> forces the entry; handler map spread key-by-key so a missing action is a tsc error; no as-unknown-as/any in source; verify green. Not 10: no explicit compile-time exhaustiveness test." },
+          { "dimensionId": "coordinate-param-validation", "score": 8, "pass": true, "evidence": "tool-catalog x/y integer minimum:0, additionalProperties:false, required ['x','y']; resolveCoordinate rejects non-(integer>=0) with {error} before any port call; unit test iterates 7 bad inputs → error + executeScript not called. Not 10: extra-unknown-prop rejection only at the schema layer, not handler-unit-tested." },
+          { "dimensionId": "synthetic-event-dispatch-sequence", "score": 8, "pass": true, "evidence": "Injected fn dispatches PointerEvent pointerdown, PointerEvent pointerup, MouseEvent click on the elementFromPoint return; init carries bubbles/cancelable/clientX/clientY; test asserts exact order, only those three, coords, and target is the node not document/body. Not 10: test's FakePointerEvent aliases both PointerEvent and MouseEvent so class identity of 'click' isn't distinguished." },
+          { "dimensionId": "tool-catalog-and-result-contract", "score": 9, "pass": true, "evidence": "TOOL_CATALOG.clickAt named entry, integer x/y, additionalProperties:false; coercePointerOutcome rebuilds {found:boolean,dispatched:number} from primitives, malformed envelope → {error}; README updated to 'fifteen'/'15 tools' + clickAt in lists + manual step 10; tests assert listTools() length 15, required.get('clickAt')===['x','y'], PAGE_ACTIONS.length 15. Not 10: JSON-serializability argued from code shape, not a round-trip test." }
+        ],
+        "overallPass": true
+      },
+      "compensationInvoked": false,
+      "startedAt": "2026-09-02T23:20:00.000Z",
+      "completedAt": "2026-09-02T23:30:00.000Z",
+      "notes": "Graded by general-purpose subagent (no self-grade). clickAt rides the existing executeScript ChromePort (isolated world — DOM event dispatch works from the content-script world); no new port method, so ports.ts / service-worker.unit.test.ts untouched. resolveCoordinate + coercePointerOutcome helpers added, both reusable by the sibling hover phase. No compensation on this phase."
+    },
+    {
+      "phaseId": "hover",
+      "status": "done",
+      "attempts": 2,
+      "gateRun": "cd tools/chrome-bridge && npm run verify (tsc --noEmit && eslint . --max-warnings 0 && vitest run) — green, 234 tests pass; re-run clean on --retry",
+      "completedAt": "2026-09-03T00:05:00.000Z",
+      "gradeResult": {
+        "phaseId": "hover",
+        "dimensionScores": [
+          { "dimensionId": "coordinate-dispatch-path", "score": 9, "pass": true, "evidence": "page-actions.unit.test.ts \"the injected in-page function\" block pulls the real injected fn, spies node.dispatchEvent, asserts elementFromPoint(10,20), events recorded on the spy in order with clientX/Y, null branch → {found:false,dispatched:0}. Not 10: PointerEvent/MouseEvent both stubbed to one FakePointerEvent so per-event constructor identity unverified." },
+          { "dimensionId": "parity-seam-tsc", "score": 8, "pass": true, "evidence": "actions.ts adds hover to PAGE_ACTIONS; types.ts registers HoverParams/HoverResult in PageActionParams/PageActionResults; tsc green, no as-unknown-as/any; handler consumes params:unknown via isRecord/resolveCoordinate (repo-consistent pattern)." },
+          { "dimensionId": "coordinate-param-validation", "score": 8, "pass": true, "evidence": "tool-catalog COORDINATE_PROPERTIES x/y integer minimum 0, required [x,y], additionalProperties false; resolveCoordinate rejects negative/fractional/NaN/Infinity/non-numeric before any port call; hover test loops those asserting {error} + executeScript not called. Unknown-prop rejection rests on schema only." },
+          { "dimensionId": "synthetic-event-dispatch-sequence", "score": 9, "pass": true, "evidence": "injected fn dispatches PointerEvent(pointerover) then MouseEvent(mouseover) only, with clientX/clientY; test asserts order [pointerover,mouseover], no click/pointerdown/pointerup, coords on the found node. Not 10: pointerenter/mouseenter/mousemove not dispatched." },
+          { "dimensionId": "tool-catalog-and-result-contract", "score": 9, "pass": true, "evidence": "TOOL_CATALOG.hover named entry keyed by PageAction, integer x/y, additionalProperties false; coercePointerOutcome rebuilds {found:boolean,dispatched:count} from primitives; README updated to sixteen/16 tools in prose, /mcp step, manual step 11. Not 10: no test asserts JSON.stringify round-trips the result." }
+        ],
+        "overallPass": true
+      },
+      "compensationInvoked": false,
+      "startedAt": "2026-09-02T23:40:00.000Z",
+      "notes": "attempt 1: code/tests/docs complete, graded by general-purpose subagent (no self-grade) overallPass, blocked MANUAL_CHROME_CHECK_PENDING per the horizon-2 binding decision. attempt 2 (--retry): user confirmed the real-Chrome check passed (hover reveals tooltip; blank margin → {found:false,dispatched:0}; fractional coord → error); verify re-run clean → done. hover rides the existing executeScript ChromePort (isolated world); no new port method, so ports.ts / service-worker.unit.test.ts untouched. resolveCoordinate + coercePointerOutcome generalized with an action-name arg (shared clickAt/hover). No compensation on this phase."
+    }
+  ]
+}

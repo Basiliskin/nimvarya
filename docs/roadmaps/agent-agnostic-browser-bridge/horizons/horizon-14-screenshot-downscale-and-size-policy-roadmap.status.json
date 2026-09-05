@@ -1,0 +1,186 @@
+{
+  "roadmapFile": "docs/roadmaps/agent-agnostic-browser-bridge/horizons/horizon-14-screenshot-downscale-and-size-policy-roadmap.json",
+  "roadmapTask": "Horizon 14 of agent-agnostic-browser-bridge (tools/chrome-bridge): harden the captureTab page action with an automatic downscale-and-retry ladder for oversized screenshots, and promote the flat MAX_SCREENSHOT_BASE64_CHARS constant into a named documented size policy. Keep the single-capability-across-the-parity-surface shape; close with a mandatory live-Chrome head-to-head. Full-page capture stays out of scope.",
+  "createdAt": "2026-09-04T00:00:00.000Z",
+  "updatedAt": "2026-09-04T12:58:23.000Z",
+  "roadmapRevision": 0,
+  "phases": [
+    {
+      "phaseId": "add-scaled-clip-capture-capability-to-debugger-ports",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-09-04T10:43:55.981Z",
+      "completedAt": "2026-09-04T10:45:10.667Z",
+      "gateRun": "npm run verify (tsc --noEmit + eslint . --max-warnings 0 + vitest run) in tools/chrome-bridge — clean, 342 tests passed",
+      "gradeResult": {
+        "phaseId": "add-scaled-clip-capture-capability-to-debugger-ports",
+        "dimensionScores": [
+          {
+            "dimensionId": "scaled-viewport-clip-from-layout-viewport-metrics",
+            "score": 10,
+            "pass": true,
+            "evidence": "Scale-without-clip path issues a Runtime.evaluate geometry read (documentElement clientWidth/clientHeight) inside the same withDebuggerSession before building the clip; built clip is {x:0,y:0,width,height,scale} from that read. Unit test stubs geometry to {width:1280,height:800} and asserts the exact capture payload {format:png, clip:{x:0,y:0,width:1280,height:800,scale:0.5}} plus the verbatim Runtime.evaluate client-size expression, and asserts attach/detach. 10-over-9: the geometry expression string is pinned verbatim in both source and test (a regression switching to innerWidth/innerHeight fails the test loudly), and an in-source comment explicitly explains why the documentElement client-size family is used over innerWidth/innerHeight."
+          },
+          {
+            "dimensionId": "scale-option-optional-and-no-option-path-byte-identical",
+            "score": 9,
+            "pass": true,
+            "evidence": "scale is declared readonly scale?: number with the 0<scale<=1 bound documented in both the interface comment and option block comment; no-option path starts params as {format:png} and only sets clip for the clip/scale branches, so the two pre-existing payload-assertion tests pass unmodified ({format:png} and {format:png, clip:{...}}). captureScreenshot still returns Promise<string>; label union still capturing|evaluating|scrolling. 9 not 10: the 10-level passCriteria names a dedicated type-level assertion test for the scale field, which is not present (the interface declaration pins it at the type level but there is no dedicated type-level check)."
+          },
+          {
+            "dimensionId": "debugger-ports-scaled-clip-payload-assertions",
+            "score": 10,
+            "pass": true,
+            "evidence": "Unit test asserts the scale-without-clip payload exactly (sendCommand ... {format:png, clip:{x:0,y:0,width:1280,height:800,scale:0.5}}) and the element-mode lowered clip.scale payload exactly ({format:png, clip:{x:8859,y:0,width:546,height:1811,scale:0.5}}), proving x/y/width/height preserved with only scale reduced; pre-existing {format:png} and {format:png, clip} assertions remain and pass (no-option path byte-identical). Tests use requested scale as a literal (0.5), never a wildcard/objectContaining matcher. 10-over-9: exact payload objects (not objectContaining) pinned for BOTH cases, no-option path asserted byte-identical by unmodified existing tests, geometry-read expression asserted verbatim so a viewport-mis-read regression is caught."
+          },
+          {
+            "dimensionId": "full-page-not-reintroduced-and-return-contract-stable",
+            "score": 10,
+            "pass": true,
+            "evidence": "Grep across debugger-ports.ts and debugger-ports.unit.test.ts for captureBeyondViewport and Emulation. returns NO matches; scaled path issues only Page.captureScreenshot and Runtime.evaluate, builds a clip from documentElement clientWidth/clientHeight — no Emulation.setDeviceMetricsOverride, no beyond-viewport param. Both doc comments retain the full-page-deliberately-not-offered note citing the horizon-13 phase-0 probe (interface comment + captureScreenshot method comment), both updated to also describe the new scaled-clip capability. New scale option documented in a block comment matching the files existing convention. 10-over-9: BOTH the option-interface comment AND the method comment keep the full-page-not-offered note and add scaled-clip behaviour, AND grep confirms no captureBeyondViewport/Emulation string added."
+          }
+        ],
+        "overallPass": true
+      },
+      "notes": "Compensation known (revert scale field + viewport geometry read in debugger-ports.ts, drop new payload assertions); no consumer of the scale option yet — handler rewiring lands in the next (promote-size-policy) phase."
+    },
+    {
+      "phaseId": "promote-size-policy-and-wire-downscale-ladder",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-09-04T11:02:29.000Z",
+      "completedAt": "2026-09-04T11:06:04.000Z",
+      "gateRun": "npm run verify (tsc --noEmit + eslint . --max-warnings 0 + vitest run) in tools/chrome-bridge — clean, 346 tests passed",
+      "gradeResult": {
+        "phaseId": "promote-size-policy-and-wire-downscale-ladder",
+        "dimensionScores": [
+          {
+            "dimensionId": "bounded-ladder-termination",
+            "score": 9,
+            "pass": true,
+            "evidence": "captureDownscaleLadder (page-actions.ts:459-500) is a bounded for..of over the const tuple SCREENSHOT_DOWNSCALE_LADDER_SCALES ([0.75,0.5,0.33 as const]); it returns on the first rung whose length <= ceiling, or after the floor is still over, with no while(true)/recursion/re-push, so halting is provably bounded by rungs.length+1. Tests assert exact counts: viewport fits-on-rung toHaveBeenCalledTimes(2) (line 1167), floor-fits toHaveBeenCalledTimes(4) (1254), and the always-oversized too-large test pins attempts=1+SCREENSHOT_DOWNSCALE_LADDER_SCALES.length (1079,1133). Not a 10: the floor-EXHAUSTED captured:false paths (1061,1100) pin the re-capture count only via the attempts field, not a direct toHaveBeenCalledTimes on captureScreenshot — a 10 would spy the exact captureScreenshot count on BOTH the fits-on-a-rung and the floor-exhausted path."
+          },
+          {
+            "dimensionId": "monotonic-downscale-and-floor-semantics",
+            "score": 8,
+            "pass": true,
+            "evidence": "Constants are co-located and ordered (page-actions.ts:73-91): ladder SCREENSHOT_DOWNSCALE_LADDER_SCALES=[0.75,0.5,0.33] as const, floor SCREENSHOT_DOWNSCALE_FLOOR_SCALE=0.33 === the last rung. The give-up result (lines 492-499) literally carries size (last measured at floor), limit, floor, attempts with reason exactly 'too-large', asserted in tests (1074-1080, 1126-1134). The fits-expactly-at-floor test (1222-1255) asserts captured:true, appliedScale=0.33, attempts=4. No path returns captured:true at a scale below floor. Not a 10: no unit test asserts the rung tuple is sorted strictly descending nor that floor === the ladder's last rung (tests reference the constants but never assert monotonicity), which scale 10 explicitly requires."
+          },
+          {
+            "dimensionId": "additive-backward-compatible-types",
+            "score": 8,
+            "pass": true,
+            "evidence": "git diff on protocol/types.ts is additive: CaptureTabImageResult gains optional appliedScale/attempts; CaptureTabFailureResult gains optional floor/attempts (the size/limit doc comments are reworded but the members are unchanged); CaptureTabParams is still exactly {mode?, elementRef?} (types.ts:85-88); the CaptureTabFailureReason label union is byte-identical; the port signature stays Promise<string> with CaptureScreenshotOptions gaining only optional scale (debugger-ports.ts:71-87). Pre-existing tests compile unchanged and the gate is green. Not a 10: no test or type-level assertion (expectTypeOf/assertType) pins the param shape at exactly two fields."
+          },
+          {
+            "dimensionId": "no-orphaned-debugger-session",
+            "score": 7,
+            "pass": true,
+            "evidence": "The ladder helper (page-actions.ts:459-500) never itself calls attach/detach, delegating every (scale)=>Promise<string> recapture to the port, whose withDebuggerSession (debugger-ports.ts:179-235) detaches inside a finally on every path (fit, floor exhaustion, and thrown error). The mid-ladder rejection test (1257-1293) returns a clean captured:false tab-unavailable and stops the walk at captureScreenshot-called-3-times, so no session is left attached. Not 8/10: each rung opens its OWN attach→command→detach session (recapture=captureScreenshot=withDebuggerSession per call) rather than reusing one bounded session as the scale-8 ('ladder reuses the single session') and scale-10 ('does not open a new CDP session per rung') descriptors require, and there is no session-cleanup-spy-called-exactly-once assertion."
+          },
+          {
+            "dimensionId": "viewport-element-mode-parity",
+            "score": 9,
+            "pass": true,
+            "evidence": "Both modes are exercised on every path: viewport first-capture-fits captured:true appliedScale:1 attempts:1 (847), element first-capture-fits appliedScale:1 attempts:1 (900); over-ceiling→fits-on-a-rung for viewport appliedScale:0.75 attempts:2 with toHaveBeenCalledTimes(2) (1138-1167) and for element appliedScale:0.5 attempts:3 (1170-1213); every-rung-over-floor captured:false 'too-large' with size/limit/floor/attempts for BOTH viewport (1061) and element (1100). First-capture-fits routes through captureResultWithLadder's early return (page-actions.ts:435-446) so captureDownscaleLadder is never called; bad-mode/missing-elementRef rejections are unchanged (1295). Not a 10: the element fits-on-a-rung call count is asserted only via attempts:3 rather than toHaveBeenCalledTimes(3), and no direct spy asserts the ladder helper is never invoked on the fit path."
+          },
+          {
+            "dimensionId": "size-policy-named-and-documented",
+            "score": 9,
+            "pass": true,
+            "evidence": "page-actions.ts:51-91 is a single co-located 'size policy' block: the shared doc comment names it as the size policy, lists all three parts (ceiling / ladder rungs / give-up floor), includes the measured baseline and rationale (~845KB at dpr 2; ladder values chosen so a few rungs bring a dense dpr-2 page under the ceiling), and states the floor yields captured:false 'too-large'. Name and value are unchanged: MAX_SCREENSHOT_BASE64_CHARS=1_200_000 (line 73). decisions.md appends exactly one new line explicitly SUPERSEDING the horizon-13 FLAT no-downscale decision (git diff shows a single + line). Not a 10: the 'why chosen' rationale is generic rather than a per-rung justification (0.75 vs 0.5 vs 0.33), and there is no doc/test pinning the ladder as an ordered readonly sequence."
+          }
+        ],
+        "overallPass": true
+      },
+      "amendments": [
+        {
+          "at": "2026-09-04T11:06:04.000Z",
+          "by": "execute",
+          "reason": "The phase contract said all downscale rungs stay inside ONE withDebuggerSession, but withDebuggerSession is module-private to the debugger port (chromeCaptureDebuggerPorts closure) and the port exposes only per-call captureScreenshot/evaluate/scroll; debugger-ports.ts is out of this phase's filesAffected, so the ladder drives per-rung captureScreenshot calls instead of one shared session. This matches what the h14 discovery already predicted ('each retry = its own 15s-capped session'). Session lifetime stays bounded and leak-free — each call's port finally detaches, and the mid-ladder rejection test proves no orphan.",
+          "grounding": "debugger-ports.ts withDebuggerSession is private to the chromeCaptureDebuggerPorts closure (not exposed on DebuggerPorts); DebuggerPorts exposes captureScreenshot/evaluate/scroll each wrapping their own withDebuggerSession; discovery finding 'CaptureScreenshotOptions / API surface' states each capture call is its own attach→command→detach session under the 15s cap.",
+          "before": {
+            "changes": [
+              "All rung attempts stay inside the one existing withDebuggerSession with detach in a finally."
+            ]
+          },
+          "after": {
+            "changes": [
+              "Each rung attempt runs through the port's own captureScreenshot session (attach→command→detach in a finally); the handler never attach/detaches and never opens a wrapper session of its own."
+            ]
+          }
+        }
+      ],
+      "notes": "Compensation known and invokable: revert the size-policy constants + ladder helper + captureViewport/captureElement rewiring in page-actions.ts, restore captureImageOutcome's immediate too-large return, revert the additive type fields (no non-chrome-bridge consumer keys on them per discovery), and revert the decisions.md append; the phase-0 port scale option can remain unused. Note: the 'no-orphaned-debugger-session' dimension scored 7 not 10 because each rung runs its own port session (no shared single session) — this is the plan's own discovery-predicted behavior and the port's per-call finally keeps it leak-free (see the amendment)."
+    },
+    {
+      "phaseId": "document-downscale-ladder-on-mcp-and-readme-surface",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-09-04T14:10:00.000Z",
+      "completedAt": "2026-09-04T14:24:00.000Z",
+      "gateRun": "npm run verify (tsc --noEmit + eslint . --max-warnings 0 + vitest run) in tools/chrome-bridge — clean, 347 tests passed (re-run after each of the 3 content edits)",
+      "gradeResult": {
+        "phaseId": "document-downscale-ladder-on-mcp-and-readme-surface",
+        "dimensionScores": [
+          { "dimensionId": "size-policy-doc-matches-shipped-constants", "score": 10, "pass": true, "evidence": "README 'Screenshot size policy' (lines 99-148) names the exact shipped constant identifiers and values — MAX_SCREENSHOT_BASE64_CHARS = 1_200_000, SCREENSHOT_DOWNSCALE_LADDER_SCALES = [0.75, 0.5, 0.33], SCREENSHOT_DOWNSCALE_FLOOR_SCALE = 0.33 — matching page-actions.ts (73/82/91), each labeled with the ubiquitous term (Base64 ceiling / Downscale ladder rungs / Give-up floor), and no value absent from or differing from code. 10-vs-9: the subsection lists the actual constant identifiers AND every rung value in strictly-decreasing order, so a reader rebuilds the constant table byte-for-byte." },
+          { "dimensionId": "give-up-outcome-shape-documented", "score": 10, "pass": true, "evidence": "Post-fix, the tool-catalog captureTab description (tool-catalog.ts 231) spells the give-up fields with backticked exact-as-emitted names — carrying `size` / `limit` / `floor` / `attempts` — so both client surfaces now name the sized field `limit` (the emitted key from page-actions.ts captureDownscaleLadder 492-499). README (82-90, 125-137) gives the full object with exact field names, states it fires only after every rung incl. the floor is still over the ceiling, and notes it routes through the generic isError text block (never a throw); server.unit.test.ts (123-147) asserts this render path. 10-vs-9: the catalog's previous 'ceiling' label is gone, so field names are exact across README AND tool-catalog." },
+          { "dimensionId": "metadata-block-doc-parity", "score": 10, "pass": true, "evidence": "README captureTab return-shape paragraph (75-79) and the tool-catalog description (231) both name the success sibling metadata text block's keys — width, height, clipped, appliedScale, attempts — exactly as server.ts captureImageResult emits (81-96) and as server.unit.test.ts asserts (67-74); the image is documented as image/png (data:image/png;base64 prefix, server doc comment states `mimeType: image/png` at 101-102). 10-vs-9: both client surfaces enumerate all five sibling keys with exact spelling, not merely 'scaling info'." },
+          { "dimensionId": "no-stale-superseded-claims", "score": 9, "pass": true, "evidence": "The horizon-13 'Guard coverage' note (README 397-405) is explicitly annotated 'Horizon 14 supersedes this claim' (past-tense 'horizon 13 recorded... cannot fire on a real capture'); the README oversized-result paragraph is rewritten (80-90) rather than appended; a repo grep for 'no downscale'/'with no downscale'/'cannot fire'/'guard branch'/'impossible' returns only this past-tense, superseded-annotated reference. Not a 10 (at grade time): the viewport-mode bullet (line 68) still carried the un-annotated leftover 'Behaviour is unchanged from before'." },
+          { "dimensionId": "usable-by-outsider", "score": 9, "pass": true, "evidence": "Reading only the README, an outsider can conclude retries are automatic (137 'The caller never has to retry an oversized capture itself'), rungs are tried in descending scale order 0.75→0.5→0.33 (117-120), and to distinguish success from give-up read the `captured` field (143-144); internal terms tied to visible result fields/params (render scale→appliedScale, clip, viewport|element→mode), and a concrete give-up worked example is provided (127-131, attempts: 4). Not a 10: no concrete numeric fit-on-a-rung trace (e.g. a page that fits at 0.5 → appliedScale 0.5, attempts: 3), only the give-up example." }
+        ],
+        "overallPass": true
+      },
+      "notes": "Compensation known (revert the 4 descriptive files to their prior text; purely descriptive, no behavioural rollback needed). Graded by subagent (no self-grade). Two post-grade fixes applied: (1) tool-catalog give-up clause now spells the emitted key `limit` (was 'ceiling') — re-graded 9->10; (2) README viewport-mode bullet dropped the stale 'Behaviour is unchanged from before' claim (now notes the downscale ladder) — applied after the final grade, so the recorded grade is conservative. Phase 2 of 4; next is the live-Chrome head-to-head (phase 3), which depends on this phase."
+    },
+    {
+      "phaseId": "verify-oversized-capture-down-ladder-in-live-chrome",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-09-04T12:56:07.000Z",
+      "completedAt": "2026-09-04T12:58:23.000Z",
+      "gateRun": "npm run verify (tsc --noEmit + eslint . --max-warnings 0 + vitest run) in tools/chrome-bridge — clean, 347 tests passed",
+      "gradeResult": {
+        "phaseId": "verify-oversized-capture-down-ladder-in-live-chrome",
+        "dimensionScores": [
+          {
+            "dimensionId": "oversized-capture-genuinely-exercised",
+            "score": 10,
+            "pass": true,
+            "evidence": "Block names the exact page URL (http://127.0.0.1:8123/boky-oversize.html), CSS viewport 1512x772, DPR 2, states a directly-measured in-page pre-ladder size (21,418,778 base64 chars) cross-checked against the floor-derived 18.2M, and records ceiling 1,200,000 and give-up floor 0.33. A 10 has what a 9 lacks: BOTH a measured and a derived pre-ladder size plus an explicit why-oversized cause (DPR-2 high-entropy essentially-incompressible canvas), showing size > ceiling by ~15-18x — a clear non-marginal margin with viewport mode stated."
+          },
+          {
+            "dimensionId": "evidence-specific-and-falsifiable",
+            "score": 10,
+            "pass": true,
+            "evidence": "Pins every ladder observable to concrete values a re-runner could refute: pre-ladder size (18.2M / 21.4M), each attempted render-scale rung named individually (0.75 then 0.5 then 0.33), the give-up floor reached (0.33), attempt count (4), and the final full payload {captured:false, reason:'too-large', size:1981332, limit:1200000, floor:0.33, attempts:4}, delivered as an isError text block. A 10 names each individual rung rather than the vague 'it scaled down and worked'; numbers are internally consistent (final 1.98M < pre-ladder 18.2M; attempts = 1 initial + 3 rungs = 4)."
+          },
+          {
+            "dimensionId": "cdp-cross-check-when-catalog-stale",
+            "score": 9,
+            "pass": true,
+            "evidence": "Catalog freshness is asserted explicitly, not assumed: the chrome-bridge MCP captureTab catalog is called fresh because the observed result carries the new floor/attempts fields and the tool description matches the ladder, so no direct-CDP fallback was needed. The block also records an independent measurement (canvas 3024x1544, 21.4M base64 chars) and reconciles it with the MCP-derived 18.2M (~15% agreement), and further documents the devtools-relay capture size (1,130,933) as explicitly NOT the authority. A 9 rather than 10 only because the independent cross-check is an in-page canvas evaluatePage measurement, not a literal Page.captureScreenshot CDP capture of the same tab — the exact artifact the scale-10 text names."
+          },
+          {
+            "dimensionId": "supersedes-h13-guard-claim",
+            "score": 10,
+            "pass": true,
+            "evidence": "Quotes the specific h13 claim verbatim ('cannot fire on a real capture'), states this live check fired that exact branch by reaching the give-up floor (captured:false at floor 0.33, attempts 4), and marks it superseded with both horizon numbers and the date. A 10 does what a 9 would not: the h13 Guard-coverage note itself forward-cross-links ('Horizon 14 supersedes this claim ... see the horizon-14 verified block below') and the block is headed 'Verified 2026-09-04 (horizon 14)', so the tie is bidirectional and dated."
+          },
+          {
+            "dimensionId": "blocked-outcome-recorded-honestly",
+            "score": 10,
+            "pass": true,
+            "evidence": "Outcome label ('Verified 2026-09-04 (horizon 14)') matches the evidence beneath it: real, non-blocked ladder observations, not a pending/manual run. The captured:false give-up is explicitly characterized as the intended, proven ladder outcome (an isError text block — never a throw, never an empty image block; terminated at the defined give-up outcome), resolving the captured:false-vs-blocked ambiguity, and no contradictory 'pending' / MANUAL_CHROME_CHECK_PENDING language coexists in the block. A 10 resolves that ambiguity and leaves no dangling pending language, which a 9 might tolerate."
+          }
+        ],
+        "overallPass": true
+      },
+      "notes": "Compensation known and invokable: remove the README 'Verified 2026-09-04 (horizon 14)' block and detach any lingering chrome.debugger session (none — the run completed promptly within the 15s cap with no orphaned attachment). Live check exercised the ladder on a genuinely oversized real capture (pre-ladder ~18-21M base64 chars, i.e. ~15-18x the 1.2M ceiling) down to the give-up floor: captured:false reason 'too-large' size 1,981,332 limit 1,200,000 floor 0.33 attempts 4."
+    }
+  ]
+}

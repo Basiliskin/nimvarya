@@ -1,0 +1,144 @@
+{
+  "roadmapFile": "docs/roadmaps/agent-agnostic-browser-bridge/horizons/horizon-10-cdp-scroll-virtualized-content-roadmap.json",
+  "roadmapTask": "Plan horizon 10 of the agent-agnostic-browser-bridge project. Add a CDP-based scroll page action (scrollPage) to the tools/chrome-bridge package that materializes virtualized / lazy-rendered list rows the ISOLATED-world DOM-read path (readPage / getPageText / findElement) misses, shipped as one atomic page action end to end and reusing horizon 9's per-command chrome.debugger attach helper, verified by a live-Chrome head-to-head on a real virtualized list. Keep per-command attach/detach; do not touch the dead active-tab surface.",
+  "createdAt": "2026-09-03T18:56:00.000Z",
+  "updatedAt": "2026-09-03T21:30:00.000Z",
+  "roadmapRevision": 1,
+  "phases": [
+    {
+      "phaseId": "add-debuggerports-scroll-cdp-method",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-09-03T19:13:00.000Z",
+      "completedAt": "2026-09-03T19:18:00.000Z",
+      "gateRun": "npm run verify in tools/chrome-bridge (typecheck, lint --max-warnings 0, vitest 280 passed/22 files)",
+      "gradeResult": {
+        "phaseId": "add-debuggerports-scroll-cdp-method",
+        "dimensionScores": [
+          {
+            "dimensionId": "scroll-signature-and-outcome-shape",
+            "score": 10,
+            "pass": true,
+            "evidence": "Interface DebuggerPorts.scroll is exactly scroll(tabId: number, intent: ScrollIntent): Promise<ScrollOutcome> with no other new members; ScrollIntent is exactly two optional readonly fields amountPx/toBottom (no direction/repeat), ScrollOutcome exactly four readonly fields with method literally 'wheel'|'script'|'none'; both exported and named in debugger-ports.unit.test.ts. ABOVE a 9: amountPx default is a named const SCROLL_DEFAULT_PIXELS=2000 applied via `intent.amountPx ?? SCROLL_DEFAULT_PIXELS` at the top of scrollTab BEFORE the toBottom branch, and deltaY is resolved after that (`toBottom ? scrollHeight : amountPx`) so the toBottom branch can never bypass it into a NaN deltaY; toBottom is a single window.scrollTo(0, document.documentElement.scrollHeight) jump, not a loop."
+          },
+          {
+            "dimensionId": "cdp-command-shape-asserted-byte-for-byte",
+            "score": 8,
+            "pass": true,
+            "evidence": "The wheel-only test pins the full Input.dispatchMouseEvent byte-for-byte ({type:'mouseWheel', x:640, y:400, deltaX:0, deltaY:2000}), pins Runtime.evaluate reads with returnByValue/awaitPromise, deltaY=2000 default and deltaY=5000 (scrollHeight) on toBottom, and asserts the exact fallback expressions window.scrollBy(0, 2000)/window.scrollTo(0, document.documentElement.scrollHeight). NOT a 10: x/y are asserted as hardcoded literals 640/400 matching the stub fixture (innerWidth 1280 / innerHeight 800) rather than asserted to be derived from the stubbed first read-back (no explicit x === Math.round(innerWidth/2)) — matches the rubric's literal-x/y failure example. Score 8."
+          },
+          {
+            "dimensionId": "attach-detach-lifecycle-every-path",
+            "score": 10,
+            "pass": true,
+            "evidence": "scroll() calls withDebuggerSession(tabId, 'scrolling', () => scrollTab(...)) and all CDP work (wheel dispatch, both settle delays, both metrics read-backs, fallback, outcome) runs inside that run callback; the label union is widened to include 'scrolling'. ABOVE a 9: the success path asserts attach({tabId},'1.3')+detach, the error path asserts detach still runs on a rejected sendCommand and re-attach works after a failure (attachSpy toHaveBeenCalledTimes(2)), the onDetach listener is asserted registered once only, and a mid-command detach rejection explicitly asserts the message 'while scrolling' (built from the live entry.label, not a shared 'evaluating' constant). No module/instance attach state added outside withDebuggerSession."
+          },
+          {
+            "dimensionId": "wheel-then-script-fallback-branch-logic",
+            "score": 10,
+            "pass": true,
+            "evidence": "Three explicit branch tests exist: wheel-only (asserts the scrollBy fallback is NEVER sent and method==='wheel'), wheel-then-script-fallback (fallback IS sent, method==='script'), neither-moved (method==='none'); scrollYBefore/scrollYAfter are the actual first/final read-back values (0/2000, 0/2000, 0/0). ABOVE a 9: movedBy uses a tolerance comparison Math.abs(to-from) >= SCROLL_MOVE_TOLERANCE (0.5) rather than strict equality, and reachedEnd is computed with a small slack (scrollY + innerHeight >= scrollHeight - SCROLL_END_SLACK) with both true (toBottom test) and false (wheel test) covered."
+          },
+          {
+            "dimensionId": "predeclared-test-fake-ripples-landed",
+            "score": 10,
+            "pass": true,
+            "evidence": "Both fake implementers were updated: fakeDebugger in page-actions.unit.test.ts and fakeDebuggerPorts in service-worker.unit.test.ts each carry a scroll stub returning { method:'none' as const, scrollYBefore:0, scrollYAfter:0, reachedEnd:false }, structurally satisfying ScrollOutcome. git status shows service-worker.ts source itself unchanged (only its test file), and `npm run verify` exits 0 (tsc --noEmit clean, eslint --max-warnings 0 clean, 280 tests / 22 files). ABOVE a 9: the full verify is green with zero suppressions — no @ts-expect-error, no it.skip, no `as` casts — and the method literal is `as const`-typed so it narrows to ScrollOutcome['method'] under strict."
+          },
+          {
+            "dimensionId": "reply-parsing-robustness",
+            "score": 10,
+            "pass": true,
+            "evidence": "parseScrollMetrics narrows the reply through the shared module isRecord guard plus a finite() numeric guard (typeof number && Number.isFinite, else 0) — no `result.result.value as number`, no any, no !, no `as <type>` on the scroll path; isRecord is reused (module helper), not re-implemented inline; the settle-delay evaluate result (sleepTab) is not parsed for a value it does not need. ABOVE a 9: the degenerate-reply test resolves with method==='none' (not rejecting) and asserts Number.isFinite on both scrollYBefore and scrollYAfter, proving the numeric guards reject NaN instead of leaking it through."
+          }
+        ],
+        "overallPass": true
+      },
+      "notes": "Compensation known + recorded (not invoked): a git revert of the 4 phase files (debugger-ports.ts, debugger-ports.unit.test.ts, page-actions.unit.test.ts, service-worker.unit.test.ts) removes the scroll method cleanly — it has no callers yet. Graded 10/8/10/10/10/10 by a subagent (no self-grade), overallPass true; the one 8 (cdp byte-for-byte) is the x/y-derived-from-read-back nuance noted in the rubric's failure example. installStubDebugger gained an optional sendCommand impl param (constructor-path vi.fn) so the scroll tests avoid the no-misused-promises rule that .mockImplementation(promise-returning) trips. 0 amendments, 0 overrides."
+    },
+    {
+      "phaseId": "add-scrollpage-action-end-to-end",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-09-03T16:39:27.164Z",
+      "completedAt": "2026-09-03T16:47:51.080Z",
+      "gateRun": "npm run verify in tools/chrome-bridge (typecheck, eslint --max-warnings 0, vitest 288 passed/22 files)",
+      "gradeResult": {
+        "phaseId": "add-scrollpage-action-end-to-end",
+        "dimensionScores": [
+          {
+            "dimensionId": "parity-surface-no-drift-completeness",
+            "score": 9,
+            "pass": true,
+            "evidence": "All surfaces wired: PAGE_ACTIONS has 19 entries with 'scrollPage' appended after getTabState; types.ts adds ScrollPageParams + ScrollPageResult AND a key in BOTH mapped types; page-actions.ts has scrollPage in BOTH the raw map and the guard()-wrapped return; tool-catalog.ts TOOL_CATALOG + SCROLL_PROPERTIES; command-dispatch Record<PageAction,Handler> satisfied (tsc green). npm run verify exits 0 (22 files / 288 tests); no it.skip/only/eslint-disable/timeout bump — only in-page setTimeout expressions."
+          },
+          {
+            "dimensionId": "validate-params-before-resolving-sandbox-tab",
+            "score": 9,
+            "pass": true,
+            "evidence": "amountPx validated with typeof!==number || !Number.isFinite || <0 (rejects NaN/Infinity/negative), toBottom with typeof!==boolean; both checks textually BEFORE sandboxTab.resolveTabId() and captureDebugger.scroll. Bad params return {error: SCROLL_PARAM_ERROR} without throwing. Test covers {amountPx:-5/x/NaN/Infinity},{toBottom:1/'yes'} and asserts resolveTabId + scroll NOT called; empty {} reaches port as intent {}."
+          },
+          {
+            "dimensionId": "input-schema-exactly-two-optional-fields",
+            "score": 9,
+            "pass": true,
+            "evidence": "scrollPage entry contributes exactly amountPx ({type:'number',minimum:0}, desc names pixels + default 2000) and toBottom ({type:'boolean'}) via reusable SCROLL_PROPERTIES as-const block; no direction/repeat/tabId. required absent (test reads ?? [] === []), additionalProperties:false. Test asserts exact sorted key set ['amountPx','toBottom'], required empty, amountPx numbers, toBottom boolean."
+          },
+          {
+            "dimensionId": "dedicated-scroll-result-coercer",
+            "score": 9,
+            "pass": true,
+            "evidence": "New exported coerceScrollOutcome(outcome: ScrollOutcome) in page-actions.ts, imported + named in co-located test, explicitly picks method/scrollYBefore/scrollYAfter/reachedEnd returning {result:{...}} with no ?? undefined and no whole-outcome spread (no transport leak). Handler uses only coerceScrollOutcome; coerceExecuteScriptOutcome/InPageScriptOutcome unreferenced on that path. Tests feed fake ScrollOutcome across wheel/script/none + direct coerceScrollOutcome case asserting method passes through."
+          },
+          {
+            "dimensionId": "count-test-bump-both-files-and-labels",
+            "score": 9,
+            "pass": true,
+            "evidence": "actions.unit.test.ts: 'scrollPage' appended last in toEqual tuple + PAGE_ACTIONS.length .toBe(18)->19. tool-catalog.unit.test.ts: listTools() toHaveLength(18)->19 AND it() label changed to 'advertises exactly nineteen tools', scrollPage added to required-map per-action assertion. No '18' literal remains in either test file; both pass under verify."
+          },
+          {
+            "dimensionId": "readme-surface-fully-updated",
+            "score": 9,
+            "pass": true,
+            "evidence": "All five spots: count word eighteen->nineteen (L48) and 18 tools->19 (L190); scrollPage in BOTH enumerations (prose inline + built service-worker.js bullet); dedicated prose paragraph (two-field model + wheel-then-scrollBy/scrollTo fallback + method field); new numbered manual-e2e step (scroll head-to-head renumbered to 13, former stop-relay to 14) with 'Verified <date> (horizon 10)' stub for phase 2. No remaining README text asserts count 18 or omits scrollPage from an enumeration."
+          }
+        ],
+        "overallPass": true
+      },
+      "notes": "Graded 9 across all 6 dimensions by a subagent (no self-grade), overallPass true. Compensation known + recorded (not invoked): remove the scrollPage entries from actions/types/page-actions/tool-catalog + the two test files + revert README count/enumerations/prose/e2e step to 18 — tsc's Record<PageAction,...> completeness confirms nothing dangles. DEVIATION vs roadmap text: manual-e2e new step numbered 13 (not 14) with the pre-existing 'stop the relay' step renumbered to 14, so the scroll head-to-head runs while the relay/Chrome are still live and teardown stays last — no step number collides; the phase-2 Verified stub is present as required. 0 amendments, 0 overrides."
+    },
+    {
+      "phaseId": "verify-scrollpage-live-chrome-head-to-head",
+      "status": "dropped",
+      "attempts": 2,
+      "compensationInvoked": false,
+      "startedAt": "2026-09-03T16:58:27.000Z",
+      "blockedReason": "REPLAN_REQUIRED: verdict on the fixed scrollPage is now clear (retry attempt 2 continuation, 2026-09-03). The wedge is fixed (session timeout + guaranteed detach, and the bounded-wheel fix makes scrollPage scroll via Runtime.evaluate window.scrollBy when Input.dispatchMouseEvent hangs) — `npm run verify` green (290 tests). BUT the horizon's phase-3 verification premise is INVALIDATED: in the deliberately-unfocused sandbox tab the browser runs NO rendering pass, confirmed live on a trivial local page — window.scrollBy changes scrollY but fires zero scroll events, IntersectionObserver never fires, and content-visibility:auto never reveals (innerText stays empty after scrolling to row 500). No virtualized/lazy-rendered page responds to a scroll there, so scrollPage can move the window but CANNOT materialize rows a prior readPage missed. The verification is infeasible in the sandbox tab as designed. Horizon needs a revision: either create the sandbox tab so it actually renders (change tab creation/focus), or narrow the success criterion to 'scrollPage moves the window' and drop the materialization gate, or verify against a render-able tab.",
+      "notes": "Retry attempt 2. Wedge fix validated (no hang past 15s, no orphaned debugger — evaluatePage works after each scrollPage timeout). Bounded-wheel mechanism fix validated (script path is used when the wheel hangs; verify green). Outcome: scrollPage scrolls but cannot materialize — see blockedReason. 0 amendments, 0 overrides. DROPPED by REPLAN 2026-09-03 (roadmap rev1): premise (prove scrollPage materializes virtualized rows a prior readPage missed in the unfocused sandbox tab) verified infeasible — the unfocused sandbox tab runs no render pass. Replaced by verify-scrollpage-moves-window-live-chrome (window-scrollY movement proof only); materialization held for a future horizon."
+    },
+    {
+      "phaseId": "verify-scrollpage-moves-window-live-chrome",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-09-03T21:00:00.000Z",
+      "completedAt": "2026-09-03T21:30:00.000Z",
+      "gateRun": "npm run verify in tools/chrome-bridge (typecheck, eslint --max-warnings 0, vitest 290 passed/22 files) + dist/extension rebuilt (npm run build:extension) + live chrome-bridge MCP session (fresh, advertises scrollPage)",
+      "gradeResult": {
+        "phaseId": "verify-scrollpage-moves-window-live-chrome",
+        "dimensionScores": [
+          { "dimensionId": "live-transcript-is-real-not-templated", "score": 9, "pass": true, "evidence": "README manual-e2e step 13 carries a verbatim 'Verified 2026-09-03 (horizon 10)' block: URL https://en.wikipedia.org/wiki/Chromium_(web_browser), scrollHeight 10194 / innerHeight 772, three raw window.scrollY reads (0 -> 3000 -> 9422) via independent evaluatePage cross-checks, both scrollPage result JSONs verbatim incl. method, and 9422+772===10194 proving bottom; delta matches amountPx 3000. Not 10: only one page exercised, focus state asserted in prose not a getTabState dump." },
+          { "dimensionId": "movement-claim-scoped-to-window-scroll-only", "score": 8, "pass": true, "evidence": "decisions.md replan line narrows h10 live-verification to 'scrollPage increases the sandbox tab's window scrollY', states materialization is NOT an h10 gate, focus model unchanged; earlier h10 lines carry action name + param model + mechanism-fidelity shape. state.md completed line closes against the same wording; README expected-result is window movement only. No file re-introduces row materialization as an h10 gate." },
+          { "dimensionId": "materialization-gap-recorded-as-known-limitation", "score": 9, "pass": true, "evidence": "discoveries.md dated line attributes the cause (unfocused sandbox tab runs no render pass: zero scroll events, IntersectionObserver never fires, content-visibility never reveals), not just the symptom. Both blockers.md carry it as an open future-horizon item; tools/chrome-bridge/blockers.md item 2 marked 'RESOLVED for window movement' with 'STILL OPEN as a future-horizon item: virtualized/lazy row materialization ... depends on the sandbox tab running a render pass'. Not 10: no named future-horizon id." },
+          { "dimensionId": "result-mechanism-recorded-honestly", "score": 8, "pass": true, "evidence": "README transcript echoes method 'script' both calls and interprets it: wheel path hangs in the unfocused tab as expected, Runtime.evaluate window.scrollBy/scrollTo fallback moved the page. decisions.md 4th h10 line records the same observed steady-state mechanism; blockers.md wheel-path question resolved with the same method value." },
+          { "dimensionId": "blocked-exit-is-actionable", "score": 8, "pass": true, "evidence": "PASS path: no MANUAL_CHROME_CHECK_PENDING marker on any horizon-10 line (remaining occurrences are the historical h9 blocked entry and the roadmap's own fallback-instruction text). state.md horizon 10 final line is 'completed | 3/3 phases done (roadmap rev1); phase 3 live-verified'." },
+          { "dimensionId": "memory-files-mutually-consistent", "score": 9, "pass": true, "evidence": "README, decisions.md, discoveries.md, state.md and both blockers.md agree on the verdict, the narrowed criterion, the observed method ('script' everywhere), and the materialization-gap disposition (future-horizon item in both blockers.md and discoveries.md); dates 2026-09-03 match across README and discoveries.md; no file cites the superseded row-materialization goal as current. Not 10: the historical replan-trail lines still carry the pre-replan phase-3 name." }
+        ],
+        "overallPass": true
+      },
+      "notes": "Added by REPLAN 2026-09-03 (roadmap rev1), replaces verify-scrollpage-live-chrome-head-to-head. PASS on the narrowed criterion. Live-verified in a fresh post-rebuild chrome-bridge MCP session (scrollPage advertised) on the unfocused sandbox tab (sandboxTabActive:false), en.wikipedia.org/wiki/Chromium_(web_browser): scrollPage {amountPx:3000} 0->3000 (method script), evaluatePage confirmed 3000; scrollPage {toBottom:true} 3000->9422 (method script, reachedEnd true), evaluatePage confirmed 9422 (=scrollHeight-innerHeight, bottom). Observed method 'script' both calls — the CDP wheel path hangs in the unfocused tab, Runtime.evaluate scrollBy/scrollTo fallback moved the page. Graded 9/8/9/8/8/9 by a subagent (no self-grade), overallPass true. No compensation (doc-only + live read). 0 amendments, 0 overrides. Horizon 10 closed."
+    }
+  ]
+}

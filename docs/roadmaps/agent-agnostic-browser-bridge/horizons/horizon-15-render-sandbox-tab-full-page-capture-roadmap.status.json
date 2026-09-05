@@ -1,0 +1,208 @@
+{
+  "roadmapFile": "docs/roadmaps/agent-agnostic-browser-bridge/horizons/horizon-15-render-sandbox-tab-full-page-capture-roadmap.json",
+  "roadmapTask": "Horizon 15 of agent-agnostic-browser-bridge: build a bounded, reversible \"render the sandbox tab\" primitive via CDP Emulation.setFocusEmulationEnabled (feasibility probe first), then ship full-page (beyond-viewport) screenshots as captureTab's one new consumer, reusing the h14 downscale ladder unchanged.",
+  "createdAt": "2026-09-04T14:01:21.000Z",
+  "updatedAt": "2026-09-04T20:19:00.000Z",
+  "roadmapRevision": 0,
+  "phases": [
+    {
+      "phaseId": "probe-focus-emulation-render-restore",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-09-04T15:19:57.000Z",
+      "completedAt": "2026-09-04T16:34:09.000Z",
+      "notes": "Live probe run via a temporary harness (reverted afterward). Verdict PROCEED: Emulation.setFocusEmulationEnabled(true) restored the render pass; captureBeyondViewport returned non-blank 3024x6000 px (scrollHeight 3000 x dpr2), 152-226ms (~75x under the 15s cap), sandboxTabActive=false after the capture, no orphaned debugger session (follow-up viewport capture succeeded). Finding recorded in discoveries.md. Probe harness reverted; chrome-bridge source + dist back to clean and green (347/347 tests).",
+      "gradeResult": {
+        "phaseId": "probe-focus-emulation-render-restore",
+        "dimensionScores": [
+          {
+            "dimensionId": "finding-recorded-with-numbers",
+            "score": 9,
+            "pass": true,
+            "evidence": "Dated 2026-09-04 entry states PNG 3024x6000, scrollHeight 3000 CSS px / scrollWidth 1512 cross-checked against dpr 2, wall-clock 152-226 ms median 164 ms, all 12 below-fold color bands fully painted."
+          },
+          {
+            "dimensionId": "explicit-verdict",
+            "score": 9,
+            "pass": true,
+            "evidence": "Header carries clearly labeled '(VERDICT: PROCEED)', a direct consequence of the reported non-blank beyond-viewport / ~75x under cap / no horizon-13 hang; no hedging or conflicting verdict."
+          },
+          {
+            "dimensionId": "probe-sequence-fidelity",
+            "score": 9,
+            "pass": true,
+            "evidence": "Names Emulation.setFocusEmulationEnabled(true) -> Page.captureScreenshot({captureBeyondViewport:true}) -> Emulation.setFocusEmulationEnabled(false) over ONE chrome.debugger attachment on the unfocused sandbox tab id 1799015688; names tall.html scrollHeight 3000 > innerHeight 772."
+          },
+          {
+            "dimensionId": "clean-teardown-confirmed",
+            "score": 9,
+            "pass": true,
+            "evidence": "States finally sends disable before detach, then post-probe getTabState sandboxTabActive=false (invariant restored) + follow-up 3024x1544 viewport capture succeeded with no orphaned debugger session."
+          },
+          {
+            "dimensionId": "cap-compliance-measured",
+            "score": 9,
+            "pass": true,
+            "evidence": "Reports the full attach-enable-capture-disable-detach sequence at 152-226 ms and explicitly states ~75x under the 15 s withDebuggerSession cap; no unstated ad-hoc wait/settle delay."
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "add-reversible-full-page-capture-port",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-09-04T16:39:14.000Z",
+      "completedAt": "2026-09-04T16:47:41.000Z",
+      "gateRun": "npm run verify (tsc --noEmit && eslint . --max-warnings 0 && vitest run) — green, 23 files / 352 tests",
+      "gradeResult": {
+        "phaseId": "add-reversible-full-page-capture-port",
+        "dimensionScores": [
+          {
+            "dimensionId": "reversibility-guaranteed",
+            "score": 10,
+            "pass": true,
+            "evidence": "captureFullPageScreenshot wraps ONLY the enable/disable pair (not the whole withDebuggerSession callback): enable before the try, screenshotTab({captureBeyondViewport:true}) inside the try, finally unconditionally sends setFocusEmulationEnabled({enabled:false}) with .catch(()=>{}). Independent of withDebuggerSession's detach-only finally; defeat failureExample 1 and 2. Exit paths each pinned by a distinct test (capture-throws, disable-rejects, enable-fails, re-attach). No deterministic path leaks focus emulation."
+          },
+          {
+            "dimensionId": "cdp-command-sequence-proven-by-test",
+            "score": 10,
+            "pass": true,
+            "evidence": "Happy-path test asserts full ordered command-object list with exact params via toEqual([enable{enabled:true}, capture{format:'png',captureBeyondViewport:true}, disable{enabled:false}]), so it is red on removal OR reorder OR a synthesized clip. Throw-case test stubs capture to reject and asserts method order still [enable, capture, disable]."
+          },
+          {
+            "dimensionId": "capture-params-correctness",
+            "score": 10,
+            "pass": true,
+            "evidence": "CaptureScreenshotOptions has new optional captureBeyondViewport?: boolean; existing clip/scale field types untouched. screenshotTab's FIRST branch emits no clip and no scale-built clip; clip/scale/scale-clip branches unchanged and still exercised by page-actions unit tests. format:'png' explicit. Field is optional, so no parity-surface expansion."
+          },
+          {
+            "dimensionId": "api-contract-docs-updated",
+            "score": 10,
+            "pass": true,
+            "evidence": "grep -iE 'not offered|not supported|unsupported|deliberately not' over debugger-ports.ts returns NO_MATCHES. captureScreenshot JSDoc routes full-page to the dedicated port; new captureFullPageScreenshot has its OWN doc comment stating it enables focus emulation for one capture and disables it in a finally before detach; does not overclaim (discloses CDP has no top-level scale)."
+          },
+          {
+            "dimensionId": "session-and-error-typing-hygiene",
+            "score": 10,
+            "pass": true,
+            "evidence": "withDebuggerSession label union is 'capturing' | 'capturing-full-page' | 'evaluating' | 'scrolling'; captureFullPageScreenshot uses the distinct 'capturing-full-page' label. Signature has no any and no non-null assertion; tsc --noEmit exits 0. Disable is .catch(()=>{})-swallowed so the capture error propagates (proven by the rejects-disable-still-observes-capture-error test). No chrome.debugger call bypasses the attach/detach wrapper."
+          }
+        ],
+        "overallPass": true
+      },
+      "notes": "Added captureFullPageScreenshot port (new 'capturing-full-page' label, enable -> try captureBeyondViewport -> finally disable), CaptureScreenshotOptions.captureBeyondViewport field, screenshotTab byp branch, corrected both stale 'full-page not offered' doc sentences, 5 new unit tests, and updated the DebuggerPorts fakes in page-actions.unit.test.ts + service-worker.unit.test.ts. CDP no-top-level-scale discovery appended to discoveries.md. Compensation known: revert debugger-ports.ts + its test + the two fakes in one commit; nothing outside this file set consumes the new port yet, so rollback is isolated."
+    },
+    {
+      "phaseId": "add-full-page-mode-runtime-wiring",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-09-04T19:54:07.000Z",
+      "completedAt": "2026-09-04T19:54:07.000Z",
+      "gateRun": "npm run verify (tsc --noEmit && eslint . --max-warnings 0 && vitest run) — green, 23 files / 355 tests",
+      "gradeResult": {
+        "phaseId": "add-full-page-mode-runtime-wiring",
+        "dimensionScores": [
+          {
+            "dimensionId": "mode-dispatch-and-validation-correct",
+            "score": 9,
+            "pass": true,
+            "evidence": "page-actions.ts line 284 adds `if (mode === \"full-page\") return { mode: \"full-page\" }` in resolveCaptureParams, lines 286-288 rewrite the fallback error to name all three modes, and the captureTab handler dispatches full-page to captureFullPage before the viewport fallback; a test confirms `{ mode: \"bogus\" }` returns an error, though it checks only `.toHaveProperty(\"error\")` rather than asserting the exact three-mode message text."
+          },
+          {
+            "dimensionId": "page-actions-count-unchanged",
+            "score": 9,
+            "pass": true,
+            "evidence": "PAGE_ACTIONS in protocol/actions.ts still has exactly 20 entries with captureTab as the only capture action (no new top-level action introduced), and page-actions.ts adds no new export — captureFullPage is a module-private function and captureFullPageScreenshot is only a DebuggerPorts method, so the registry/dispatch count is unchanged."
+          },
+          {
+            "dimensionId": "downscale-ladder-reused-not-reimplemented",
+            "score": 9,
+            "pass": true,
+            "evidence": "captureFullPage (page-actions.ts) calls the existing captureResultWithLadder with `const recapture = (scale) => captureDebugger.captureFullPageScreenshot(tabId, { scale })`, mirroring captureViewport, and adds no new ladder constant array, loop, or floor logic anywhere in the diff."
+          },
+          {
+            "dimensionId": "runtime-unit-tests-cover-both-outcomes",
+            "score": 9,
+            "pass": true,
+            "evidence": "Three new tests exercise full-page: accepts full-page + normal-size appliedScale:1/attempts:1, ladder-success appliedScale:0.75/attempts:2, and too-large floor/attempts. resolveCaptureParams acceptance is covered via the captureTab handler because it is module-private per the established repo pattern, and all tests in the file pass on a direct vitest run."
+          }
+        ],
+        "overallPass": true
+      }
+    },
+    {
+      "phaseId": "add-full-page-mode-mcp-docs-parity",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-09-04T17:00:30.000Z",
+      "completedAt": "2026-09-04T17:05:30.000Z",
+      "gateRun": "npm run verify (tsc --noEmit && eslint . --max-warnings 0 && vitest run) — green, 23 files / 356 tests",
+      "gradeResult": {
+        "phaseId": "add-full-page-mode-mcp-docs-parity",
+        "dimensionScores": [
+          {
+            "dimensionId": "parity-surface-fully-updated",
+            "score": 10,
+            "pass": true,
+            "evidence": "git diff shows non-trivial changes in all four filesAffected: tool-catalog.ts (8 lines), tool-catalog.unit.test.ts (25 lines), server.ts (7 lines), README.md (30 lines). tool-catalog.ts captureTab enum is literally ['viewport','element','full-page'] (L237) and its description says 'mode: \"full-page\"'; elementRef description updated to 'Ignored when mode is viewport or full-page'. server.ts header doc comment (L8-10) adds a bullet listing viewport / element / full-page — no longer two-mode-only. README.md captureTab section: grep 'full-page capture is not offered' returns NOT FOUND; mode bullet list names all three modes. 'full-page' string appears in all four files. The only remaining 'not offered' phrasing is the explicitly-labelled '(horizon-13 record; superseded)' historical note (L386), not a live denial. No failureExample applies."
+          },
+          {
+            "dimensionId": "catalog-unit-tests-assert-new-mode",
+            "score": 9,
+            "pass": true,
+            "evidence": "New test 'advertises the full-page mode in the captureTab tool schema' (tool-catalog.unit.test.ts L75-84) asserts the captureTab schema's mode enum equals ['viewport','element','full-page'], separately asserts toContain('full-page') (the literal string, not merely an array-length increase), and asserts the description matches /full-page/. The pre-existing captureTab schema test was also updated to expect the three-value enum. verify (tsc --noEmit && eslint --max-warnings 0 && vitest run) is green (23 files / 356 tests). failureExample (a) does not apply — the literal 'full-page' is asserted. Held at 9 rather than 10 because the enum is a handwritten literal in the catalog file rather than be anchored to the runtime's single source of truth (the dispatcher/type), so a reviewer could still ask for the doc values to be derived from the runtime rather than duplicated by hand."
+          },
+          {
+            "dimensionId": "catalog-schema-matches-runtime-dispatch",
+            "score": 10,
+            "pass": true,
+            "evidence": "The three advertised modes exactly equal the runtime's accepted set. tool-catalog.ts enum = ['viewport','element','full-page'] (L237). resolveCaptureParams (page-actions.ts L274-288) validates exactly viewport, element, full-page. protocol/types.ts CaptureTabMode = 'viewport' | 'element' | 'full-page' (L75). README mode bullet list names all three modes and no fourth; server.ts doc comment lists the same three. No fourth mode exists anywhere — PAGE_ACTIONS stays at 20. No failureExample (server lists only two) or (README invents a 4th mode) applies."
+          }
+        ],
+        "overallPass": true
+      },
+      "notes": "Updated tool-catalog.ts (mode enum + description + elementRef desc), tool-catalog.unit.test.ts (union assertion + new dedicated test), mcp/server.ts (header doc bullet), README.md (three modes, replaced stale 'full-page not offered' paragraph, marked the horizon-13 bullet superseded). Also fixed 4 PRE-EXISTING eslint violations found blocking this file's gate: bracket-notation ['mode']/['timeoutMs'] and Array<T> in tool-catalog.unit.test.ts's waitFor test, plus ['captured']/['dataUrl'] in mcp/server.ts's isCaptureTabImage — these were in the repo at HEAD, unrelated to this phase, but had to be clean for eslint . --max-warnings 0 to pass. No compensation (phase has none)."
+    },
+    {
+      "phaseId": "run-live-chrome-full-page-head-to-head",
+      "status": "done",
+      "attempts": 1,
+      "startedAt": "2026-09-04T20:06:00.000Z",
+      "completedAt": "2026-09-04T20:19:00.000Z",
+      "gateRun": "npm run verify (tsc --noEmit && eslint . --max-warnings 0 && vitest run) — green, 23 files / 356 tests",
+      "gradeResult": {
+        "phaseId": "run-live-chrome-full-page-head-to-head",
+        "dimensionScores": [
+          {
+            "dimensionId": "pixel-vs-scroll-cross-check",
+            "score": 10,
+            "pass": true,
+            "evidence": "The 2026-09-04 Verified entry records raw captureTab output 3024x10400, independently measured scrollWidth 1512/scrollHeight 5200, and computes both ratios explicitly (3024/1512=2.0=dpr and 10400/5200=2.0=dpr) with exact agreement on both axes — above a 9 because it names dpr and shows the arithmetic on each axis rather than asserting any single relation."
+          },
+          {
+            "dimensionId": "mcp-catalog-retry-honesty",
+            "score": 9,
+            "pass": true,
+            "evidence": "The Verified entry states plainly 'No stale-MCP-catalog retry needed — the session catalog already advertised full-page before the call,' satisfying an explicit catalog-state sentence with the timing that proves the mode was confirmed present prior to capture — solid but brief, not elaborated beyond the required clause."
+          },
+          {
+            "dimensionId": "unfocused-invariant-post-capture-confirmation",
+            "score": 10,
+            "pass": true,
+            "evidence": "A distinct 'Post-capture teardown' paragraph records getTabState sandboxTabActive=false, document.hasFocus()===false (labeled as the Blink-internal check getTabState cannot see), scrollY:0, and a follow-up viewport capture 3024x1544 succeeding as proof of no orphaned debugger session — above a 9 because it layers three independent post-capture checks including the explicitly-named focus-emulation blind spot."
+          },
+          {
+            "dimensionId": "dated-finding-with-honest-fallback",
+            "score": 10,
+            "pass": true,
+            "evidence": "Two 2026-09-04 entries were added — 'full-page live head-to-head (Verified)' plus a genuinely-new 'full-page composite ceiling' discovery — and the diff is strictly additive (git diff stat shows exactly 2 insertions, prior content intact) — above a 9 because it delivers the required dated Verified entry and an additional grounded finding."
+          }
+        ],
+        "overallPass": true
+      },
+      "notes": "Live head-to-head Verified: captureTab({mode:'full-page'}) on the unfocused sandbox tab (id 1799015691, http://localhost:8769/index.html fixture, 13x400px bands) → captured:true, 3024x10400 px (appliedScale 1, attempts 1), all 13 bands painted. Cross-check exact (3024/1512=2.0=dpr, 10400/5200=2.0=dpr). Teardown clean: sandboxTabActive=false, document.hasFocus()===false, scrollY 0, follow-up viewport capture 3024x1544 succeeded (no orphaned debugger). No stale-MCP-catalog retry needed. Also discovered + recorded a full-page composite ceiling: on en.wikipedia (scrollHeight 10194→20388 device px) full-page returned CDP -32000 then a 15000ms cap timeout 'while capturing-full-page'; the 5200px fixture succeeded — page height is load-bearing. verify green (23 files/356 tests). No amendment (phase contract satisfied — the fixture is a real beyond-viewport page); no compensation (phase has none)."
+    }
+  ]
+}
