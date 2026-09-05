@@ -6,7 +6,7 @@
 [![Node](https://img.shields.io/badge/node-%3E%3D18-blue.svg)](#setup)
 [![Self-contained](https://img.shields.io/badge/package-self--contained-brightgreen.svg)](#setup)
 
-_A standalone, boky-free Chrome-control bridge for your favourite terminal AI._
+_A standalone, Chrome-control bridge for your favourite terminal AI._
 
 Drive a real Chrome tab — navigate, read, find, click, type, screenshot,
 query console and network — from Claude Code, Codex CLI, Gemini CLI, or
@@ -17,7 +17,7 @@ Cursor, over one shared MCP surface.
 ## Features
 
 `nimvarya` is extracted from boky's devtools bridge but shares no code with
-it — boky keeps working unchanged. It ships three parts:
+It ships three parts:
 
 - **Extension:** a standalone MV3 Chrome extension that executes page actions
   and captures page events, all on a deliberately-unfocused sandbox tab.

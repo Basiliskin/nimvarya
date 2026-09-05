@@ -4,7 +4,7 @@
  *
  *  - only four frame kinds survive: `hello`, `command`, `command-response`,
  *    `observation` (boky's extra frame kinds are dropped);
- *  - command / command-response ids are `string` only (boky allowed
+ *  - command / command-response ids are `string` only ( allowed
  *    `string | number`, which collides at the relay when two controllers each
  *    start counting from 1);
  *  - the actions are the generic page actions in `PAGE_ACTIONS`
@@ -208,7 +208,9 @@ export interface FixedDelayWaitParams {
  * `{ met: false }` result — never a thrown error.
  */
 export type WaitForParams =
-  SelectorWaitParams | NetworkIdleWaitParams | FixedDelayWaitParams;
+  | SelectorWaitParams
+  | NetworkIdleWaitParams
+  | FixedDelayWaitParams;
 
 /** Params carried by a `command` frame, keyed by its `action`. */
 export interface PageActionParams {
@@ -347,7 +349,10 @@ export interface CaptureTabImageResult {
 
 /** A one-line reason for a structured non-image `captureTab` outcome. */
 export type CaptureTabFailureReason =
-  "element-not-found" | "zero-area" | "too-large" | "tab-unavailable";
+  | "element-not-found"
+  | "zero-area"
+  | "too-large"
+  | "tab-unavailable";
 
 /** A structured non-image `captureTab` outcome, discriminated by `captured: false`. */
 export interface CaptureTabFailureResult {
@@ -591,4 +596,7 @@ export interface Observation {
 }
 
 export type BridgeMessage =
-  HelloMessage | Command | CommandResponse | Observation;
+  | HelloMessage
+  | Command
+  | CommandResponse
+  | Observation;
