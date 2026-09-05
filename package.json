@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Standalone, boky-free Chrome-control bridge for MCP-capable terminal AI coding tools",
+  "description": "Standalone, Chrome-control bridge for MCP-capable terminal AI coding tools",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --max-warnings 0",
