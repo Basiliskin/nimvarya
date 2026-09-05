@@ -35,7 +35,7 @@ const root = fileURLToPath(new URL(".", import.meta.url));
 
 function copyManifestPlugin(): Plugin {
   return {
-    name: "chrome-bridge:copy-manifest",
+    name: "nimvarya:copy-manifest",
     closeBundle() {
       mkdirSync(`${root}dist/extension`, { recursive: true });
       copyFileSync(

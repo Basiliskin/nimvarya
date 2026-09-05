@@ -36,26 +36,26 @@ function parseRecord(raw: string): Record<string, unknown> {
 // --- resolveBridgeUrl --------------------------------------------------------
 
 describe("resolveBridgeUrl", () => {
-  const original = process.env.CHROME_BRIDGE_URL;
+  const original = process.env.NIMVARYA_URL;
   afterEach(() => {
-    if (original === undefined) delete process.env.CHROME_BRIDGE_URL;
-    else process.env.CHROME_BRIDGE_URL = original;
+    if (original === undefined) delete process.env.NIMVARYA_URL;
+    else process.env.NIMVARYA_URL = original;
   });
 
-  it("returns CHROME_BRIDGE_URL when set", () => {
-    process.env.CHROME_BRIDGE_URL = "ws://example.test:9999";
+  it("returns NIMVARYA_URL when set", () => {
+    process.env.NIMVARYA_URL = "ws://example.test:9999";
     expect(resolveBridgeUrl()).toBe("ws://example.test:9999");
   });
 
   it("falls back to ws://127.0.0.1:8766 (not boky's 8765) when unset", () => {
-    delete process.env.CHROME_BRIDGE_URL;
+    delete process.env.NIMVARYA_URL;
     expect(resolveBridgeUrl()).toBe("ws://127.0.0.1:8766");
     expect(DEFAULT_BRIDGE_URL).toBe("ws://127.0.0.1:8766");
     expect(resolveBridgeUrl()).not.toContain("8765");
   });
 
-  it("treats an empty CHROME_BRIDGE_URL as unset", () => {
-    process.env.CHROME_BRIDGE_URL = "";
+  it("treats an empty NIMVARYA_URL as unset", () => {
+    process.env.NIMVARYA_URL = "";
     expect(resolveBridgeUrl()).toBe("ws://127.0.0.1:8766");
   });
 });

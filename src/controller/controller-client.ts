@@ -8,7 +8,7 @@
  *  - command ids are `crypto.randomUUID()` strings, not a per-instance integer
  *    counter (two controllers pointed at the same relay would both start at 1
  *    and collide);
- *  - the relay URL comes from `CHROME_BRIDGE_URL` (read at construction time,
+ *  - the relay URL comes from `NIMVARYA_URL` (read at construction time,
  *    not module load) and defaults to `ws://127.0.0.1:8766`, not boky's 8765;
  *  - every inbound frame is parsed as `unknown` and narrowed through the
  *    protocol type guards;
@@ -33,7 +33,7 @@ import type {
   PageActionParams,
 } from "../protocol/types.js";
 
-/** Default relay URL when `CHROME_BRIDGE_URL` is unset. */
+/** Default relay URL when `NIMVARYA_URL` is unset. */
 export const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:8766";
 const DEFAULT_TIMEOUT_MS = 30_000;
 const INITIAL_RECONNECT_DELAY_MS = 1_000;
@@ -41,12 +41,12 @@ const MAX_RECONNECT_DELAY_MS = 15_000;
 const READY_STATE_OPEN = 1;
 
 /**
- * The relay URL: `process.env.CHROME_BRIDGE_URL` when set and non-empty,
+ * The relay URL: `process.env.NIMVARYA_URL` when set and non-empty,
  * otherwise `ws://127.0.0.1:8766`. Read lazily (on each call) so a test can
  * override the env var and restore it without a module reload.
  */
 export function resolveBridgeUrl(): string {
-  const fromEnv = process.env.CHROME_BRIDGE_URL;
+  const fromEnv = process.env.NIMVARYA_URL;
   return fromEnv !== undefined && fromEnv !== "" ? fromEnv : DEFAULT_BRIDGE_URL;
 }
 

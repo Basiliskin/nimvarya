@@ -49,7 +49,7 @@ import type { OversizeResult } from "../extension/size-limits.js";
 import { listTools } from "./tool-catalog.js";
 
 /** The MCP server identity advertised to clients. */
-export const MCP_SERVER_NAME = "chrome-bridge";
+export const MCP_SERVER_NAME = "nimvarya";
 const MCP_SERVER_VERSION = "0.0.0";
 
 /**
@@ -186,7 +186,7 @@ export async function handleToolCall(
     const response = await deps.client.sendCommand(toolName, args);
     if (response.error !== undefined) {
       return textResult(
-        `chrome-bridge "${toolName}" failed: ${response.error}`,
+        `nimvarya "${toolName}" failed: ${response.error}`,
         true,
       );
     }
@@ -215,7 +215,7 @@ export async function handleToolCall(
     return textResult(JSON.stringify(response.result, null, 2));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return textResult(`chrome-bridge "${toolName}" failed: ${message}`, true);
+    return textResult(`nimvarya "${toolName}" failed: ${message}`, true);
   }
 }
 

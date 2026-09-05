@@ -18,7 +18,7 @@
  *     is the one predicate that gates those boundaries. A page that guesses
  *     the namespace string and posts a forged envelope would otherwise reach
  *     the buffers, so the namespace is a non-guessable constant (not
- *     "chrome-bridge" or "capture") and is enforced on every envelope.
+ *     "nimvarya" or "capture") and is enforced on every envelope.
  *
  * This module imports nothing from the rest of the package and references no
  * browser API. The only ambient globals it relies on (`TextEncoder` /

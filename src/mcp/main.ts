@@ -1,6 +1,6 @@
 /**
- * Process entry for the MCP server: launched by `tools/chrome-bridge/bin/mcp.mjs`
- * (registered as `chrome-bridge` in the repo-root `.mcp.json`) and by
+ * Process entry for the MCP server: launched by `tools/nimvarya/bin/mcp.mjs`
+ * (registered as `nimvarya` in the repo-root `.mcp.json`) and by
  * `npm run mcp`.
  *
  * stdio hygiene: stdout carries only JSON-RPC frames (the SDK's
@@ -58,7 +58,7 @@ export const defaultMcpMainDeps: McpMainDeps = {
     await server.connect(transport);
   },
   logError: (message) => {
-    process.stderr.write(`[chrome-bridge mcp] ${message}\n`);
+    process.stderr.write(`[nimvarya mcp] ${message}\n`);
   },
 };
 

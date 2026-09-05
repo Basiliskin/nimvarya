@@ -55,7 +55,7 @@ describe("bin/mcp.mjs launcher", () => {
     );
     const child = spawn(process.execPath, [launcher], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, CHROME_BRIDGE_URL: "ws://127.0.0.1:59999" },
+      env: { ...process.env, NIMVARYA_URL: "ws://127.0.0.1:59999" },
     });
 
     let stdout = "";

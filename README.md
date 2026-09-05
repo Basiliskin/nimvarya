@@ -1,4 +1,4 @@
-# @boky/chrome-bridge
+# nimvarya
 
 A **standalone, boky-free Chrome-control bridge** for MCP-capable terminal AI
 coding tools (Claude Code, Codex CLI, Gemini CLI, Cursor). It is extracted from
@@ -12,10 +12,18 @@ It has (or will have, as horizons land) three parts:
   any number of controllers, bound to `127.0.0.1`;
 - **mcp** — a stdio MCP server exposing the page actions as discrete tools.
 
+## Why it exists
+
+Terminal AI coding tools need a way to drive a real Chrome tab — navigate, read, find, click, type, screenshot, query console / network — through an MCP surface that works across clients (Claude Code, Codex CLI, Gemini CLI, Cursor). `nimvarya` is a standalone, boky-free implementation of that path: an MV3 extension, a local WebSocket relay bound to `127.0.0.1`, and a stdio MCP server that exposes the page actions as discrete tools. It is shared as an open-source community contribution and is independent from boky's devtools bridge.
+
+## License
+
+MIT.
+
 ## Setup
 
 ```bash
-cd tools/chrome-bridge
+cd tools/nimvarya
 npm install
 npm run verify   # typecheck + lint + test
 ```
@@ -38,7 +46,7 @@ This package is **self-contained**: its own `package.json`, `tsconfig.json`,
 ## Running the parts
 
 ```bash
-npm run relay              # standalone relay on ws://127.0.0.1:8766 (CHROME_BRIDGE_PORT overrides)
+npm run relay              # standalone relay on ws://127.0.0.1:8766 (NIMVARYA_PORT overrides)
 npm run build:extension    # → dist/extension/  (Load unpacked in chrome://extensions)
 npm run mcp                # stdio MCP server (usually launched by an MCP client, not by hand)
 ```
@@ -309,16 +317,16 @@ one snippet (the `args` path is relative to the repo root):
 
 ```json
 {
-  "chrome-bridge": {
+  "nimvarya": {
     "type": "stdio",
     "command": "node",
-    "args": ["tools/chrome-bridge/bin/mcp.mjs"],
+    "args": ["tools/nimvarya/bin/mcp.mjs"],
     "env": {}
   }
 }
 ```
 
-The relay URL defaults to `ws://127.0.0.1:8766`; set `CHROME_BRIDGE_URL` in
+The relay URL defaults to `ws://127.0.0.1:8766`; set `NIMVARYA_URL` in
 `env` to point elsewhere. The launcher resolves its own location via
 `import.meta.url`, so the client's working directory does not matter.
 
@@ -329,9 +337,9 @@ below are configuration documentation, not test results — do not read them as 
 guarantee that the snippet works there.
 
 - **Claude Code** — hand-verified. With `npm run relay` running and
-  `tools/chrome-bridge/dist/extension` loaded unpacked, the snippet above (loaded
+  `tools/nimvarya/dist/extension` loaded unpacked, the snippet above (loaded
   from the repo-root `.mcp.json`, i.e. `command: "node"`,
-  `args: ["tools/chrome-bridge/bin/mcp.mjs"]`) served a live `getPageText` call
+  `args: ["tools/nimvarya/bin/mcp.mjs"]`) served a live `getPageText` call
   (`maxChars: 400`) against `https://react.dev/` and returned the tab's visible
   text — `{ "text": "React\nv19.2\nSearch\n…", "totalChars": 6590, "truncated": true }`.
 - **Gemini CLI** — config-documentation-only; no live Gemini tool call was run
@@ -341,7 +349,7 @@ guarantee that the snippet works there.
   subcommand instead:
 
   ```bash
-  gemini mcp add chrome-bridge -- node tools/chrome-bridge/bin/mcp.mjs
+  gemini mcp add nimvarya -- node tools/nimvarya/bin/mcp.mjs
   ```
 
 - **Codex CLI** — documentation-only. The `codex` binary is not installed on this
@@ -353,10 +361,10 @@ guarantee that the snippet works there.
 
 1. `npm run relay` in one terminal.
 2. `npm run build:extension`, then chrome://extensions → Load unpacked →
-   `tools/chrome-bridge/dist/extension`.
-3. Restart the MCP client in the repo; `/mcp` (Claude Code) shows `chrome-bridge`
+   `tools/nimvarya/dist/extension`.
+3. Restart the MCP client in the repo; `/mcp` (Claude Code) shows `nimvarya`
    connected with 20 tools.
-4. Call the `chrome-bridge` `getPageText` tool against an open tab — the tab's
+4. Call the `nimvarya` `getPageText` tool against an open tab — the tab's
    visible text comes back as text content.
 5. Call `captureTab` — a PNG screenshot comes back as an image block. Call it
    again with `{ "mode": "element", "elementRef": "<ref>" }` where `<ref>` is a
@@ -369,7 +377,7 @@ guarantee that the snippet works there.
    `reason: "element-not-found"`.
 
    Verified 2026-09-04 (horizon 13) against a live signed-in Chrome via a fresh
-   post-rebuild `chrome-bridge` MCP session, after `npm run build:extension`
+   post-rebuild `nimvarya` MCP session, after `npm run build:extension`
    rebuilt `dist/extension/` and the unpacked extension was reloaded in
    `chrome://extensions`. Verified on the deliberately unfocused sandbox tab
    (`getTabState` → `sandboxTabActive: false`, sandbox tab `1799011799`,
@@ -445,7 +453,7 @@ guarantee that the snippet works there.
      cover the give-up non-image routing.
 
    Verified 2026-09-04 (horizon 14) against a live Chrome session via a fresh
-   post-rebuild `chrome-bridge` MCP session — the deliberate exercise of the
+   post-rebuild `nimvarya` MCP session — the deliberate exercise of the
    downscale ladder on a genuinely oversized capture, i.e. the branch the
    horizon-13 "Guard coverage" note above said could not fire. Page:
    `http://127.0.0.1:8123/boky-oversize.html` (served over localhost; a synthetic
@@ -478,7 +486,7 @@ guarantee that the snippet works there.
      This proves the ladder engages on a real oversized capture, runs within its
      bounded rungs (no unbounded loop), completes promptly inside the 15 s cap (no
      orphaned `chrome.debugger` attachment), and emits the documented give-up shape.
-   - **Catalog freshness** — the `chrome-bridge` MCP `captureTab` tool catalog
+   - **Catalog freshness** — the `nimvarya` MCP `captureTab` tool catalog
      already carried the current payload (fresh, not stale): the observed result
      includes the new `floor`/`attempts` give-up fields and the tool description
      matches the observed ladder, so no direct-CDP fallback was needed. (The
@@ -518,7 +526,7 @@ guarantee that the snippet works there.
    error instead, proving the CDP path is what makes the difference.
 
    Verified 2026-09-03 (horizon 09) against a live signed-in Chrome via the
-   `chrome-bridge` MCP: on the github.com sandbox tab, `evaluatePage`
+   `nimvarya` MCP: on the github.com sandbox tab, `evaluatePage`
    `{ code: "document.querySelector('h1')?.innerText" }` →
    `{ "value": "The future of building happens together" }` while `executeScript`
    with the identical code → the page CSP error
@@ -543,7 +551,7 @@ guarantee that the snippet works there.
     returned `ref` to itself or to `clickElement` and confirm it resolves.
 
     Verified 2026-09-04 (horizon 12) against a live signed-in Chrome via a
-    `chrome-bridge` MCP session whose tool catalog already carried the horizon-12
+    `nimvarya` MCP session whose tool catalog already carried the horizon-12
     `findElement` description, after `npm run build:extension` reproduced
     `dist/extension/service-worker.js` byte-identically (47 662 bytes). Freshness
     is evidenced by the running extension's own output shape, not asserted: every
@@ -586,7 +594,7 @@ guarantee that the snippet works there.
     Independent corroboration was done with `evaluatePage` (the CDP
     `Runtime.evaluate` path) rather than claude-in-chrome's `find`, because
     Claude in Chrome was not connected in this session — `.mcp.json` configures
-    only `extension-bridge` and `chrome-bridge`, and no claude-in-chrome tool was
+    only `extension-bridge` and `nimvarya`, and no claude-in-chrome tool was
     exposed. This is a **substitution against the horizon-12 plan, recorded as
     such**, not a claim the planned head-to-head ran. It does cross mechanisms:
     `evaluatePage` reaches the page through `chrome.debugger`/CDP, while the code
@@ -612,7 +620,7 @@ guarantee that the snippet works there.
     tab — visible elements (the `h1`, the table-of-contents links, all 46 content
     paragraphs) returned full real text.
 
-    No new permission: `git -C tools/chrome-bridge diff HEAD -- extension/manifest.json`
+    No new permission: `git -C tools/nimvarya diff HEAD -- extension/manifest.json`
     produced no output (empty), and `diff extension/manifest.json dist/extension/manifest.json`
     exited 0 with no output (identical) against the freshly rebuilt `dist/`.
 14. Call `scrollPage` on a public, no-auth page tall enough to scroll in its main
@@ -628,7 +636,7 @@ guarantee that the snippet works there.
    held for a future one whose job is to make the sandbox tab render.
 
    Verified 2026-09-03 (horizon 10) against a live signed-in Chrome via a fresh
-   post-rebuild `chrome-bridge` MCP session, on the unfocused sandbox tab
+   post-rebuild `nimvarya` MCP session, on the unfocused sandbox tab
    (`sandboxTabActive: false`), page
    `https://en.wikipedia.org/wiki/Chromium_(web_browser)`
    (`document.documentElement.scrollHeight` 10194, `window.innerHeight` 772):
@@ -658,7 +666,7 @@ guarantee that the snippet works there.
 ### Horizon-13 phase-0 feasibility probe (COMPLETE — SPLIT VERDICT)
 
 Verified **2026-09-04** (horizon 13, phase 0) against live signed-in Chrome
-through a fresh `chrome-bridge` MCP session, with the relay up (`ping` →
+through a fresh `nimvarya` MCP session, with the relay up (`ping` →
 `{ ok: true }`) and the rebuilt shim extension loaded (the MCP `captureTab`
 schema now accepts `captureBeyondViewport` and `clip`, and the CDP calls
 below actually reached `Page.captureScreenshot`). All work was done on the
@@ -797,10 +805,14 @@ two content-script passes append to `dist/extension/` without wiping it.
 
 1. `npm run relay` in one terminal.
 2. `npm run build:extension`, then chrome://extensions → Load unpacked →
-   `tools/chrome-bridge/dist/extension`.
+   `tools/nimvarya/dist/extension`.
 3. The relay logs an extension `hello` within ~2s.
 4. Pipe a command frame through a throwaway `ws` client:
    `{"kind":"command","id":"1","action":"getPageText","params":{}}`
    and confirm the active tab's text comes back keyed by the same `id`.
 
 Full usage docs land in a later horizon.
+
+---
+
+See [`docs/marketing/00-product-facts.md`](docs/marketing/00-product-facts.md) for the verified fact list this README is grounded in.

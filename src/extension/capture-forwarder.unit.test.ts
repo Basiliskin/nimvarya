@@ -68,7 +68,7 @@ describe("installCaptureForwarder", () => {
   it("drops a same-source message whose data is not a capture envelope", () => {
     const { dispatch, sendToWorker, self } = harness();
 
-    dispatch({ source: self, data: { ns: "chrome-bridge" } });
+    dispatch({ source: self, data: { ns: "nimvarya" } });
     dispatch({ source: self, data: "not-an-object" });
 
     expect(sendToWorker).not.toHaveBeenCalled();

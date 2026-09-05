@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Chrome Bridge",
-  "version": "0.1.0",
+  "name": "Nimvarya",
+  "version": "0.2.0",
   "description": "Standalone Chrome-control bridge for MCP-capable terminal AI coding tools.",
   "permissions": [
     "tabs",

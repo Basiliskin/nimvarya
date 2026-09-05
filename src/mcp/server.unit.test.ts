@@ -310,10 +310,10 @@ describe("handleToolCall", () => {
 });
 
 describe("createMcpServer", () => {
-  it("builds a server identified as chrome-bridge that can be connected to a transport", () => {
+  it("builds a server identified as nimvarya that can be connected to a transport", () => {
     const { deps } = fakeDeps(() => Promise.resolve(ok({})));
     const server = createMcpServer(deps);
-    expect(MCP_SERVER_NAME).toBe("chrome-bridge");
+    expect(MCP_SERVER_NAME).toBe("nimvarya");
     expect(typeof server.connect).toBe("function");
   });
 });

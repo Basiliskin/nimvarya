@@ -1,10 +1,10 @@
 {
   "mcpServers": {
-    "chrome-bridge": {
+    "nimvarya": {
       "type": "stdio",
       "command": "node",
       "args": [
-        "chrome-bridge/bin/mcp.mjs"
+        "nimvarya/bin/mcp.mjs"
       ],
       "env": {}
     }

@@ -17,7 +17,7 @@ describe("resolveRelayPort", () => {
 
   it("throws with a message naming the variable on a non-numeric or out-of-range value", () => {
     for (const bad of ["abc", "80.5", "0", "-1", "70000", "NaN"]) {
-      expect(() => resolveRelayPort(bad)).toThrow(/CHROME_BRIDGE_PORT/);
+      expect(() => resolveRelayPort(bad)).toThrow(/NIMVARYA_PORT/);
     }
   });
 

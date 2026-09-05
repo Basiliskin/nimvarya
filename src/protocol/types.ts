@@ -10,7 +10,7 @@
  *  - the actions are the generic page actions in `PAGE_ACTIONS`
  *    (`./actions.ts`) — none of boky's extension-specific commands.
  *
- * This module imports nothing outside `tools/chrome-bridge/src/` and references
+ * This module imports nothing outside `tools/nimvarya/src/` and references
  * no browser API.
  */
 

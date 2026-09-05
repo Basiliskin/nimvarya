@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Repo-relative launcher for the chrome-bridge MCP server, referenced from the
- * repo-root `.mcp.json` as `node tools/chrome-bridge/bin/mcp.mjs`.
+ * Repo-relative launcher for the nimvarya MCP server, referenced from the
+ * repo-root `.mcp.json` as `node tools/nimvarya/bin/mcp.mjs`.
  *
  * It resolves everything relative to its own location (`import.meta.url`), never
  * `process.cwd()`, so it works whatever directory the MCP client launches it
