@@ -16,7 +16,7 @@ Cursor, over one shared MCP surface.
 
 ## Features
 
-`nimvarya` is extracted from boky's devtools bridge but shares no code with
+`nimvarya` is devtools bridge
 It ships three parts:
 
 - **Extension:** a standalone MV3 Chrome extension that executes page actions
