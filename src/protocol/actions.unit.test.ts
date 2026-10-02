@@ -27,12 +27,13 @@ describe("PAGE_ACTIONS", () => {
       "scrollPage",
       "waitFor",
       "closeSandboxTab",
+      "sendKeys",
     ]);
   });
 
   it("has no duplicates and no extra members", () => {
     expect(new Set(PAGE_ACTIONS).size).toBe(PAGE_ACTIONS.length);
-    expect(PAGE_ACTIONS.length).toBe(21);
+    expect(PAGE_ACTIONS.length).toBe(22);
   });
 });
 

@@ -98,6 +98,8 @@ function fakeDebuggerPorts(): DebuggerPorts {
         scrollYAfter: 0,
         reachedEnd: false,
       }),
+    sendKeys: () =>
+      Promise.resolve({ focused: null, textInserted: false, keysPressed: 0 }),
   };
 }
 

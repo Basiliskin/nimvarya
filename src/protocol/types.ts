@@ -177,6 +177,19 @@ export interface ScrollPageParams {
   readonly toBottom?: boolean;
 }
 
+/**
+ * `sendKeys` types into the sandbox tab with trusted keyboard input, in this
+ * order: focus `selector` (when given), insert `text` (when given), then press
+ * each named key in `keys`. At least one of `text` / `keys` is required.
+ * `delayMs` is the pause after the text and after each key.
+ */
+export interface SendKeysParams {
+  readonly selector?: string;
+  readonly text?: string;
+  readonly keys?: readonly string[];
+  readonly delayMs?: number;
+}
+
 /** The three conditions `waitFor` can block on. Modes are mutually exclusive. */
 export type WaitForMode = "selector-present" | "network-idle" | "fixed-delay";
 
@@ -208,9 +221,7 @@ export interface FixedDelayWaitParams {
  * `{ met: false }` result — never a thrown error.
  */
 export type WaitForParams =
-  | SelectorWaitParams
-  | NetworkIdleWaitParams
-  | FixedDelayWaitParams;
+  SelectorWaitParams | NetworkIdleWaitParams | FixedDelayWaitParams;
 
 /** Params carried by a `command` frame, keyed by its `action`. */
 export interface PageActionParams {
@@ -235,6 +246,7 @@ export interface PageActionParams {
   readonly scrollPage: ScrollPageParams;
   readonly waitFor: WaitForParams;
   readonly closeSandboxTab: CloseSandboxTabParams;
+  readonly sendKeys: SendKeysParams;
 }
 
 // --- Per-action result types --------------------------------------------------
@@ -349,10 +361,7 @@ export interface CaptureTabImageResult {
 
 /** A one-line reason for a structured non-image `captureTab` outcome. */
 export type CaptureTabFailureReason =
-  | "element-not-found"
-  | "zero-area"
-  | "too-large"
-  | "tab-unavailable";
+  "element-not-found" | "zero-area" | "too-large" | "tab-unavailable";
 
 /** A structured non-image `captureTab` outcome, discriminated by `captured: false`. */
 export interface CaptureTabFailureResult {
@@ -518,6 +527,18 @@ export interface WaitForResult {
   readonly elapsedMs: number;
 }
 
+/**
+ * The outcome of one `sendKeys` call. `focused` is `true` when `selector`
+ * matched and was focused, `false` when it matched nothing (nothing is typed),
+ * and `null` when no selector was given. `textInserted` / `keysPressed` report
+ * what was actually sent.
+ */
+export interface SendKeysResult {
+  readonly focused: boolean | null;
+  readonly textInserted: boolean;
+  readonly keysPressed: number;
+}
+
 /** Result carried by a successful `command-response` frame, keyed by the action. */
 export interface PageActionResults {
   readonly ping: PingResult;
@@ -541,6 +562,7 @@ export interface PageActionResults {
   readonly scrollPage: ScrollPageResult;
   readonly waitFor: WaitForResult;
   readonly closeSandboxTab: CloseSandboxTabResult;
+  readonly sendKeys: SendKeysResult;
 }
 
 // --- Frames ------------------------------------------------------------------
@@ -596,7 +618,4 @@ export interface Observation {
 }
 
 export type BridgeMessage =
-  | HelloMessage
-  | Command
-  | CommandResponse
-  | Observation;
+  HelloMessage | Command | CommandResponse | Observation;
