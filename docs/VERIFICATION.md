@@ -423,6 +423,22 @@ head-to-head does the numeric pixel cross-check once phase 1 ships the
 Run from a fresh MCP session against real signed-in Chrome with the relay
 running, 2026-09-04.
 
+## `sendKeys` on a rich editor (2026-10-02)
+
+Run against real signed-in Chrome with the relay running, on a Discord channel
+(a Slate editor with a slash-command picker), where `typeText` only ever left
+plain text in the box and a synthetic Enter was ignored.
+
+- `sendKeys` `{ selector: "[role=textbox]", text: "/pool list", delayMs: 1500 }`
+  → `{ focused: true, textInserted: true, keysPressed: 0 }`; the command picker
+  opened with two options, the first one selected.
+- `sendKeys` `{ keys: ["ArrowDown"], delayMs: 500 }` (a separate call, no
+  selector) → `{ focused: null, textInserted: false, keysPressed: 1 }`; the
+  picker was still open and its selection moved to the second option.
+- `sendKeys` `{ keys: ["Enter", "Enter"], delayMs: 800 }` →
+  `keysPressed: 2`; the first Enter chose the command, the second sent it, the
+  message box emptied and the bot's reply appeared in the channel.
+
 ## Manual smoke test
 
 1. `npm run relay` in one terminal.

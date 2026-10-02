@@ -1,15 +1,16 @@
 # Tool reference
 
-Full behavioral reference for the twenty page-action tools the `nimvarya` MCP
+Full behavioral reference for the twenty-two page-action tools the `nimvarya` MCP
 server exposes. For the high-level pitch and setup, see the [README](../README.md).
 For dated verification traces (live-Chrome runs proving this behavior), see
 [`VERIFICATION.md`](VERIFICATION.md).
 
-The stdio MCP server advertises the twenty page actions as discrete tools —
+The stdio MCP server advertises the twenty-two page actions as discrete tools —
 `ping`, `navigateTo`, `getPageText`, `readPage`, `findElement`, `clickElement`,
 `typeText`, `captureTab`, `readConsoleMessages`, `readNetworkRequests`,
 `executeScript`, `evaluatePage`, `navigateBack`, `navigateForward`,
-`reloadTab`, `clickAt`, `hover`, `getTabState`, `scrollPage`, `waitFor` —
+`reloadTab`, `clickAt`, `hover`, `getTabState`, `scrollPage`, `waitFor`,
+`closeSandboxTab`, `sendKeys` —
 one clearly-described tool each (no `ext_command` umbrella tool, no enum arg).
 `captureTab` returns an MCP image block; every other tool returns text; a
 relay/extension failure comes back as an `isError` result, never a thrown
@@ -176,6 +177,30 @@ downward jump to the current bottom; always downward, no repeat count — call i
 again for more), and reports which mechanism actually moved the page in the
 result's `method` field (`wheel` | `script` | `none`) with the before/after
 `scrollY` and a best-effort `reachedEnd`.
+
+`sendKeys` types into the sandbox tab with trusted keyboard input through Chrome
+DevTools Protocol (`Input.insertText` / `Input.dispatchKeyEvent`), which the page
+cannot tell apart from a real keyboard. Use it where `typeText` does not work:
+`typeText` sets a value and dispatches untrusted synthetic events, which rich
+text editors (Slate, ProseMirror, Draft), autocomplete and command pickers, and
+key handlers ignore. One call runs these steps in order:
+1. focus the first element matching `selector` (optional — without it the keys go
+   to whatever the page already has focused);
+2. insert `text` at the caret (optional);
+3. press each key in `keys` (optional): `Enter`, `Tab`, `Escape`, `Backspace`,
+   `Delete`, `Space`, `ArrowUp`, `ArrowDown`, `ArrowLeft`, `ArrowRight`, `Home`,
+   `End`, `PageUp`, `PageDown` — at most 20 per call.
+
+At least one of `text` / `keys` is required. `delayMs` (default `150`, `0`–`2000`)
+is the pause after the text and after each key, so the page can react — open a
+picker, move a selection — before the next step. The result is
+`{ "focused": true | null, "textInserted": ..., "keysPressed": ... }`; a
+`selector` that matches nothing is an error and types nothing. The sandbox tab is
+unfocused and an unfocused page receives no key events, so focus emulation
+(`Emulation.setFocusEmulationEnabled`) is on for the duration of the call and
+restored before the debugger detaches. Page state survives between calls: a
+picker opened by one call is still open for the next. There are no modifier keys
+or key chords.
 
 `waitFor` is the settle primitive that replaces a hand-inserted delay between
 actions. It blocks until one of three page conditions holds in the sandbox tab and
