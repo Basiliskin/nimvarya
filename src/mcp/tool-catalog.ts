@@ -24,6 +24,28 @@ import { PAGE_ACTIONS } from "../protocol/actions.js";
 import type { PageAction } from "../protocol/actions.js";
 
 /**
+ * The key names `sendKeys` can press. Kept in step with the extension's
+ * `SEND_KEY_NAMES` by a unit test — the MCP server must not import extension
+ * code, which references the `chrome` types.
+ */
+export const SEND_KEYS_KEY_NAMES = [
+  "Enter",
+  "Tab",
+  "Escape",
+  "Backspace",
+  "Delete",
+  "Space",
+  "ArrowUp",
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "Home",
+  "End",
+  "PageUp",
+  "PageDown",
+] as const;
+
+/**
  * A JSON-Schema object description of one tool's arguments. The index signature
  * matches the SDK `Tool.inputSchema` catch-all so the catalog assigns cleanly to
  * `Tool[]` without a cast.
@@ -374,6 +396,40 @@ export const TOOL_CATALOG: Record<PageAction, ToolCatalogEntry> = {
           required: ["mode", "delayMs"],
         },
       ],
+    },
+  },
+  sendKeys: {
+    description:
+      "Type into the sandbox tab with trusted keyboard input via Chrome DevTools Protocol (`Input.insertText` / `Input.dispatchKeyEvent`), which the page cannot tell apart from a real keyboard. Use it where `typeText` does not work: rich text editors (Slate, ProseMirror, Draft), autocomplete and command pickers, and anything that reacts to Enter, Tab or the arrow keys. Steps run in this order: focus the first element matching `selector` (when given), insert `text` (when given), then press each key in `keys`, pausing `delayMs` after the text and after each key. At least one of `text` / `keys` is required. Without a `selector` the keys go to whatever the page already has focused. Returns `{ focused, textInserted, keysPressed }`; a `selector` that matches nothing is an error and types nothing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: {
+          type: "string",
+          description:
+            "CSS selector of the element to focus before typing. Optional — omit to type into the element that already has focus.",
+        },
+        text: {
+          type: "string",
+          description:
+            "Text to insert at the caret, as if typed. Optional when `keys` is given.",
+        },
+        keys: {
+          type: "array",
+          items: { type: "string", enum: [...SEND_KEYS_KEY_NAMES] },
+          maxItems: 20,
+          description:
+            "Keys to press one after another, after any `text`. Optional when `text` is given.",
+        },
+        delayMs: {
+          type: "integer",
+          minimum: 0,
+          maximum: 2000,
+          description:
+            "Milliseconds to pause after the text and after each key, so the page can react (e.g. open an autocomplete list) before the next step. Defaults to 150.",
+        },
+      },
+      additionalProperties: false,
     },
   },
   closeSandboxTab: {

@@ -2,7 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import { PAGE_ACTIONS } from "../protocol/actions.js";
 
-import { TOOL_CATALOG, listTools } from "./tool-catalog.js";
+import { SEND_KEY_NAMES } from "../extension/debugger-ports.js";
+
+import {
+  SEND_KEYS_KEY_NAMES,
+  TOOL_CATALOG,
+  listTools,
+} from "./tool-catalog.js";
 
 describe("TOOL_CATALOG", () => {
   it("has exactly one entry per PAGE_ACTIONS name", () => {
@@ -51,6 +57,7 @@ describe("listTools", () => {
     expect(required.get("getTabState")).toEqual([]);
     expect(required.get("scrollPage")).toEqual([]);
     expect(required.get("waitFor")).toEqual(["mode"]);
+    expect(required.get("sendKeys")).toEqual([]);
   });
 
   it("gives captureTab a strict schema with an optional mode enum (viewport|element|full-page) and an optional string elementRef, no required fields", () => {
@@ -99,8 +106,26 @@ describe("listTools", () => {
     }
   });
 
-  it("advertises exactly twenty-one tools", () => {
-    expect(listTools()).toHaveLength(21);
+  it("advertises exactly twenty-two tools", () => {
+    expect(listTools()).toHaveLength(22);
+  });
+
+  it("gives sendKeys a strict schema whose key enum is exactly the keys the extension can press", () => {
+    const schema = listTools().find((t) => t.name === "sendKeys")?.inputSchema;
+    expect(schema?.type).toBe("object");
+    expect(schema?.additionalProperties).toBe(false);
+    expect(schema?.required ?? []).toEqual([]);
+    const props = schema?.properties as Record<string, Record<string, unknown>>;
+    expect(Object.keys(props).sort()).toEqual([
+      "delayMs",
+      "keys",
+      "selector",
+      "text",
+    ]);
+    expect((props.keys?.items as { enum: string[] }).enum).toEqual([
+      ...SEND_KEY_NAMES,
+    ]);
+    expect([...SEND_KEYS_KEY_NAMES]).toEqual([...SEND_KEY_NAMES]);
   });
 
   it("gives waitFor a three-branch oneOf schema that is mode-exclusive and timeout-bounded", () => {

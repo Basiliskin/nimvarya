@@ -34,6 +34,14 @@ import type {
   DebuggerPorts,
   ScrollIntent,
   ScrollOutcome,
+  SendKeyName,
+  SendKeysIntent,
+} from "./debugger-ports.js";
+import {
+  SEND_KEYS_MAX_DELAY_MS,
+  SEND_KEYS_MAX_KEYS,
+  SEND_KEY_NAMES,
+  isSendKeyName,
 } from "./debugger-ports.js";
 import type { ChromePorts } from "./ports.js";
 import type { SandboxTabPorts } from "./sandbox-ports.js";
@@ -146,6 +154,67 @@ export const MAX_NETWORK_READ_RESULT_CHARS = 3_000_000;
  */
 const SCROLL_PARAM_ERROR =
   "scrollPage accepts an optional numeric amountPx and an optional boolean toBottom";
+
+/**
+ * Validate `sendKeys` params into a `SendKeysIntent`, or the `{ error }` a
+ * caller sees. Every field is optional but at least one of `text` / `keys` must
+ * carry something to type; an unknown key name is refused by name so the caller
+ * can correct it.
+ */
+export function resolveSendKeysParams(
+  params: unknown,
+): SendKeysIntent | { readonly error: string } {
+  if (!isRecord(params)) {
+    return { error: "sendKeys requires a text string, a keys array, or both" };
+  }
+  const selector = params["selector"];
+  const text = params["text"];
+  const keys = params["keys"];
+  const delayMs = params["delayMs"];
+  if (selector !== undefined && !nonEmptyString(selector)) {
+    return { error: "sendKeys selector must be a non-empty string" };
+  }
+  if (text !== undefined && typeof text !== "string") {
+    return { error: "sendKeys text must be a string" };
+  }
+  if (keys !== undefined && !Array.isArray(keys)) {
+    return { error: "sendKeys keys must be an array of key names" };
+  }
+  const names: SendKeyName[] = [];
+  for (const key of (keys ?? []) as readonly unknown[]) {
+    if (!isSendKeyName(key)) {
+      return {
+        error: `sendKeys cannot press ${JSON.stringify(key)}; the keys it can press are ${SEND_KEY_NAMES.join(", ")}`,
+      };
+    }
+    names.push(key);
+  }
+  if (names.length > SEND_KEYS_MAX_KEYS) {
+    return {
+      error: `sendKeys presses at most ${SEND_KEYS_MAX_KEYS} keys per call`,
+    };
+  }
+  if ((text === undefined || text === "") && names.length === 0) {
+    return { error: "sendKeys requires a text string, a keys array, or both" };
+  }
+  if (
+    delayMs !== undefined &&
+    (typeof delayMs !== "number" ||
+      !Number.isFinite(delayMs) ||
+      delayMs < 0 ||
+      delayMs > SEND_KEYS_MAX_DELAY_MS)
+  ) {
+    return {
+      error: `sendKeys delayMs must be a number from 0 to ${SEND_KEYS_MAX_DELAY_MS}`,
+    };
+  }
+  return {
+    ...(typeof selector === "string" ? { selector } : {}),
+    ...(typeof text === "string" ? { text } : {}),
+    ...(names.length > 0 ? { keys: names } : {}),
+    ...(typeof delayMs === "number" ? { delayMs } : {}),
+  };
+}
 
 /**
  * `chrome.tabs.goBack` / `goForward` reject when the tab has no history entry in
@@ -1346,6 +1415,27 @@ export function pageActionHandlers(
       return coerceScrollOutcome(outcome);
     },
 
+    sendKeys: async (params) => {
+      const intent = resolveSendKeysParams(params);
+      if ("error" in intent) return intent;
+      // Resolve the sandbox tab AFTER validating params, so bad input never
+      // touches (or creates) a tab.
+      const tabId = await sandboxTab.resolveTabId();
+      const outcome = await captureDebugger.sendKeys(tabId, intent);
+      if (outcome.focused === false) {
+        return {
+          error: `sendKeys found no element matching ${JSON.stringify(intent.selector)} to focus; nothing was typed`,
+        };
+      }
+      return {
+        result: {
+          focused: outcome.focused,
+          textInserted: outcome.textInserted,
+          keysPressed: outcome.keysPressed,
+        },
+      };
+    },
+
     waitFor: async (params) => {
       const parsed = resolveWaitForParams(params);
       if ("error" in parsed) return parsed;
@@ -1421,5 +1511,6 @@ export function pageActionHandlers(
     scrollPage: guard(raw.scrollPage),
     waitFor: guard(raw.waitFor),
     closeSandboxTab: guard(raw.closeSandboxTab),
+    sendKeys: guard(raw.sendKeys),
   };
 }

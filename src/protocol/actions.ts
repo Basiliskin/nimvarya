@@ -29,6 +29,7 @@ export const PAGE_ACTIONS = [
   "scrollPage",
   "waitFor",
   "closeSandboxTab",
+  "sendKeys",
 ] as const;
 
 export type PageAction = (typeof PAGE_ACTIONS)[number];

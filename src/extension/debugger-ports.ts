@@ -111,6 +111,97 @@ export interface ScrollOutcome {
   readonly reachedEnd: boolean;
 }
 
+/** Every key name `sendKeys` accepts, in a stable order for schemas and messages. */
+export const SEND_KEY_NAMES = [
+  "Enter",
+  "Tab",
+  "Escape",
+  "Backspace",
+  "Delete",
+  "Space",
+  "ArrowUp",
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "Home",
+  "End",
+  "PageUp",
+  "PageDown",
+] as const;
+
+/** A key `sendKeys` can press, by its `KeyboardEvent.code`-style name. */
+export type SendKeyName = (typeof SEND_KEY_NAMES)[number];
+
+/** The CDP `Input.dispatchKeyEvent` fields one key needs. */
+interface KeyDefinition {
+  readonly key: string;
+  readonly code: string;
+  readonly keyCode: number;
+  readonly text?: string;
+}
+
+/**
+ * The named keys `DebuggerPorts.sendKeys` can press. A key that produces a
+ * character (`Enter`, `Space`) carries `text`, so the key-down is sent as a
+ * `keyDown` that also fires `keypress`/`beforeinput`; the rest are sent as
+ * `rawKeyDown`, the way a real keyboard reports a non-printing key.
+ */
+const KEY_DEFINITIONS: Record<SendKeyName, KeyDefinition> = {
+  Enter: { key: "Enter", code: "Enter", keyCode: 13, text: "\r" },
+  Tab: { key: "Tab", code: "Tab", keyCode: 9 },
+  Escape: { key: "Escape", code: "Escape", keyCode: 27 },
+  Backspace: { key: "Backspace", code: "Backspace", keyCode: 8 },
+  Delete: { key: "Delete", code: "Delete", keyCode: 46 },
+  Space: { key: " ", code: "Space", keyCode: 32, text: " " },
+  ArrowUp: { key: "ArrowUp", code: "ArrowUp", keyCode: 38 },
+  ArrowDown: { key: "ArrowDown", code: "ArrowDown", keyCode: 40 },
+  ArrowLeft: { key: "ArrowLeft", code: "ArrowLeft", keyCode: 37 },
+  ArrowRight: { key: "ArrowRight", code: "ArrowRight", keyCode: 39 },
+  Home: { key: "Home", code: "Home", keyCode: 36 },
+  End: { key: "End", code: "End", keyCode: 35 },
+  PageUp: { key: "PageUp", code: "PageUp", keyCode: 33 },
+  PageDown: { key: "PageDown", code: "PageDown", keyCode: 34 },
+};
+
+/** Narrows an arbitrary value to a key `sendKeys` can press. */
+export function isSendKeyName(value: unknown): value is SendKeyName {
+  return (
+    typeof value === "string" && SEND_KEY_NAMES.some((name) => name === value)
+  );
+}
+
+/** Pause between `sendKeys` steps when the caller gives no `delayMs`. */
+export const SEND_KEYS_DEFAULT_DELAY_MS = 150;
+/** The longest pause between `sendKeys` steps a caller may ask for. */
+export const SEND_KEYS_MAX_DELAY_MS = 2000;
+/** The most keys one `sendKeys` call may press, so a call fits one CDP session. */
+export const SEND_KEYS_MAX_KEYS = 20;
+
+/**
+ * Keyboard intent for `DebuggerPorts.sendKeys`, applied in this order: focus
+ * `selector` (when given), insert `text` (when given), then press each of
+ * `keys`. `delayMs` is the pause after the text and after each key, so a page
+ * that reacts to typing (an autocomplete list) has settled before the next step.
+ */
+export interface SendKeysIntent {
+  readonly selector?: string;
+  readonly text?: string;
+  readonly keys?: readonly SendKeyName[];
+  readonly delayMs?: number;
+}
+
+/**
+ * The observable outcome of one `DebuggerPorts.sendKeys` call. `focused` is
+ * `true` when `selector` matched and was focused, `false` when it matched
+ * nothing (nothing is typed in that case), and `null` when no selector was
+ * given and the keys went to whatever the page already had focused.
+ */
+export interface SendKeysOutcome {
+  readonly focused: boolean | null;
+  readonly textInserted: boolean;
+  readonly keysPressed: number;
+}
+
 export interface DebuggerPorts {
   /**
    * Capture the given tab's current rendered viewport as a
@@ -179,6 +270,19 @@ export interface DebuggerPorts {
    * when neither moved the page.
    */
   scroll(tabId: number, intent: ScrollIntent): Promise<ScrollOutcome>;
+
+  /**
+   * Type into the given tab with trusted keyboard input via CDP
+   * (`Input.insertText` / `Input.dispatchKeyEvent`), which a page cannot tell
+   * apart from a real keyboard — unlike the untrusted synthetic events
+   * `typeText` dispatches, which rich editors and key handlers ignore. The
+   * sandbox tab is deliberately unfocused and an unfocused page receives no key
+   * events, so CDP focus emulation is enabled for the duration of the call and
+   * restored before the session detaches. A `selector` that matches nothing
+   * resolves to `focused: false` with nothing typed; an attach or CDP failure
+   * rejects.
+   */
+  sendKeys(tabId: number, intent: SendKeysIntent): Promise<SendKeysOutcome>;
 }
 
 /**
@@ -216,7 +320,12 @@ export function chromeCaptureDebuggerPorts(): DebuggerPorts {
    */
   async function withDebuggerSession<T>(
     tabId: number,
-    label: "capturing" | "capturing-full-page" | "evaluating" | "scrolling",
+    label:
+      | "capturing"
+      | "capturing-full-page"
+      | "evaluating"
+      | "scrolling"
+      | "sending keys",
     run: () => Promise<T>,
     timeoutMs = CDP_COMMAND_TIMEOUT_MS,
   ): Promise<T> {
@@ -531,7 +640,122 @@ export function chromeCaptureDebuggerPorts(): DebuggerPorts {
     }
   }
 
-  return { captureScreenshot, captureFullPageScreenshot, evaluate, scroll };
+  async function sendKeys(
+    tabId: number,
+    intent: SendKeysIntent,
+  ): Promise<SendKeysOutcome> {
+    return withDebuggerSession(tabId, "sending keys", async () => {
+      // An unfocused page gets no key events. Treat the sandbox tab as focused
+      // for this one call, then restore it in the finally below so the
+      // unfocused-tab invariant holds on every exit path.
+      await chrome.debugger.sendCommand(
+        { tabId },
+        "Emulation.setFocusEmulationEnabled",
+        { enabled: true },
+      );
+      try {
+        return await sendKeysTab(tabId, intent);
+      } finally {
+        await chrome.debugger
+          .sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", {
+            enabled: false,
+          })
+          .catch(() => {});
+      }
+    });
+  }
+
+  async function sendKeysTab(
+    tabId: number,
+    intent: SendKeysIntent,
+  ): Promise<SendKeysOutcome> {
+    const delayMs = intent.delayMs ?? SEND_KEYS_DEFAULT_DELAY_MS;
+    const pause = async (): Promise<void> => {
+      if (delayMs <= 0) return;
+      await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+        expression: `(async () => { await new Promise(r => setTimeout(r, ${delayMs})); })()`,
+        returnByValue: true,
+        awaitPromise: true,
+      });
+    };
+
+    let focused: boolean | null = null;
+    if (intent.selector !== undefined) {
+      const reply = await chrome.debugger.sendCommand(
+        { tabId },
+        "Runtime.evaluate",
+        {
+          expression: focusExpression(intent.selector),
+          returnByValue: true,
+          awaitPromise: true,
+        },
+      );
+      focused = readBooleanValue(reply);
+      if (!focused) {
+        return { focused: false, textInserted: false, keysPressed: 0 };
+      }
+    }
+
+    let textInserted = false;
+    if (intent.text !== undefined && intent.text !== "") {
+      await chrome.debugger.sendCommand({ tabId }, "Input.insertText", {
+        text: intent.text,
+      });
+      textInserted = true;
+      await pause();
+    }
+
+    let keysPressed = 0;
+    for (const name of intent.keys ?? []) {
+      const definition = KEY_DEFINITIONS[name];
+      const base = {
+        key: definition.key,
+        code: definition.code,
+        windowsVirtualKeyCode: definition.keyCode,
+        nativeVirtualKeyCode: definition.keyCode,
+      };
+      await chrome.debugger.sendCommand(
+        { tabId },
+        "Input.dispatchKeyEvent",
+        definition.text === undefined
+          ? { type: "rawKeyDown", ...base }
+          : { type: "keyDown", ...base, text: definition.text },
+      );
+      await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
+        type: "keyUp",
+        ...base,
+      });
+      keysPressed += 1;
+      await pause();
+    }
+
+    return { focused, textInserted, keysPressed };
+  }
+
+  return {
+    captureScreenshot,
+    captureFullPageScreenshot,
+    evaluate,
+    scroll,
+    sendKeys,
+  };
+}
+
+/**
+ * The `Runtime.evaluate` expression that focuses the first element matching
+ * `selector` and yields whether one matched. The selector is embedded as a JSON
+ * string literal, so it is only ever data to `querySelector`, never code; an
+ * invalid selector yields `false` rather than throwing.
+ */
+function focusExpression(selector: string): string {
+  return `(() => { try { const el = document.querySelector(${JSON.stringify(selector)}); if (!(el instanceof HTMLElement)) return false; el.focus(); return true; } catch { return false; } })()`;
+}
+
+/** Read a `Runtime.evaluate` reply's value as a strict boolean (`true` only). */
+function readBooleanValue(reply: unknown): boolean {
+  if (!isRecord(reply)) return false;
+  const result = isRecord(reply["result"]) ? reply["result"] : undefined;
+  return result !== undefined && result["value"] === true;
 }
 
 /**

@@ -23,7 +23,7 @@ It ships three parts:
   and captures page events, all on a deliberately-unfocused sandbox tab.
 - **Relay:** a local `ws` server, bound to `127.0.0.1`, that routes frames
   between the extension and any number of controllers.
-- **MCP server:** a stdio server exposing twenty page actions as discrete,
+- **MCP server:** a stdio server exposing twenty-two page actions as discrete,
   clearly-described tools — no umbrella command, no enum arg.
 - **Never-throw contract:** a relay/extension failure, an over-large result,
   or a not-found selector all come back as a structured result, never a

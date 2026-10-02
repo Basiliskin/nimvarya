@@ -6,6 +6,7 @@ import type {
   CaptureScreenshotOptions,
   DebuggerPorts,
   ScrollOutcome,
+  SendKeysOutcome,
 } from "./debugger-ports.js";
 import {
   DEFAULT_MAX_CHARS,
@@ -21,6 +22,7 @@ import {
   pageActionHandlers,
   resolveMaxChars,
   resolveReadLimit,
+  resolveSendKeysParams,
   resolveSince,
   resolveWaitForParams,
 } from "./page-actions.js";
@@ -148,6 +150,9 @@ function fakeDebugger(overrides: Partial<DebuggerPorts> = {}): DebuggerPorts {
         scrollYAfter: 0,
         reachedEnd: false,
       }),
+    ),
+    sendKeys: vi.fn((): Promise<SendKeysOutcome> =>
+      Promise.resolve({ focused: null, textInserted: false, keysPressed: 0 }),
     ),
   };
   for (const [key, impl] of Object.entries(overrides)) {
@@ -1547,6 +1552,7 @@ describe("pageActionHandlers — chrome port rejections become { error } outcome
     const debuggerPorts = fakeDebugger({
       captureScreenshot: rejecting,
       scroll: rejecting,
+      sendKeys: rejecting,
     });
     const h = pageActionHandlers(
       ports,
@@ -1565,6 +1571,7 @@ describe("pageActionHandlers — chrome port rejections become { error } outcome
       h.clickAt({ x: 1, y: 2 }),
       h.hover({ x: 1, y: 2 }),
       h.scrollPage({}),
+      h.sendKeys({ keys: ["Enter"] }),
     ]);
     for (const outcome of outcomes) {
       expect(outcome).toHaveProperty("error");
@@ -3084,5 +3091,113 @@ describe("resolveWaitForParams", () => {
       }),
     ).toHaveProperty("error");
     expect(resolveWaitForParams({ mode: "bogus" })).toHaveProperty("error");
+  });
+});
+
+describe("pageActionHandlers — sendKeys", () => {
+  it("focuses the selector, types the text and presses the keys on the sandbox tab", async () => {
+    const sandbox = fakeSandbox();
+    const debuggerPorts = fakeDebugger({
+      sendKeys: () =>
+        Promise.resolve({ focused: true, textInserted: true, keysPressed: 2 }),
+    });
+    const res = await pageActionHandlers(
+      fakePorts(),
+      sandbox,
+      debuggerPorts,
+      fakeStore(),
+    ).sendKeys({
+      selector: "[role=textbox]",
+      text: "/pool list",
+      keys: ["Enter", "Enter"],
+      delayMs: 400,
+    });
+    expect(res).toEqual({
+      result: { focused: true, textInserted: true, keysPressed: 2 },
+    });
+    expect(vi.mocked(debuggerPorts.sendKeys)).toHaveBeenCalledWith(7, {
+      selector: "[role=textbox]",
+      text: "/pool list",
+      keys: ["Enter", "Enter"],
+      delayMs: 400,
+    });
+  });
+
+  it("reports focused: null when keys go to the already-focused element", async () => {
+    const debuggerPorts = fakeDebugger({
+      sendKeys: () =>
+        Promise.resolve({ focused: null, textInserted: false, keysPressed: 1 }),
+    });
+    const res = await pageActionHandlers(
+      fakePorts(),
+      fakeSandbox(),
+      debuggerPorts,
+      fakeStore(),
+    ).sendKeys({ keys: ["Tab"] });
+    expect(res).toEqual({
+      result: { focused: null, textInserted: false, keysPressed: 1 },
+    });
+    expect(vi.mocked(debuggerPorts.sendKeys)).toHaveBeenCalledWith(7, {
+      keys: ["Tab"],
+    });
+  });
+
+  it("returns an error naming the selector when nothing matched it", async () => {
+    const debuggerPorts = fakeDebugger({
+      sendKeys: () =>
+        Promise.resolve({
+          focused: false,
+          textInserted: false,
+          keysPressed: 0,
+        }),
+    });
+    const res = await pageActionHandlers(
+      fakePorts(),
+      fakeSandbox(),
+      debuggerPorts,
+      fakeStore(),
+    ).sendKeys({ selector: "#missing", text: "hi" });
+    expect(res).toHaveProperty("error");
+    expect((res as { error: string }).error).toContain('"#missing"');
+    expect((res as { error: string }).error).toContain("nothing was typed");
+  });
+
+  it("rejects malformed params before any resolveTabId or sendKeys call", async () => {
+    const sandbox = fakeSandbox();
+    const debuggerPorts = fakeDebugger();
+    for (const bad of [
+      undefined,
+      {},
+      { text: "" },
+      { keys: [] },
+      { selector: "#a" },
+      { selector: "", text: "x" },
+      { text: 5 },
+      { keys: "Enter" },
+      { keys: ["Enter", "F13"] },
+      { keys: ["toString"] },
+      { keys: Array.from({ length: 21 }, () => "Tab") },
+      { text: "x", delayMs: -1 },
+      { text: "x", delayMs: 2001 },
+      { text: "x", delayMs: "100" },
+    ]) {
+      expect(
+        await pageActionHandlers(
+          fakePorts(),
+          sandbox,
+          debuggerPorts,
+          fakeStore(),
+        ).sendKeys(bad),
+      ).toHaveProperty("error");
+    }
+    expect(vi.mocked(sandbox.resolveTabId)).not.toHaveBeenCalled();
+    expect(vi.mocked(debuggerPorts.sendKeys)).not.toHaveBeenCalled();
+  });
+
+  it("names the unknown key and the keys it can press", () => {
+    const res = resolveSendKeysParams({ keys: ["Return"] });
+    expect(res).toHaveProperty("error");
+    expect((res as { error: string }).error).toContain('"Return"');
+    expect((res as { error: string }).error).toContain("Enter, Tab, Escape");
   });
 });

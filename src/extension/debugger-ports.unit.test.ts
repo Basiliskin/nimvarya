@@ -5,7 +5,10 @@ import type {
   ScrollIntent,
   ScrollOutcome,
 } from "./debugger-ports.js";
-import { chromeCaptureDebuggerPorts } from "./debugger-ports.js";
+import {
+  SEND_KEY_NAMES,
+  chromeCaptureDebuggerPorts,
+} from "./debugger-ports.js";
 import { MAX_EXECUTE_SCRIPT_RESULT_CHARS } from "./page-actions.js";
 
 /**
@@ -902,6 +905,155 @@ describe("chromeCaptureDebuggerPorts", () => {
       };
       expect(intent.amountPx).toBe(100);
       expect(outcome.method).toBe("script");
+    });
+  });
+
+  describe("sendKeys", () => {
+    /** A sendCommand stub: `focusFound` is what the focus evaluate reports. */
+    const install = (focusFound = true): StubControls =>
+      installStubDebugger((_target, method, params) => {
+        if (method === "Runtime.evaluate") {
+          const expression = (params as { expression: string }).expression;
+          if (expression.includes("querySelector")) {
+            return Promise.resolve({ result: { value: focusFound } });
+          }
+        }
+        return Promise.resolve({});
+      });
+
+    /** The `[method, params]` of every CDP command sent, in order. */
+    const sent = (spy: StubControls["sendCommandSpy"]): unknown[][] =>
+      spy.mock.calls.map((call: unknown[]): unknown[] => [call[1], call[2]]);
+
+    it("focuses the selector, inserts the text, then presses each key, under focus emulation", async () => {
+      const { attachSpy, detachSpy, sendCommandSpy } = install();
+      const ports: DebuggerPorts = chromeCaptureDebuggerPorts();
+
+      const outcome = await ports.sendKeys(7, {
+        selector: '[role="textbox"]',
+        text: "/pool list",
+        keys: ["Enter", "ArrowDown"],
+        delayMs: 0,
+      });
+
+      expect(outcome).toEqual({
+        focused: true,
+        textInserted: true,
+        keysPressed: 2,
+      });
+      const enter = {
+        key: "Enter",
+        code: "Enter",
+        windowsVirtualKeyCode: 13,
+        nativeVirtualKeyCode: 13,
+      };
+      const down = {
+        key: "ArrowDown",
+        code: "ArrowDown",
+        windowsVirtualKeyCode: 40,
+        nativeVirtualKeyCode: 40,
+      };
+      const calls = sent(sendCommandSpy);
+      expect(calls[0]).toEqual([
+        "Emulation.setFocusEmulationEnabled",
+        { enabled: true },
+      ]);
+      expect(calls[1]?.[0]).toBe("Runtime.evaluate");
+      // The selector is embedded as a JSON string literal, never as code.
+      expect((calls[1]?.[1] as { expression: string }).expression).toContain(
+        'document.querySelector("[role=\\"textbox\\"]")',
+      );
+      expect(calls.slice(2)).toEqual([
+        ["Input.insertText", { text: "/pool list" }],
+        ["Input.dispatchKeyEvent", { type: "keyDown", ...enter, text: "\r" }],
+        ["Input.dispatchKeyEvent", { type: "keyUp", ...enter }],
+        ["Input.dispatchKeyEvent", { type: "rawKeyDown", ...down }],
+        ["Input.dispatchKeyEvent", { type: "keyUp", ...down }],
+        ["Emulation.setFocusEmulationEnabled", { enabled: false }],
+      ]);
+      expect(attachSpy).toHaveBeenCalledTimes(1);
+      expect(detachSpy).toHaveBeenCalledWith({ tabId: 7 });
+    });
+
+    it("types nothing when the selector matches no element", async () => {
+      const { sendCommandSpy, detachSpy } = install(false);
+      const ports: DebuggerPorts = chromeCaptureDebuggerPorts();
+
+      const outcome = await ports.sendKeys(7, {
+        selector: "#missing",
+        text: "hi",
+        keys: ["Enter"],
+      });
+
+      expect(outcome).toEqual({
+        focused: false,
+        textInserted: false,
+        keysPressed: 0,
+      });
+      const methods = sent(sendCommandSpy).map((call) => call[0]);
+      expect(methods).not.toContain("Input.insertText");
+      expect(methods).not.toContain("Input.dispatchKeyEvent");
+      expect(methods.at(-1)).toBe("Emulation.setFocusEmulationEnabled");
+      expect(detachSpy).toHaveBeenCalledWith({ tabId: 7 });
+    });
+
+    it("without a selector sends the keys to the already-focused element and pauses after each step", async () => {
+      const { sendCommandSpy } = install();
+      const ports: DebuggerPorts = chromeCaptureDebuggerPorts();
+
+      const outcome = await ports.sendKeys(7, { text: "a", keys: ["Tab"] });
+
+      expect(outcome).toEqual({
+        focused: null,
+        textInserted: true,
+        keysPressed: 1,
+      });
+      const pauses = sent(sendCommandSpy).filter(
+        (call) =>
+          call[0] === "Runtime.evaluate" &&
+          (call[1] as { expression: string }).expression.includes(
+            "setTimeout(r, 150)",
+          ),
+      );
+      expect(pauses).toHaveLength(2);
+    });
+
+    it("restores focus emulation and detaches when a key dispatch fails", async () => {
+      const stub = installStubDebugger((_target, method) =>
+        method === "Input.dispatchKeyEvent"
+          ? Promise.reject(new Error("Cannot dispatch key"))
+          : Promise.resolve({}),
+      );
+      const ports: DebuggerPorts = chromeCaptureDebuggerPorts();
+
+      await expect(
+        ports.sendKeys(7, { keys: ["Enter"], delayMs: 0 }),
+      ).rejects.toThrow("Cannot dispatch key");
+
+      expect(stub.sendCommandSpy).toHaveBeenLastCalledWith(
+        { tabId: 7 },
+        "Emulation.setFocusEmulationEnabled",
+        { enabled: false },
+      );
+      expect(stub.detachSpy).toHaveBeenCalledWith({ tabId: 7 });
+    });
+
+    it("can press every advertised key", async () => {
+      const { sendCommandSpy } = install();
+      const ports: DebuggerPorts = chromeCaptureDebuggerPorts();
+
+      const outcome = await ports.sendKeys(7, {
+        keys: SEND_KEY_NAMES,
+        delayMs: 0,
+      });
+
+      expect(outcome.keysPressed).toBe(SEND_KEY_NAMES.length);
+      const downs = sent(sendCommandSpy).filter(
+        (call) =>
+          call[0] === "Input.dispatchKeyEvent" &&
+          (call[1] as { type: string }).type !== "keyUp",
+      );
+      expect(downs).toHaveLength(SEND_KEY_NAMES.length);
     });
   });
 });
