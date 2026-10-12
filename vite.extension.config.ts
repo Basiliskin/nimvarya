@@ -38,10 +38,12 @@ function copyManifestPlugin(): Plugin {
     name: "nimvarya:copy-manifest",
     closeBundle() {
       mkdirSync(`${root}dist/extension`, { recursive: true });
-      copyFileSync(
-        `${root}extension/manifest.json`,
-        `${root}dist/extension/manifest.json`,
-      );
+      for (const file of ["manifest.json", "sandbox.html"]) {
+        copyFileSync(
+          `${root}extension/${file}`,
+          `${root}dist/extension/${file}`,
+        );
+      }
     },
   };
 }

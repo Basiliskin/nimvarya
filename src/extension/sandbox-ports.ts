@@ -25,13 +25,43 @@ import type { CloseSandboxTabResult } from "../protocol/types.js";
 /** The key under which the sandbox tab's id is persisted in `chrome.storage.local`. */
 const SANDBOX_TAB_ID_KEY = "sandboxTabId";
 
+/**
+ * The page the sandbox tab opens on. A dedicated extension page rather than a
+ * blank New Tab, so a user glancing at the tab strip can tell the bridge's tab
+ * apart from a tab they opened themselves.
+ */
+export const SANDBOX_PAGE = "sandbox.html";
+
+/**
+ * Thrown by `requireTabId` when no live sandbox tab exists. Page actions that
+ * only read or act on an existing page must NOT silently spawn a tab: a user
+ * who closed the bridge's tab (or restarted Chrome) would otherwise see tabs
+ * reappear "by themselves" on the next action from any connected session.
+ */
+export class SandboxTabClosedError extends Error {
+  constructor() {
+    super(
+      "sandbox tab is not open — call navigateTo(url) first to open the bridge's tab",
+    );
+    this.name = "SandboxTabClosedError";
+  }
+}
+
 export interface SandboxTabPorts {
   /**
    * The id of the one dedicated sandbox tab, creating (or recreating) it when
    * it is missing or stale. Resolves to a positive tab id; throws when the tab
    * cannot be created (e.g. the extension lacks the `tabs` permission).
+   * Only `navigateTo` may use this — it is the single action allowed to open
+   * the tab. Every other action goes through `requireTabId`.
    */
   resolveTabId(): Promise<number>;
+
+  /**
+   * The id of the live sandbox tab, or a `SandboxTabClosedError` rejection when
+   * none exists. Never creates a tab.
+   */
+  requireTabId(): Promise<number>;
 
   /**
    * The id of the already-persisted sandbox tab, or `undefined` when none has
@@ -83,6 +113,14 @@ export function chromeSandboxTabPorts(): SandboxTabPorts {
     return inflightCreate;
   }
 
+  async function requireTabId(): Promise<number> {
+    const storedId = await readStoredTabId();
+    if (storedId !== undefined && (await isLiveTab(storedId))) {
+      return storedId;
+    }
+    throw new SandboxTabClosedError();
+  }
+
   async function peekStoredSandboxTabId(): Promise<number | undefined> {
     return readStoredTabId();
   }
@@ -104,7 +142,12 @@ export function chromeSandboxTabPorts(): SandboxTabPorts {
     return { closed: true, hadTab: true };
   }
 
-  return { resolveTabId, peekStoredSandboxTabId, closeSandboxTab };
+  return {
+    resolveTabId,
+    requireTabId,
+    peekStoredSandboxTabId,
+    closeSandboxTab,
+  };
 }
 
 async function readStoredTabId(): Promise<number | undefined> {
@@ -139,7 +182,10 @@ async function clearStoredTabId(): Promise<void> {
 async function createSandboxTab(): Promise<number> {
   // `active: false` is explicit and load-bearing: the sandbox tab must never
   // steal the user's focus, and the default for `active` is true.
-  const tab = await chrome.tabs.create({ active: false });
+  const tab = await chrome.tabs.create({
+    active: false,
+    url: chrome.runtime.getURL(SANDBOX_PAGE),
+  });
   const id = tab.id;
   if (id === undefined) {
     throw new Error("chrome.tabs.create returned a tab with no id");

@@ -2,8 +2,10 @@
  * The generic page-action handlers.
  *
  * Every handler resolves its target through the dedicated sandbox tab's
- * `sandboxTab.resolveTabId()`, so commands always act on one auto-created,
- * reused tab by tabId — not whatever the human happens to have focused
+ * `sandboxTab.requireTabId()`, so commands always act on one reused tab by
+ * tabId — not whatever the human happens to have focused. Only `navigateTo`
+ * calls `resolveTabId()`, which creates the tab when missing; every other
+ * action rejects with `SandboxTabClosedError` rather than spawning a tab
  * (`ports.queryActiveTab()` is gone from the resolve path). `captureTab` uses
  * the CDP debugger port (`captureDebugger.captureScreenshot`) so it can capture
  * the deliberately unfocused sandbox tab, which the window-scoped
@@ -932,7 +934,7 @@ export function pageActionHandlers(
       if (typeof since !== "number") return since;
       const limit = resolveReadLimit(rawParams["limit"]);
       if (typeof limit !== "number") return limit;
-      const tabId = await sandboxTab.resolveTabId();
+      const tabId = await sandboxTab.requireTabId();
       const query = { since, limit };
       const result =
         channel === "console"
@@ -971,7 +973,7 @@ export function pageActionHandlers(
       const maxChars = resolveMaxChars(
         isRecord(params) ? params["maxChars"] : undefined,
       );
-      const tabId = await sandboxTab.resolveTabId();
+      const tabId = await sandboxTab.requireTabId();
       const raw = await ports.executeScript(
         tabId,
         () => document.body.innerText,
@@ -985,7 +987,7 @@ export function pageActionHandlers(
       const maxChars = resolveMaxChars(
         isRecord(params) ? params["maxChars"] : undefined,
       );
-      const tabId = await sandboxTab.resolveTabId();
+      const tabId = await sandboxTab.requireTabId();
       const raw = await ports.executeScript(
         tabId,
         () => document.documentElement.outerHTML,
@@ -999,7 +1001,7 @@ export function pageActionHandlers(
       if (!isRecord(params) || !nonEmptyString(params["selector"])) {
         return { error: "findElement requires a non-empty selector string" };
       }
-      const tabId = await sandboxTab.resolveTabId();
+      const tabId = await sandboxTab.requireTabId();
       // Self-contained ISOLATED-world function. The two size limits arrive as
       // explicit args — chrome structured-clones the function ref, so module-
       // scoped captures cannot survive a structured-clone boundary, which is
@@ -1100,7 +1102,7 @@ export function pageActionHandlers(
       if (!isRecord(params) || !nonEmptyString(params["selector"])) {
         return { error: "clickElement requires a non-empty selector string" };
       }
-      const tabId = await sandboxTab.resolveTabId();
+      const tabId = await sandboxTab.requireTabId();
       const clicked = await ports.executeScript(
         tabId,
         (selector: string) => {
@@ -1130,7 +1132,7 @@ export function pageActionHandlers(
           error: "typeText requires a non-empty selector and a text string",
         };
       }
-      const tabId = await sandboxTab.resolveTabId();
+      const tabId = await sandboxTab.requireTabId();
       const typed = await ports.executeScript(
         tabId,
         (selector: string, text: string) => {
@@ -1168,7 +1170,7 @@ export function pageActionHandlers(
       // `tab-unavailable` outcome, not a rejection.
       let tabId: number;
       try {
-        tabId = await sandboxTab.resolveTabId();
+        tabId = await sandboxTab.requireTabId();
       } catch (error) {
         return { result: captureUnavailableOutcome(error) };
       }
@@ -1185,7 +1187,7 @@ export function pageActionHandlers(
     readNetworkRequests: readCapture("network"),
 
     navigateBack: async () => {
-      const tabId = await sandboxTab.resolveTabId();
+      const tabId = await sandboxTab.requireTabId();
       try {
         await ports.goBack(tabId);
       } catch {
@@ -1195,7 +1197,7 @@ export function pageActionHandlers(
     },
 
     navigateForward: async () => {
-      const tabId = await sandboxTab.resolveTabId();
+      const tabId = await sandboxTab.requireTabId();
       try {
         await ports.goForward(tabId);
       } catch {
@@ -1205,7 +1207,7 @@ export function pageActionHandlers(
     },
 
     reloadTab: async () => {
-      const tabId = await sandboxTab.resolveTabId();
+      const tabId = await sandboxTab.requireTabId();
       await ports.reload(tabId);
       return { result: { reloaded: true } };
     },
@@ -1214,7 +1216,7 @@ export function pageActionHandlers(
       if (!isRecord(params) || !nonEmptyString(params["code"])) {
         return { error: "executeScript requires a non-empty code string" };
       }
-      const tabId = await sandboxTab.resolveTabId();
+      const tabId = await sandboxTab.requireTabId();
       const outcome = await ports.executeScript(
         tabId,
         (code: string): InPageScriptOutcome => {
@@ -1270,7 +1272,7 @@ export function pageActionHandlers(
       if (!isRecord(params) || !nonEmptyString(params["code"])) {
         return { error: "evaluatePage requires a non-empty code string" };
       }
-      const tabId = await sandboxTab.resolveTabId();
+      const tabId = await sandboxTab.requireTabId();
       // CDP Runtime.evaluate is exempt from the page's CSP — the one path that
       // reads values on strict-CSP sites where the executeScript eval is blocked.
       const outcome = await captureDebugger.evaluate(tabId, params["code"]);
@@ -1285,7 +1287,7 @@ export function pageActionHandlers(
       if (typeof x !== "number") return x;
       const y = resolveCoordinate("clickAt", "y", params["y"]);
       if (typeof y !== "number") return y;
-      const tabId = await sandboxTab.resolveTabId();
+      const tabId = await sandboxTab.requireTabId();
       const raw = await ports.executeScript(
         tabId,
         (px: number, py: number) => {
@@ -1319,7 +1321,7 @@ export function pageActionHandlers(
       if (typeof x !== "number") return x;
       const y = resolveCoordinate("hover", "y", params["y"]);
       if (typeof y !== "number") return y;
-      const tabId = await sandboxTab.resolveTabId();
+      const tabId = await sandboxTab.requireTabId();
       const raw = await ports.executeScript(
         tabId,
         (px: number, py: number) => {
@@ -1403,7 +1405,7 @@ export function pageActionHandlers(
       // Resolve the sandbox tab AFTER validating params, so bad input never
       // touches (or creates) a tab. Omit un-supplied fields from the intent —
       // the port applies its own amountPx-default (2000) and toBottom semantics.
-      const tabId = await sandboxTab.resolveTabId();
+      const tabId = await sandboxTab.requireTabId();
       // Build the intent with only the supplied fields — the port applies its own
       // amountPx default (2000) and, when both are omitted, this is the empty
       // intent `{}`.
@@ -1420,7 +1422,7 @@ export function pageActionHandlers(
       if ("error" in intent) return intent;
       // Resolve the sandbox tab AFTER validating params, so bad input never
       // touches (or creates) a tab.
-      const tabId = await sandboxTab.resolveTabId();
+      const tabId = await sandboxTab.requireTabId();
       const outcome = await captureDebugger.sendKeys(tabId, intent);
       if (outcome.focused === false) {
         return {
@@ -1439,7 +1441,7 @@ export function pageActionHandlers(
     waitFor: async (params) => {
       const parsed = resolveWaitForParams(params);
       if ("error" in parsed) return parsed;
-      const tabId = await sandboxTab.resolveTabId();
+      const tabId = await sandboxTab.requireTabId();
       let condition: WaitCondition;
       if (parsed.mode === "selector-present") {
         const selector = parsed.selector;

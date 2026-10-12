@@ -104,14 +104,15 @@ function fakePorts(overrides: Partial<ChromePorts> = {}): ChromePorts {
 /**
  * A fake `SandboxTabPorts` resolving to the sandbox tab id `7` (matching the
  * `TAB.id` fake above, so most "forwards the resolved id" assertions read
- * naturally). Override `resolveTabId` to throw to exercise the resolver-failure
- * path, or to resolve to a different id.
+ * naturally). Override `requireTabId` (or `resolveTabId` for navigateTo) to throw to
+ * exercise the resolver-failure path, or to resolve to a different id.
  */
 function fakeSandbox(
   overrides: Partial<SandboxTabPorts> = {},
 ): SandboxTabPorts {
   const base: SandboxTabPorts = {
     resolveTabId: vi.fn((): Promise<number> => Promise.resolve(7)),
+    requireTabId: vi.fn((): Promise<number> => Promise.resolve(7)),
     peekStoredSandboxTabId: vi.fn((): Promise<number | undefined> =>
       Promise.resolve(7),
     ),
@@ -262,7 +263,7 @@ describe("pageActionHandlers — getPageText / readPage truncation", () => {
     ).toEqual({
       result: { text: "a".repeat(10), totalChars: 10, truncated: false },
     });
-    expect(vi.mocked(sandbox.resolveTabId)).toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).toHaveBeenCalled();
     expect(vi.mocked(ports.queryActiveTab)).not.toHaveBeenCalled();
     expect(vi.mocked(ports.executeScript)).toHaveBeenCalledWith(
       7,
@@ -305,7 +306,7 @@ describe("pageActionHandlers — getPageText / readPage truncation", () => {
         truncated: true,
       },
     });
-    expect(vi.mocked(sandbox.resolveTabId)).toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).toHaveBeenCalled();
     expect(vi.mocked(ports.queryActiveTab)).not.toHaveBeenCalled();
     expect(vi.mocked(ports.executeScript)).toHaveBeenCalledWith(
       7,
@@ -405,7 +406,7 @@ describe("pageActionHandlers — findElement", () => {
         truncated: false,
       },
     });
-    expect(vi.mocked(sandbox.resolveTabId)).toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).toHaveBeenCalled();
     expect(vi.mocked(ports.queryActiveTab)).not.toHaveBeenCalled();
     expect(vi.mocked(ports.executeScript)).toHaveBeenCalledWith(
       7,
@@ -786,7 +787,7 @@ describe("pageActionHandlers — clickElement / typeText", () => {
     ).toEqual({
       result: { clicked: true },
     });
-    expect(vi.mocked(sandbox.resolveTabId)).toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).toHaveBeenCalled();
     expect(vi.mocked(ports.queryActiveTab)).not.toHaveBeenCalled();
     expect(vi.mocked(ports.executeScript)).toHaveBeenCalledWith(
       7,
@@ -842,7 +843,7 @@ describe("pageActionHandlers — clickElement / typeText", () => {
         text: "hi",
       }),
     ).toEqual({ result: { typed: true } });
-    expect(vi.mocked(sandbox.resolveTabId)).toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).toHaveBeenCalled();
     expect(vi.mocked(ports.queryActiveTab)).not.toHaveBeenCalled();
     expect(vi.mocked(ports.executeScript)).toHaveBeenCalledWith(
       7,
@@ -911,7 +912,7 @@ describe("pageActionHandlers — captureTab", () => {
         attempts: 1,
       },
     });
-    expect(vi.mocked(sandbox.resolveTabId)).toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).toHaveBeenCalled();
     expect(vi.mocked(ports.queryActiveTab)).not.toHaveBeenCalled();
     expect(vi.mocked(ports.captureVisibleTab)).not.toHaveBeenCalled();
     expect(vi.mocked(debuggerPorts.captureScreenshot)).toHaveBeenCalledWith(7);
@@ -1359,7 +1360,7 @@ describe("pageActionHandlers — captureTab", () => {
         attempts: 1,
       },
     });
-    expect(vi.mocked(sandbox.resolveTabId)).toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).toHaveBeenCalled();
     expect(vi.mocked(ports.queryActiveTab)).not.toHaveBeenCalled();
     expect(vi.mocked(ports.captureVisibleTab)).not.toHaveBeenCalled();
     expect(
@@ -1453,7 +1454,7 @@ describe("pageActionHandlers — captureTab", () => {
       ).captureTab(bad);
       expect(res).toHaveProperty("error");
     }
-    expect(vi.mocked(sandbox.resolveTabId)).not.toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).not.toHaveBeenCalled();
     expect(vi.mocked(debuggerPorts.captureScreenshot)).not.toHaveBeenCalled();
   });
 
@@ -1499,7 +1500,7 @@ describe("pageActionHandlers — captureTab", () => {
   it("surfaces a resolver failure as a structured tab-unavailable outcome", async () => {
     const debuggerPorts = fakeDebugger();
     const sandbox = fakeSandbox({
-      resolveTabId: () =>
+      requireTabId: () =>
         Promise.reject(
           new Error("sandbox tab missing and could not be created"),
         ),
@@ -1631,7 +1632,7 @@ describe("pageActionHandlers — clickAt", () => {
       y: 20,
     });
     expect(res).toEqual({ result: { found: true, dispatched: 3 } });
-    expect(vi.mocked(sandbox.resolveTabId)).toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).toHaveBeenCalled();
     expect(vi.mocked(ports.queryActiveTab)).not.toHaveBeenCalled();
     expect(vi.mocked(ports.executeScript)).toHaveBeenCalledWith(
       7,
@@ -1783,7 +1784,7 @@ describe("pageActionHandlers — hover", () => {
       y: 20,
     });
     expect(res).toEqual({ result: { found: true, dispatched: 2 } });
-    expect(vi.mocked(sandbox.resolveTabId)).toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).toHaveBeenCalled();
     expect(vi.mocked(ports.queryActiveTab)).not.toHaveBeenCalled();
     expect(vi.mocked(ports.executeScript)).toHaveBeenCalledWith(
       7,
@@ -1903,7 +1904,7 @@ describe("pageActionHandlers — reloadTab", () => {
       fakeStore(),
     ).reloadTab({});
     expect(res).toEqual({ result: { reloaded: true } });
-    expect(vi.mocked(sandbox.resolveTabId)).toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).toHaveBeenCalled();
     expect(vi.mocked(ports.queryActiveTab)).not.toHaveBeenCalled();
     expect(vi.mocked(ports.reload)).toHaveBeenCalledWith(7);
     expect(vi.mocked(ports.updateTab)).not.toHaveBeenCalled();
@@ -1914,7 +1915,7 @@ describe("pageActionHandlers — reloadTab", () => {
   it("returns an error when the sandbox tab cannot be resolved (resolver throws)", async () => {
     const ports = fakePorts();
     const sandbox = fakeSandbox({
-      resolveTabId: () =>
+      requireTabId: () =>
         Promise.reject(
           new Error("sandbox tab missing and could not be created"),
         ),
@@ -1961,7 +1962,7 @@ describe("pageActionHandlers — executeScript", () => {
       code: "document.title",
     });
     expect(res).toEqual({ result: { value: { title: "hi" } } });
-    expect(vi.mocked(sandbox.resolveTabId)).toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).toHaveBeenCalled();
     expect(vi.mocked(ports.queryActiveTab)).not.toHaveBeenCalled();
     expect(vi.mocked(ports.executeScript)).toHaveBeenCalledWith(
       7,
@@ -2058,7 +2059,7 @@ describe("pageActionHandlers — executeScript", () => {
       executeScript: () => Promise.resolve({ ok: true, json: "1" }),
     });
     const sandbox = fakeSandbox({
-      resolveTabId: () =>
+      requireTabId: () =>
         Promise.reject(
           new Error("sandbox tab missing and could not be created"),
         ),
@@ -2127,7 +2128,7 @@ describe("pageActionHandlers — evaluatePage", () => {
       fakeStore(),
     ).evaluatePage({ code: "document.querySelector('h1')?.innerText" });
     expect(res).toEqual({ result: { value: "h1" } });
-    expect(vi.mocked(sandbox.resolveTabId)).toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).toHaveBeenCalled();
     expect(vi.mocked(ports.queryActiveTab)).not.toHaveBeenCalled();
     expect(vi.mocked(debuggerPorts.evaluate)).toHaveBeenCalledWith(
       7,
@@ -2206,7 +2207,7 @@ describe("pageActionHandlers — evaluatePage", () => {
   it("returns an error when the sandbox tab cannot be resolved (resolver throws)", async () => {
     const debuggerPorts = fakeDebugger();
     const sandbox = fakeSandbox({
-      resolveTabId: () =>
+      requireTabId: () =>
         Promise.reject(
           new Error("sandbox tab missing and could not be created"),
         ),
@@ -2250,12 +2251,12 @@ describe("pageActionHandlers — scrollPage", () => {
         reachedEnd: false,
       },
     });
-    expect(vi.mocked(sandbox.resolveTabId)).toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).toHaveBeenCalled();
     expect(vi.mocked(ports.queryActiveTab)).not.toHaveBeenCalled();
     expect(vi.mocked(debuggerPorts.scroll)).toHaveBeenCalledWith(7, {});
   });
 
-  it("rejects malformed params before any resolveTabId or scroll call", async () => {
+  it("rejects malformed params before any requireTabId or scroll call", async () => {
     const ports = fakePorts();
     const sandbox = fakeSandbox();
     const debuggerPorts = fakeDebugger();
@@ -2276,7 +2277,7 @@ describe("pageActionHandlers — scrollPage", () => {
         ).scrollPage(bad),
       ).toHaveProperty("error");
     }
-    expect(vi.mocked(sandbox.resolveTabId)).not.toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).not.toHaveBeenCalled();
     expect(vi.mocked(debuggerPorts.scroll)).not.toHaveBeenCalled();
   });
 
@@ -2332,7 +2333,7 @@ describe("pageActionHandlers — scrollPage", () => {
   it("returns an error when the sandbox tab cannot be resolved (resolver throws)", async () => {
     const debuggerPorts = fakeDebugger();
     const sandbox = fakeSandbox({
-      resolveTabId: () =>
+      requireTabId: () =>
         Promise.reject(
           new Error("sandbox tab missing and could not be created"),
         ),
@@ -2396,7 +2397,7 @@ describe("pageActionHandlers — navigateBack", () => {
       fakeStore(),
     ).navigateBack({});
     expect(res).toEqual({ result: { moved: true } });
-    expect(vi.mocked(sandbox.resolveTabId)).toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).toHaveBeenCalled();
     expect(vi.mocked(ports.queryActiveTab)).not.toHaveBeenCalled();
     expect(vi.mocked(ports.goBack)).toHaveBeenCalledWith(7);
   });
@@ -2420,7 +2421,7 @@ describe("pageActionHandlers — navigateBack", () => {
   it("returns an error when the sandbox tab cannot be resolved (resolver throws)", async () => {
     const ports = fakePorts();
     const sandbox = fakeSandbox({
-      resolveTabId: () =>
+      requireTabId: () =>
         Promise.reject(
           new Error("sandbox tab missing and could not be created"),
         ),
@@ -2448,7 +2449,7 @@ describe("pageActionHandlers — navigateForward", () => {
       fakeStore(),
     ).navigateForward({});
     expect(res).toEqual({ result: { moved: true } });
-    expect(vi.mocked(sandbox.resolveTabId)).toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).toHaveBeenCalled();
     expect(vi.mocked(ports.queryActiveTab)).not.toHaveBeenCalled();
     expect(vi.mocked(ports.goForward)).toHaveBeenCalledWith(7);
     expect(vi.mocked(ports.goBack)).not.toHaveBeenCalled();
@@ -2475,7 +2476,7 @@ describe("pageActionHandlers — navigateForward", () => {
   it("returns an error when the sandbox tab cannot be resolved (resolver throws)", async () => {
     const ports = fakePorts();
     const sandbox = fakeSandbox({
-      resolveTabId: () =>
+      requireTabId: () =>
         Promise.reject(
           new Error("sandbox tab missing and could not be created"),
         ),
@@ -2526,7 +2527,7 @@ describe("pageActionHandlers — readConsoleMessages / readNetworkRequests", () 
       limit: 9,
     });
     expect(res).toHaveProperty("result");
-    expect(vi.mocked(sandbox.resolveTabId)).toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).toHaveBeenCalled();
     expect(vi.mocked(ports.queryActiveTab)).not.toHaveBeenCalled();
     expect(vi.mocked(store.readConsole)).toHaveBeenCalledWith(7, {
       since: 2,
@@ -2544,7 +2545,7 @@ describe("pageActionHandlers — readConsoleMessages / readNetworkRequests", () 
       fakeDebugger(),
       store,
     ).readNetworkRequests({});
-    expect(vi.mocked(sandbox.resolveTabId)).toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).toHaveBeenCalled();
     expect(vi.mocked(store.readNetwork)).toHaveBeenCalledWith(7, {
       since: 0,
       limit: DEFAULT_READ_LIMIT,
@@ -2595,7 +2596,7 @@ describe("pageActionHandlers — readConsoleMessages / readNetworkRequests", () 
     const store = fakeStore();
     const ports = fakePorts();
     const sandbox = fakeSandbox({
-      resolveTabId: () =>
+      requireTabId: () =>
         Promise.reject(
           new Error("sandbox tab missing and could not be created"),
         ),
@@ -2793,7 +2794,7 @@ describe("pageActionHandlers — getTabState", () => {
       result: { sandboxTab: null, activeTab: null, sandboxTabActive: false },
     });
     expect(vi.mocked(sandbox.peekStoredSandboxTabId)).toHaveBeenCalled();
-    expect(vi.mocked(sandbox.resolveTabId)).not.toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).not.toHaveBeenCalled();
     expect(vi.mocked(ports.readTab)).not.toHaveBeenCalled();
     expect(vi.mocked(ports.activeTabOfWindow)).not.toHaveBeenCalled();
     assertReadOnly(ports);
@@ -2869,7 +2870,7 @@ describe("pageActionHandlers — getTabState", () => {
     expect(res).not.toEqual({
       result: { sandboxTab: null, activeTab: null, sandboxTabActive: false },
     });
-    expect(vi.mocked(sandbox.resolveTabId)).not.toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).not.toHaveBeenCalled();
     assertReadOnly(ports);
   });
 
@@ -2890,7 +2891,7 @@ describe("pageActionHandlers — getTabState", () => {
 describe("pageActionHandlers — closeSandboxTab", () => {
   /** The close action must not create, target, navigate, or otherwise touch any tab outside the sandbox port. */
   const assertNoTabTraffic = (ports: ChromePorts, sandbox: SandboxTabPorts) => {
-    expect(vi.mocked(sandbox.resolveTabId)).not.toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).not.toHaveBeenCalled();
     expect(vi.mocked(sandbox.peekStoredSandboxTabId)).not.toHaveBeenCalled();
     expect(vi.mocked(ports.queryActiveTab)).not.toHaveBeenCalled();
     expect(vi.mocked(ports.readTab)).not.toHaveBeenCalled();
@@ -2964,7 +2965,7 @@ describe("pageActionHandlers — waitFor", () => {
     expect(res).toEqual({
       result: { mode: "selector-present", met: true, elapsedMs: 0 },
     });
-    expect(vi.mocked(sandbox.resolveTabId)).toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).toHaveBeenCalled();
     expect(vi.mocked(ports.queryActiveTab)).not.toHaveBeenCalled();
     expect(vi.mocked(ports.executeScript)).toHaveBeenCalledWith(
       7,
@@ -3059,7 +3060,7 @@ describe("pageActionHandlers — waitFor", () => {
       const res = await h.waitFor(bad);
       expect(res).toHaveProperty("error");
     }
-    expect(vi.mocked(sandbox.resolveTabId)).not.toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).not.toHaveBeenCalled();
   });
 });
 
@@ -3162,7 +3163,7 @@ describe("pageActionHandlers — sendKeys", () => {
     expect((res as { error: string }).error).toContain("nothing was typed");
   });
 
-  it("rejects malformed params before any resolveTabId or sendKeys call", async () => {
+  it("rejects malformed params before any requireTabId or sendKeys call", async () => {
     const sandbox = fakeSandbox();
     const debuggerPorts = fakeDebugger();
     for (const bad of [
@@ -3190,7 +3191,7 @@ describe("pageActionHandlers — sendKeys", () => {
         ).sendKeys(bad),
       ).toHaveProperty("error");
     }
-    expect(vi.mocked(sandbox.resolveTabId)).not.toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).not.toHaveBeenCalled();
     expect(vi.mocked(debuggerPorts.sendKeys)).not.toHaveBeenCalled();
   });
 
@@ -3199,5 +3200,43 @@ describe("pageActionHandlers — sendKeys", () => {
     expect(res).toHaveProperty("error");
     expect((res as { error: string }).error).toContain('"Return"');
     expect((res as { error: string }).error).toContain("Enter, Tab, Escape");
+  });
+});
+
+describe("pageActionHandlers — only navigateTo may open the sandbox tab", () => {
+  it("read/act actions use requireTabId and never call the creating resolveTabId", async () => {
+    const ports = fakePorts({ executeScript: () => Promise.resolve("x") });
+    const sandbox = fakeSandbox();
+    const handlers = pageActionHandlers(
+      ports,
+      sandbox,
+      fakeDebugger(),
+      fakeStore(),
+    );
+    await handlers.getPageText({});
+    await handlers.readPage({});
+    await handlers.reloadTab({});
+    await handlers.navigateBack({});
+    await handlers.readConsoleMessages({});
+    expect(vi.mocked(sandbox.resolveTabId)).not.toHaveBeenCalled();
+    expect(vi.mocked(sandbox.requireTabId)).toHaveBeenCalledTimes(5);
+  });
+
+  it("surfaces a closed sandbox tab as an { error } that points at navigateTo", async () => {
+    const sandbox = fakeSandbox({
+      requireTabId: () =>
+        Promise.reject(
+          new Error("sandbox tab is not open — call navigateTo(url) first"),
+        ),
+    });
+    const outcome = await pageActionHandlers(
+      fakePorts(),
+      sandbox,
+      fakeDebugger(),
+      fakeStore(),
+    ).getPageText({});
+    expect(outcome).toHaveProperty("error");
+    expect((outcome as { error: string }).error).toMatch(/navigateTo/);
+    expect(vi.mocked(sandbox.resolveTabId)).not.toHaveBeenCalled();
   });
 });

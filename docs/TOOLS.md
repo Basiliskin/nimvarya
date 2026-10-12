@@ -229,8 +229,10 @@ has no later entry.
 page from the network; it takes no arguments.
 
 `closeSandboxTab` closes the dedicated sandbox tab — the single tab this bridge
-drives all page actions through — and clears its persisted id, so the next page
-action lazily recreates a fresh one. It is no-op-safe and never throws: it
+drives all page actions through — and clears its persisted id. Only `navigateTo`
+opens a new one (on the extension's own `sandbox.html` page, never a blank New
+Tab); every other action fails with "sandbox tab is not open — call navigateTo"
+instead of silently spawning a tab, so a tab the user closed stays closed. It is no-op-safe and never throws: it
 returns `{ closed: true, hadTab: true }` when a live sandbox tab was closed, or
 `{ closed: false, hadTab: false }` when there is no sandbox tab, the stored id
 points to an already-closed tab, or it is called twice in a row. It is scoped to

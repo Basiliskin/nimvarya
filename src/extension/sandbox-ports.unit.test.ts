@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { SandboxTabPorts } from "./sandbox-ports.js";
-import { chromeSandboxTabPorts } from "./sandbox-ports.js";
+import { SandboxTabClosedError, chromeSandboxTabPorts } from "./sandbox-ports.js";
 
 /**
  * `chromeSandboxTabPorts` is the production `SandboxTabPorts`; it only touches
@@ -11,8 +11,10 @@ import { chromeSandboxTabPorts } from "./sandbox-ports.js";
  */
 
 const SANDBOX_TAB_ID_KEY = "sandboxTabId";
+const SANDBOX_URL = "chrome-extension://stub/sandbox.html";
 
 interface StubChrome {
+  runtime: { getURL: (path: string) => string };
   storage: {
     local: {
       get: (key: string) => Promise<Record<string, unknown>>;
@@ -22,7 +24,7 @@ interface StubChrome {
   };
   tabs: {
     get: (tabId: number) => Promise<{ id?: number }>;
-    create: (props: { active?: boolean }) => Promise<{ id?: number }>;
+    create: (props: { active?: boolean; url?: string }) => Promise<{ id?: number }>;
     remove: (tabId: number) => Promise<void>;
   };
 }
@@ -58,6 +60,7 @@ function installStubChrome(): StubControls {
   const stub: StubChrome = {
     storage: { local: { get: getSpy, set: setSpy, remove: removeSpy } },
     tabs: { get: tabsGetSpy, create: createSpy, remove: tabsRemoveSpy },
+    runtime: { getURL: (path: string) => `chrome-extension://stub/${path}` },
   };
   vi.stubGlobal("chrome", stub);
   return {
@@ -100,7 +103,7 @@ describe("chromeSandboxTabPorts", () => {
     const id = await ports.resolveTabId();
 
     expect(createSpy).toHaveBeenCalledTimes(1);
-    expect(createSpy).toHaveBeenCalledWith({ active: false });
+    expect(createSpy).toHaveBeenCalledWith({ active: false, url: SANDBOX_URL });
     // The persisted value is a bare number under the same key the resolver reads.
     expect(storage.get(SANDBOX_TAB_ID_KEY)).toBe(id);
     expect(setSpy).toHaveBeenCalledWith({ [SANDBOX_TAB_ID_KEY]: id });
@@ -116,7 +119,7 @@ describe("chromeSandboxTabPorts", () => {
     const id = await ports.resolveTabId();
 
     expect(createSpy).toHaveBeenCalledTimes(1);
-    expect(createSpy).toHaveBeenCalledWith({ active: false });
+    expect(createSpy).toHaveBeenCalledWith({ active: false, url: SANDBOX_URL });
     expect(id).not.toBe(99);
     expect(storage.get(SANDBOX_TAB_ID_KEY)).toBe(id);
     expect(setSpy).toHaveBeenCalledWith({ [SANDBOX_TAB_ID_KEY]: id });
@@ -133,7 +136,7 @@ describe("chromeSandboxTabPorts", () => {
     const id = await ports.resolveTabId();
 
     expect(createSpy).toHaveBeenCalledTimes(1);
-    expect(createSpy).toHaveBeenCalledWith({ active: false });
+    expect(createSpy).toHaveBeenCalledWith({ active: false, url: SANDBOX_URL });
     expect(id).not.toBe(99);
     expect(storage.get(SANDBOX_TAB_ID_KEY)).toBe(id);
     expect(setSpy).toHaveBeenCalledWith({ [SANDBOX_TAB_ID_KEY]: id });
@@ -147,7 +150,7 @@ describe("chromeSandboxTabPorts", () => {
     const id = await ports.resolveTabId();
 
     expect(createSpy).toHaveBeenCalledTimes(1);
-    expect(createSpy).toHaveBeenCalledWith({ active: false });
+    expect(createSpy).toHaveBeenCalledWith({ active: false, url: SANDBOX_URL });
     expect(storage.get(SANDBOX_TAB_ID_KEY)).toBe(id);
     expect(setSpy).toHaveBeenCalled();
     expect(typeof id).toBe("number");
@@ -214,5 +217,37 @@ describe("chromeSandboxTabPorts", () => {
     expect(tabsRemoveSpy).toHaveBeenCalledWith(99);
     expect(removeSpy).toHaveBeenCalledWith(SANDBOX_TAB_ID_KEY);
     expect(storage.get(SANDBOX_TAB_ID_KEY)).toBeUndefined();
+  });
+});
+
+describe("chromeSandboxTabPorts.requireTabId", () => {
+  it("returns the stored live tab id without creating a tab", async () => {
+    const { storage, createSpy } = installStubChrome();
+    storage.set(SANDBOX_TAB_ID_KEY, 7);
+    const ports: SandboxTabPorts = chromeSandboxTabPorts();
+
+    await expect(ports.requireTabId()).resolves.toBe(7);
+    expect(createSpy).not.toHaveBeenCalled();
+  });
+
+  it("rejects with SandboxTabClosedError and never creates when storage is empty", async () => {
+    const { createSpy, setSpy } = installStubChrome();
+    const ports: SandboxTabPorts = chromeSandboxTabPorts();
+
+    await expect(ports.requireTabId()).rejects.toBeInstanceOf(
+      SandboxTabClosedError,
+    );
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(setSpy).not.toHaveBeenCalled();
+  });
+
+  it("rejects and never creates when the stored id points to a closed tab", async () => {
+    const { storage, createSpy, tabsGetSpy } = installStubChrome();
+    storage.set(SANDBOX_TAB_ID_KEY, 99);
+    tabsGetSpy.mockRejectedValue(new Error("No tab with id: 99."));
+    const ports: SandboxTabPorts = chromeSandboxTabPorts();
+
+    await expect(ports.requireTabId()).rejects.toThrow(/navigateTo/);
+    expect(createSpy).not.toHaveBeenCalled();
   });
 });

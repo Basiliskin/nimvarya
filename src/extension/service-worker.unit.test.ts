@@ -80,6 +80,7 @@ function fakePorts(): ChromePorts {
 function fakeSandboxTabPorts(): SandboxTabPorts {
   return {
     resolveTabId: () => Promise.resolve(1),
+    requireTabId: () => Promise.resolve(1),
     peekStoredSandboxTabId: () => Promise.resolve(1),
     closeSandboxTab: () => Promise.resolve({ closed: true, hadTab: true }),
   };
