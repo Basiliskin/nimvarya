@@ -142,6 +142,27 @@ describe("createCaptureStore — per-tab isolation and console/network routing",
     expect(windowed.nextSince).toBe(4);
     expect(windowed.truncated).toBe(true);
   });
+
+  it("reads only the requested console levels", () => {
+    const store = createCaptureStore();
+    for (const [text, level] of [
+      ["boot", "debug"],
+      ["boom", "error"],
+      ["hi", "info"],
+      ["careful", "warn"],
+    ] as const) {
+      store.ingest(7, {
+        ns: CAPTURE_NAMESPACE,
+        channel: "console",
+        entry: { ...consoleEntry(text), level },
+      });
+    }
+
+    const errors = store.readConsole(7, FULL, ["error", "warn"]);
+    expect(errors.entries.map((e) => e.text)).toEqual(["boom", "careful"]);
+    expect(errors.nextSince).toBe(4);
+    expect(store.readConsole(7, FULL).entries).toHaveLength(4);
+  });
 });
 
 describe("createCaptureStore — eviction and unknown-tab reads", () => {

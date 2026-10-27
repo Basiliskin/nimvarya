@@ -22,6 +22,7 @@ import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 
 import { PAGE_ACTIONS } from "../protocol/actions.js";
 import type { PageAction } from "../protocol/actions.js";
+import { CONSOLE_LEVEL_NAMES } from "../protocol/capture.js";
 
 /**
  * The key names `sendKeys` can press. Kept in step with the extension's
@@ -271,10 +272,19 @@ export const TOOL_CATALOG: Record<PageAction, ToolCatalogEntry> = {
   },
   readConsoleMessages: {
     description:
-      "Return console messages (log/info/warn/error/debug and uncaught errors) captured from the active tab, oldest first. Reading never deletes entries: pass the returned `nextSince` back as `since` on the next call to get only newer messages. Buffers are per-tab, in memory in the extension, and are lost when the tab closes or the extension's service worker is suspended. An over-large result comes back as a structured too-large error, not a value.",
+      "Return console messages (log/info/warn/error/debug and uncaught errors) captured from the active tab, oldest first. Pass `levels` (e.g. [\"error\", \"uncaught\", \"warn\"]) to answer \"any errors?\" without paging through debug noise. Reading never deletes entries: pass the returned `nextSince` back as `since` on the next call to get only newer messages. Buffers are per-tab, in memory in the extension, and are lost when the tab closes or the extension's service worker is suspended. An over-large result comes back as a structured too-large error, not a value.",
     inputSchema: {
       type: "object",
-      properties: { ...SINCE_LIMIT_PROPERTIES },
+      properties: {
+        ...SINCE_LIMIT_PROPERTIES,
+        levels: {
+          type: "array",
+          minItems: 1,
+          items: { type: "string", enum: [...CONSOLE_LEVEL_NAMES] },
+          description:
+            "Only return messages at these levels. Omit for every level. `limit` counts matching messages only, and `nextSince` still moves past the ones skipped.",
+        },
+      },
       additionalProperties: false,
     },
   },

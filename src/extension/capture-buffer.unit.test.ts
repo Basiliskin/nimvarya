@@ -92,6 +92,43 @@ describe("read — since/limit window arithmetic", () => {
   });
 });
 
+describe("read — accept filter", () => {
+  const vowel = (e: Msg): boolean => /^[aeiou]$/u.test(e.text);
+
+  it("returns only accepted entries and moves nextSince past the skipped tail", () => {
+    const ring = createCaptureRing<Msg>(10);
+    for (const t of ["a", "b", "c", "e", "f", "g"]) ring.push(msg(t));
+
+    const r = ring.read({ since: 0, limit: 100 }, vowel);
+    expect(r.entries.map((e) => e.text)).toEqual(["a", "e"]);
+    expect(r.nextSince).toBe(6);
+    expect(r.truncated).toBe(false);
+  });
+
+  it("counts only accepted entries toward limit and stops nextSince at the last one returned", () => {
+    const ring = createCaptureRing<Msg>(10);
+    for (const t of ["a", "b", "e", "c", "i", "d"]) ring.push(msg(t));
+
+    const r = ring.read({ since: 0, limit: 2 }, vowel);
+    expect(r.entries.map((e) => e.seq)).toEqual([1, 3]);
+    expect(r.nextSince).toBe(3);
+    expect(r.truncated).toBe(true);
+    const rest = ring.read({ since: r.nextSince, limit: 2 }, vowel);
+    expect(rest.entries.map((e) => e.text)).toEqual(["i"]);
+    expect(rest.nextSince).toBe(6);
+  });
+
+  it("advances past a window where nothing is accepted", () => {
+    const ring = createCaptureRing<Msg>(10);
+    for (const t of ["b", "c", "d"]) ring.push(msg(t));
+
+    const r = ring.read({ since: 1, limit: 100 }, vowel);
+    expect(r.entries).toEqual([]);
+    expect(r.nextSince).toBe(3);
+    expect(r.truncated).toBe(false);
+  });
+});
+
 describe("read — wrap-around and the dropped flag", () => {
   it("keeps the newest N, drops the oldest, never reuses a seq", () => {
     const ring = createCaptureRing<Msg>(3);

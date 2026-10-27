@@ -43,7 +43,16 @@ export const MAX_CONSOLE_TEXT_BYTES = 8192;
 export const MAX_BODY_PREVIEW_BYTES = 4096;
 
 /** The console levels the page script captures, including uncaught errors. */
-type ConsoleLevel = "log" | "info" | "warn" | "error" | "debug" | "uncaught";
+export const CONSOLE_LEVEL_NAMES = [
+  "log",
+  "info",
+  "warn",
+  "error",
+  "debug",
+  "uncaught",
+] as const;
+
+export type ConsoleLevel = (typeof CONSOLE_LEVEL_NAMES)[number];
 
 /** One bounded console message as captured at capture time. */
 export interface ConsoleEntry {
@@ -100,20 +109,13 @@ export type CaptureEnvelope =
       readonly entry: NetworkEntry;
     };
 
-const CONSOLE_LEVELS: ReadonlySet<string> = new Set([
-  "log",
-  "info",
-  "warn",
-  "error",
-  "debug",
-  "uncaught",
-]);
+const CONSOLE_LEVELS: ReadonlySet<string> = new Set(CONSOLE_LEVEL_NAMES);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function isConsoleLevel(value: unknown): value is ConsoleLevel {
+export function isConsoleLevel(value: unknown): value is ConsoleLevel {
   return typeof value === "string" && CONSOLE_LEVELS.has(value);
 }
 

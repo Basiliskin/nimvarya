@@ -22,6 +22,8 @@
  */
 
 import type { PageAction } from "../protocol/actions.js";
+import { CONSOLE_LEVEL_NAMES, isConsoleLevel } from "../protocol/capture.js";
+import type { ConsoleLevel } from "../protocol/capture.js";
 import type {
   CaptureTabFailureResult,
   CaptureTabMode,
@@ -827,6 +829,22 @@ export function resolveReadLimit(raw: unknown): number | { error: string } {
   return { error: "`limit` must be a positive integer when provided" };
 }
 
+/**
+ * Validate a caller-supplied console `levels` filter. Optional; omitted means
+ * every level. A non-array, an empty array, or an unknown level is rejected.
+ */
+export function resolveConsoleLevels(
+  raw: unknown,
+): ReadonlyArray<ConsoleLevel> | undefined | { error: string } {
+  if (raw === undefined) return undefined;
+  if (Array.isArray(raw) && raw.length > 0 && raw.every(isConsoleLevel)) {
+    return raw;
+  }
+  return {
+    error: `\`levels\` must be a non-empty array of ${CONSOLE_LEVEL_NAMES.join(" | ")} when provided`,
+  };
+}
+
 /** Error a caller sees when `waitFor` params are malformed, matching the three-mode model. */
 const WAIT_PARAM_ERROR =
   'waitFor requires a mode of "selector-present" | "network-idle" | "fixed-delay"; selector-present also needs a selector, fixed-delay a delayMs';
@@ -934,12 +952,19 @@ export function pageActionHandlers(
       if (typeof since !== "number") return since;
       const limit = resolveReadLimit(rawParams["limit"]);
       if (typeof limit !== "number") return limit;
+      const levels =
+        channel === "console"
+          ? resolveConsoleLevels(rawParams["levels"])
+          : undefined;
+      if (levels !== undefined && "error" in levels) return levels;
       const tabId = await sandboxTab.requireTabId();
       const query = { since, limit };
       const result =
-        channel === "console"
-          ? captureStore.readConsole(tabId, query)
-          : captureStore.readNetwork(tabId, query);
+        channel === "network"
+          ? captureStore.readNetwork(tabId, query)
+          : levels === undefined
+            ? captureStore.readConsole(tabId, query)
+            : captureStore.readConsole(tabId, query, levels);
       // Byte-size guard, mirroring `coerceExecuteScriptOutcome`: measure the
       // whole serialised CaptureRead the count clamp already produced and, when
       // it exceeds the channel's ceiling, replace it with the shared non-throwing

@@ -23,6 +23,7 @@ import {
   resolveMaxChars,
   resolveReadLimit,
   resolveSendKeysParams,
+  resolveConsoleLevels,
   resolveSince,
   resolveWaitForParams,
 } from "./page-actions.js";
@@ -2502,6 +2503,16 @@ describe("resolveSince / resolveReadLimit", () => {
       expect(resolveSince(bad)).toHaveProperty("error");
     }
   });
+  it("resolveConsoleLevels is optional, accepts known levels, rejects the rest", () => {
+    expect(resolveConsoleLevels(undefined)).toBeUndefined();
+    expect(resolveConsoleLevels(["error", "uncaught"])).toEqual([
+      "error",
+      "uncaught",
+    ]);
+    for (const bad of [[], ["fatal"], ["error", 3], "error", null, {}]) {
+      expect(resolveConsoleLevels(bad)).toHaveProperty("error");
+    }
+  });
   it("resolveReadLimit defaults, clamps to the max, rejects the rest", () => {
     expect(resolveReadLimit(undefined)).toBe(DEFAULT_READ_LIMIT);
     expect(resolveReadLimit(10)).toBe(10);
@@ -2534,6 +2545,26 @@ describe("pageActionHandlers — readConsoleMessages / readNetworkRequests", () 
       limit: 9,
     });
     expect(vi.mocked(store.readNetwork)).not.toHaveBeenCalled();
+  });
+
+  it("forwards a levels filter to readConsole and rejects a bad one before the store", async () => {
+    const store = fakeStore();
+    const h = pageActionHandlers(
+      fakePorts(),
+      fakeSandbox(),
+      fakeDebugger(),
+      store,
+    );
+    await h.readConsoleMessages({ levels: ["error", "warn"] });
+    expect(vi.mocked(store.readConsole)).toHaveBeenCalledWith(
+      7,
+      { since: 0, limit: DEFAULT_READ_LIMIT },
+      ["error", "warn"],
+    );
+    expect(await h.readConsoleMessages({ levels: ["fatal"] })).toHaveProperty(
+      "error",
+    );
+    expect(vi.mocked(store.readConsole)).toHaveBeenCalledTimes(1);
   });
 
   it("readNetworkRequests hits readNetwork, not readConsole", async () => {

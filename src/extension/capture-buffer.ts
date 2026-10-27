@@ -63,8 +63,15 @@ export interface CaptureRead<T> {
 export interface CaptureRing<T> {
   /** Append an entry; returns the monotonic `seq` assigned to it. */
   push(entry: T): number;
-  /** Non-destructive window read; see {@link CaptureRead}. */
-  read(query: { since: number; limit: number }): CaptureRead<T>;
+  /**
+   * Non-destructive window read; see {@link CaptureRead}. With `accept`, only
+   * accepted entries count toward `limit`, and an untruncated read still moves
+   * `nextSince` past the entries it skipped.
+   */
+  read(
+    query: { since: number; limit: number },
+    accept?: (entry: T) => boolean,
+  ): CaptureRead<T>;
   /** Number of entries currently retained (never exceeds `maxEntries`). */
   size(): number;
   /** Drop every retained entry; does NOT rewind the `seq` counter. */
@@ -116,7 +123,10 @@ export function createCaptureRing<T extends object>(
       return counter;
     },
 
-    read(query: { since: number; limit: number }): CaptureRead<T> {
+    read(
+      query: { since: number; limit: number },
+      accept?: (entry: T) => boolean,
+    ): CaptureRead<T> {
       const limit = normalizeLimit(query.limit);
       let since = normalizeSince(query.since);
 
@@ -128,12 +138,17 @@ export function createCaptureRing<T extends object>(
         since = 0;
       }
 
-      const matched = buf.filter((e) => e.seq > since);
+      const scanned = buf.filter((e) => e.seq > since);
+      const matched =
+        accept === undefined ? scanned : scanned.filter((e) => accept(e));
       const entries = matched.slice(0, limit);
       const truncated = matched.length > entries.length;
 
       const lastReturned = entries[entries.length - 1];
-      const nextSince = lastReturned === undefined ? since : lastReturned.seq;
+      const lastScanned = scanned[scanned.length - 1];
+      const nextSince = truncated
+        ? (lastReturned?.seq ?? since)
+        : (lastScanned?.seq ?? since);
 
       const oldestRetained = buf[0];
       const dropped =

@@ -35,6 +35,7 @@ import {
 import type {
   CaptureEnvelope,
   ConsoleEntry,
+  ConsoleLevel,
   NetworkEntry,
 } from "../protocol/capture.js";
 import { createCaptureRing } from "./capture-buffer.js";
@@ -62,8 +63,12 @@ interface TabRings {
 export interface CaptureStore {
   /** Route one validated envelope into the sending tab's matching ring. */
   ingest(tabId: number, envelope: CaptureEnvelope): void;
-  /** Non-destructive window read of a tab's console ring. */
-  readConsole(tabId: number, query: CaptureQuery): CaptureRead<ConsoleEntry>;
+  /** Non-destructive window read of a tab's console ring, optionally only `levels`. */
+  readConsole(
+    tabId: number,
+    query: CaptureQuery,
+    levels?: ReadonlyArray<ConsoleLevel>,
+  ): CaptureRead<ConsoleEntry>;
   /** Non-destructive window read of a tab's network ring. */
   readNetwork(tabId: number, query: CaptureQuery): CaptureRead<NetworkEntry>;
   /** Free both of a tab's rings; safe to call for a tab with no buffers. */
@@ -130,10 +135,13 @@ export function createCaptureStore(maxEntries?: number): CaptureStore {
       }
     },
 
-    readConsole(tabId, query) {
+    readConsole(tabId, query, levels) {
       const rings = tabs.get(tabId);
       if (rings === undefined) return emptyRead<ConsoleEntry>();
-      return rings.console.read(query);
+      if (levels === undefined) return rings.console.read(query);
+      return rings.console.read(query, (entry) =>
+        levels.includes(entry.level),
+      );
     },
 
     readNetwork(tabId, query) {

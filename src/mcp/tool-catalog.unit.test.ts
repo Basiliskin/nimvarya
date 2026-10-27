@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { PAGE_ACTIONS } from "../protocol/actions.js";
+import { CONSOLE_LEVEL_NAMES } from "../protocol/capture.js";
 
 import { SEND_KEY_NAMES } from "../extension/debugger-ports.js";
 
@@ -243,9 +244,22 @@ describe("readConsoleMessages / readNetworkRequests schemas", () => {
   });
 
   it("both share the identical since/limit property block byte-for-byte", () => {
-    const a = TOOL_CATALOG.readConsoleMessages.inputSchema.properties;
+    const { levels, ...a } =
+      TOOL_CATALOG.readConsoleMessages.inputSchema.properties;
     const b = TOOL_CATALOG.readNetworkRequests.inputSchema.properties;
     expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+    expect(levels).toBeDefined();
+  });
+
+  it("lets readConsoleMessages filter by every captured console level", () => {
+    const levels = (
+      TOOL_CATALOG.readConsoleMessages.inputSchema.properties as Record<
+        string,
+        { type?: string; items?: { enum?: readonly string[] } }
+      >
+    ).levels;
+    expect(levels?.type).toBe("array");
+    expect(levels?.items?.enum).toEqual([...CONSOLE_LEVEL_NAMES]);
   });
 
   it("both descriptions mention the too-large/oversize behavior", () => {
