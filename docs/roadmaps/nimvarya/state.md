@@ -44,3 +44,4 @@
 - 2026-11-18 | horizon 18 | planned | 5 phases (probe Gemini read route, readImage debugger port, saveImage parity 22->23, MCP image writer + server branch, live Gemini save); full path technical; gate passed 1 — see horizon-18 roadmap.md
 - 2026-11-18 | horizon 18 | replanned | revise-phases, 1 phase replaced + 3 amended — probe showed in-page fetch fails on Gemini; img now read via CDP Page.getResourceContent
 h18 phase 2 add-image-reader-debugger-port done 2026-11-18 (9/10/10/10/10): DebuggerPorts.readImage via Page.getResourceContent (img) / toBlob (canvas), 25MB cap; next: phase 3.
+- 2026-11-18 | horizon 18 | completed | 5 phases, 3 amendments, 0 overrides — saveImage live-verified on Gemini (revoked blob: img read via Page.getResourceContent); commit cef3149

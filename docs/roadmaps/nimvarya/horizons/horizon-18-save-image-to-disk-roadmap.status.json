@@ -2,7 +2,7 @@
   "roadmapFile": "docs/roadmaps/nimvarya/horizons/horizon-18-save-image-to-disk-roadmap.json",
   "roadmapTask": "Add a saveImage tool: given a selector for an <img> (or canvas) in the sandbox tab, read its full-resolution bytes in the page via CDP (works for blob: URLs), send them through the relay, and have the MCP server write them to an absolute path the caller gives; return only {path, bytes, width, height, mimeType}. No downloads permission. Live-verify by saving a generated image from gemini.google.com.",
   "createdAt": "2026-11-18T15:57:22Z",
-  "updatedAt": "2026-11-18T16:45:02Z",
+  "updatedAt": "2026-11-18T16:46:29Z",
   "roadmapRevision": 1,
   "phases": [
     {
@@ -279,7 +279,7 @@
     },
     {
       "phaseId": "live-verify-saveimage-on-gemini",
-      "status": "awaiting-verification",
+      "status": "done",
       "attempts": 3,
       "compensationInvoked": false,
       "amendments": [
@@ -326,7 +326,7 @@
           }
         }
       ],
-      "notes": "Amended by h18 REPLAN 2026-11-18 (contract wording for the getResourceContent route; see amendments). | 2026-11-18T16:30:18Z execute attempt 1: blocked before any live call; tree already dirty with uncommitted h18 phase 1-4 work (src/*, docs/*); no files changed by this attempt. | 2026-11-18T16:31:55Z execute --retry attempt 2 started in a fresh session (saveImage present in catalog). | 2026-11-18T16:37:13Z attempt 2: blocked again; relay stale (see failures). No VERIFICATION.md change. | 2026-11-18T16:41:21Z execute --retry attempt 3 started; relay restarted by user (pid 36565, 18:40) | 2026-11-18T16:43:23Z attempt 3: all live checks passed on the probe conversation; files changed by this attempt: docs/VERIFICATION.md (new dated saveImage section), docs/roadmaps/nimvarya/discoveries.md (1 line). Contract deviation (no amendment budget left, horizon at 3/3): Gemini no longer renders an https lh3 <img> copy, so the https-copy step ran on the first blob: img; the blob: step ran on the second blob: img and succeeded (revoked blob read via getResourceContent). Recorded in VERIFICATION.md.",
+      "notes": "Amended by h18 REPLAN 2026-11-18 (contract wording for the getResourceContent route; see amendments). | 2026-11-18T16:30:18Z execute attempt 1: blocked before any live call; tree already dirty with uncommitted h18 phase 1-4 work (src/*, docs/*); no files changed by this attempt. | 2026-11-18T16:31:55Z execute --retry attempt 2 started in a fresh session (saveImage present in catalog). | 2026-11-18T16:37:13Z attempt 2: blocked again; relay stale (see failures). No VERIFICATION.md change. | 2026-11-18T16:41:21Z execute --retry attempt 3 started; relay restarted by user (pid 36565, 18:40) | 2026-11-18T16:43:23Z attempt 3: all live checks passed on the probe conversation; files changed by this attempt: docs/VERIFICATION.md (new dated saveImage section), docs/roadmaps/nimvarya/discoveries.md (1 line). Contract deviation (no amendment budget left, horizon at 3/3): Gemini no longer renders an https lh3 <img> copy, so the https-copy step ran on the first blob: img; the blob: step ran on the second blob: img and succeeded (revoked blob read via getResourceContent). Recorded in VERIFICATION.md. | 2026-11-18T16:46:29Z attempt 3 done: first grade failed fresh-session-and-honest-status 8<9; healer added a timed main call; user chose to commit all h18 work (cef3149, branch h18-save-image, .mcp.json left out); re-graded that dimension only (9), others carried forward. No compensation defined.",
       "startedAt": "2026-11-18T16:41:21Z",
       "baseRef": "1859fb5a529ad4eb868e4637c8fb26949513968e",
       "baseDirty": true,
@@ -336,21 +336,27 @@
           "attempt": 1,
           "by": "execute",
           "kind": "gate",
-          "detail": "live MCP tool list lacks saveImage (stale catalog); live checks not run"
+          "detail": "live MCP tool list lacks saveImage (stale catalog); live checks not run",
+          "resolvedBy": "retry",
+          "resolution": "user reloaded the extension and restarted the relay (pid 36565); no code change"
         },
         {
           "at": "2026-11-18T16:33:30Z",
           "attempt": 2,
           "by": "execute",
           "kind": "gate",
-          "detail": "fresh MCP catalog has saveImage, but both live calls (https copy, and a selector matching nothing) timed out at 30000ms: the loaded extension predates saveImage and bridge-client drops unknown actions silently"
+          "detail": "fresh MCP catalog has saveImage, but both live calls (https copy, and a selector matching nothing) timed out at 30000ms: the loaded extension predates saveImage and bridge-client drops unknown actions silently",
+          "resolvedBy": "retry",
+          "resolution": "user reloaded the extension and restarted the relay (pid 36565); no code change"
         },
         {
           "at": "2026-11-18T16:37:13Z",
           "attempt": 2,
           "by": "execute",
           "kind": "gate",
-          "detail": "after extension reload, saveImage still timed out (https copy and a selector matching nothing): relay pid 5222 (tsx src/relay/main.ts, started 2026-11-13) runs pre-saveImage guards; isBridgeMessage→isCommand drops the action. Restart was denied by the auto-mode classifier."
+          "detail": "after extension reload, saveImage still timed out (https copy and a selector matching nothing): relay pid 5222 (tsx src/relay/main.ts, started 2026-11-13) runs pre-saveImage guards; isBridgeMessage→isCommand drops the action. Restart was denied by the auto-mode classifier.",
+          "resolvedBy": "retry",
+          "resolution": "user reloaded the extension and restarted the relay (pid 36565); no code change"
         },
         {
           "at": "2026-11-18T16:45:02Z",
@@ -360,13 +366,59 @@
           "dimensionIds": [
             "fresh-session-and-honest-status"
           ],
-          "detail": "fresh-session-and-honest-status 8 < minScore 9: VERIFICATION.md uncommitted (git log date Oct 2 < heading 2026-11-18); main call duration not measured (only a 261 ms bracket on the 2nd save). Others: 9,9,9,10."
+          "detail": "fresh-session-and-honest-status 8 < minScore 9: VERIFICATION.md uncommitted (git log date Oct 2 < heading 2026-11-18); main call duration not measured (only a 261 ms bracket on the 2nd save). Others: 9,9,9,10.",
+          "resolvedBy": "healer-fix",
+          "resolution": "timed the main save separately (<=6559 ms) and committed the section (cef3149); re-graded 9"
         }
       ],
       "gateRun": [
         "npm run verify: pass",
-        "npm run lint (g1): pass"
-      ]
+        "npm run lint (g1): pass",
+        "npm run verify (after healer): pass"
+      ],
+      "completedAt": "2026-11-18T16:46:29Z",
+      "gradeResult": {
+        "phaseId": "live-verify-saveimage-on-gemini",
+        "overallPass": true,
+        "dimensionScores": [
+          {
+            "dimensionId": "file-matches-returned-fields",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "stat/file/xxd/sips match returned fields and naturalWidth 1024x559; re-checked on disk by grader"
+          },
+          {
+            "dimensionId": "live-overwrite-and-path-refusal",
+            "score": 9,
+            "minScore": 8,
+            "passed": true,
+            "evidence": "exists refusal, stat %z %m identical before/after, relative path rejected and absent"
+          },
+          {
+            "dimensionId": "live-distinct-failures-no-write",
+            "score": 9,
+            "minScore": 7,
+            "passed": true,
+            "evidence": "element-not-found and not-image (SINGLE-IMAGE, DIV tagNames noted); ls shows only successful saves"
+          },
+          {
+            "dimensionId": "no-permission-drift",
+            "score": 10,
+            "minScore": 9,
+            "passed": true,
+            "evidence": "grep clean with exit status, empty manifest diff, permissions array pasted"
+          },
+          {
+            "dimensionId": "fresh-session-and-honest-status",
+            "score": 9,
+            "minScore": 9,
+            "passed": true,
+            "evidence": "re-graded after healer: 23 tools recorded, main call <=6559 ms, committed cef3149 on heading date"
+          }
+        ],
+        "summary": "Passed after one healer round; fresh-session-and-honest-status re-graded 8->9, other dimensions carried forward."
+      }
     }
   ]
 }

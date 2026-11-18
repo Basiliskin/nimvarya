@@ -2,7 +2,7 @@
   "roadmapFile": "docs/roadmaps/nimvarya/horizons/horizon-18-save-image-to-disk-roadmap.json",
   "roadmapTask": "Add a saveImage tool: given a selector for an <img> (or canvas) in the sandbox tab, read its full-resolution bytes in the page via CDP (works for blob: URLs), send them through the relay, and have the MCP server write them to an absolute path the caller gives; return only {path, bytes, width, height, mimeType}. No downloads permission. Live-verify by saving a generated image from gemini.google.com.",
   "createdAt": "2026-11-18T15:57:22Z",
-  "updatedAt": "2026-11-18T16:43:23Z",
+  "updatedAt": "2026-11-18T16:45:02Z",
   "roadmapRevision": 1,
   "phases": [
     {
@@ -351,7 +351,21 @@
           "by": "execute",
           "kind": "gate",
           "detail": "after extension reload, saveImage still timed out (https copy and a selector matching nothing): relay pid 5222 (tsx src/relay/main.ts, started 2026-11-13) runs pre-saveImage guards; isBridgeMessage→isCommand drops the action. Restart was denied by the auto-mode classifier."
+        },
+        {
+          "at": "2026-11-18T16:45:02Z",
+          "attempt": 3,
+          "by": "execute",
+          "kind": "grade",
+          "dimensionIds": [
+            "fresh-session-and-honest-status"
+          ],
+          "detail": "fresh-session-and-honest-status 8 < minScore 9: VERIFICATION.md uncommitted (git log date Oct 2 < heading 2026-11-18); main call duration not measured (only a 261 ms bracket on the 2nd save). Others: 9,9,9,10."
         }
+      ],
+      "gateRun": [
+        "npm run verify: pass",
+        "npm run lint (g1): pass"
       ]
     }
   ]
