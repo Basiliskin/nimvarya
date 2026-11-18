@@ -1,0 +1,372 @@
+{
+  "roadmapFile": "docs/roadmaps/nimvarya/horizons/horizon-18-save-image-to-disk-roadmap.json",
+  "roadmapTask": "Add a saveImage tool: given a selector for an <img> (or canvas) in the sandbox tab, read its full-resolution bytes in the page via CDP (works for blob: URLs), send them through the relay, and have the MCP server write them to an absolute path the caller gives; return only {path, bytes, width, height, mimeType}. No downloads permission. Live-verify by saving a generated image from gemini.google.com.",
+  "createdAt": "2026-11-18T15:57:22Z",
+  "updatedAt": "2026-11-18T16:45:02Z",
+  "roadmapRevision": 1,
+  "phases": [
+    {
+      "phaseId": "probe-gemini-image-read-route",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "startedAt": "2026-11-18T15:57:22Z",
+      "baseRef": "1859fb5a529ad4eb868e4637c8fb26949513968e",
+      "baseDirty": true,
+      "notes": "already dirty at start: .mcp.json, docs/roadmaps/nimvarya/{decisions,discoveries,state}.md, horizon-18 roadmap .json/.md. Changed: docs/probes/save-image-gemini-probe.md (new), docs/roadmaps/nimvarya/discoveries.md (+1 line; file was already dirty). Live probe on gemini conversation 0a0bbd749434f8d8 in the unfocused sandbox tab; fetch(currentSrc) fails on both https and blob copies → VERDICT: REPLAN Page.getResourceContent. Large-return timing measured with a scratch controller-client script outside the repo.",
+      "unplannedFiles": [],
+      "completedAt": "2026-11-18T16:01:16Z",
+      "gateRun": "npm run typecheck: pass; npm run lint (g1): pass; npm run test: pass; rubric grep/awk/git checks: pass",
+      "gradeResult": {
+        "phaseId": "probe-gemini-image-read-route",
+        "overallPass": true,
+        "dimensionScores": [
+          {
+            "dimensionId": "single-grep-checkable-verdict",
+            "score": 10,
+            "pass": true,
+            "evidence": "one VERDICT line, last line, names Page.getResourceContent + measured reasons"
+          },
+          {
+            "dimensionId": "live-measurements-recorded",
+            "score": 9,
+            "pass": true,
+            "evidence": "all 8 headings with units; raw return objects not quoted"
+          },
+          {
+            "dimensionId": "verdict-follows-evidence",
+            "score": 9,
+            "pass": true,
+            "evidence": "fetch failed on all 4 combos → REPLAN; recommended route itself unmeasured"
+          },
+          {
+            "dimensionId": "transfer-timing-vs-cdp-cap",
+            "score": 10,
+            "pass": true,
+            "evidence": "900k (55/46 ms) and real-size 284720 (25/10 ms) both vs 15000 ms"
+          },
+          {
+            "dimensionId": "probe-leaves-no-code-or-bytes",
+            "score": 10,
+            "pass": true,
+            "evidence": "no src diff; no line >500 chars; 0 data:image"
+          }
+        ]
+      }
+    },
+    {
+      "phaseId": "add-image-reader-debugger-port",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "notes": "Phase replaced by h18 REPLAN revision 1 (2026-11-18): route is now Page.getResourceContent for img; new rubric. Dirty at start: .mcp.json, docs/probes/, docs/roadmaps/nimvarya/* memory + horizon-18 files. Changed: src/protocol/types.ts, src/extension/debugger-ports.ts, src/extension/debugger-ports.unit.test.ts, src/extension/page-actions.unit.test.ts, src/extension/service-worker.unit.test.ts (all in filesAffected).",
+      "startedAt": "2026-11-18T16:11:23Z",
+      "baseRef": "1859fb5a529ad4eb868e4637c8fb26949513968e",
+      "baseDirty": true,
+      "implementedAt": "2026-11-18T16:14:02Z",
+      "unplannedFiles": [],
+      "completedAt": "2026-11-18T16:15:00Z",
+      "gateRun": "npm run typecheck: pass; npm run lint (g1): pass; npm run test: pass (427)",
+      "gradeResult": {
+        "phaseId": "add-image-reader-debugger-port",
+        "overallPass": true,
+        "dimensionScores": [
+          {
+            "dimensionId": "failure-reasons-distinct",
+            "score": 9,
+            "pass": true,
+            "evidence": "all 6 reasons exact; naturalHeight<=0 has no own test"
+          },
+          {
+            "dimensionId": "size-cap-before-relay",
+            "score": 10,
+            "pass": true,
+            "evidence": "private const; padding-aware; LIMIT/LIMIT+1 with ==/=; canvas cap before readAsDataURL"
+          },
+          {
+            "dimensionId": "resource-content-route",
+            "score": 10,
+            "pass": true,
+            "evidence": "exact params MAIN frame + currentSrc; call order; base64 unchanged; no mimeType; no fetch"
+          },
+          {
+            "dimensionId": "session-detached-every-path",
+            "score": 10,
+            "pass": true,
+            "evidence": "detach asserted in every test; attach once; fake-timer timeout with reading image label"
+          },
+          {
+            "dimensionId": "reply-guards-and-selector-encoding",
+            "score": 10,
+            "pass": true,
+            "evidence": "isRecord guards, no casts; malformed tests for probe/frameTree/resource/canvas; quote+backslash+</script> selector"
+          }
+        ]
+      }
+    },
+    {
+      "phaseId": "add-saveimage-page-action-parity",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "amendments": [
+        {
+          "at": "2026-11-18T16:10:13Z",
+          "by": "replan",
+          "reason": "The catalog description must state the new contract: the image as the page loaded it (not re-encoded, not the original upload), the 'unreadable' reason for <img>, and 'tainted' only for <canvas>. The phase's input must name the reader's new result shape.",
+          "grounding": "User decision (1) in the h18 REPLAN: the tool description must say 'the image as the page loaded it' and width/height = naturalWidth/naturalHeight. User decision (2): a failed read returns 'unreadable'. Discovery finding 'phase-2 contract conflicts': for img, 'tainted' becomes 'unreadable' and canvas keeps 'tainted'.",
+          "before": {
+            "inputs": [
+              "discovery: the four Record<PageAction,…> parity maps must land atomically with PAGE_ACTIONS",
+              "discovery: hard-coded length/order tests in actions.unit.test.ts:36 and tool-catalog.unit.test.ts:111",
+              "DebuggerPorts.readImage and ImageReadResult from the previous phase"
+            ],
+            "changes": [
+              "Append 'saveImage' after 'sendKeys' in PAGE_ACTIONS.",
+              "In types.ts, add SaveImageParams = { selector: string } (the wire command carries only the selector; page-actions.ts imports it type-only for the handler signature), add PageActionParams.saveImage, and add PageActionResults.saveImage = ImageReadResult.",
+              "In page-actions.ts, add a saveImage handler that validates selector as a non-empty string, resolves the sandbox tab with requireTabId, and returns debugger.readImage(tabId, selector). Register it in both the raw table and the guard()-wrapped return table, so a thrown error (for example a CDP timeout) becomes an { error } outcome.",
+              "In tool-catalog.ts, add the saveImage entry: inputSchema { selector: string, path: string (absolute), overwrite: boolean } with required ['selector','path'] and additionalProperties:false. The description states the result is only {path, bytes, width, height, mimeType}, the 25 MB limit, the overwrite refusal and every failure reason.",
+              "Bump actions.unit.test.ts to length 23 with saveImage last, bump tool-catalog.unit.test.ts listTools() to 23 with required.get('saveImage') equal to ['selector','path'], and add page-actions.unit.test.ts cases for a missing or empty selector, a delegated readImage result, and a thrown readImage becoming { error }.",
+              "Do not touch extension/manifest.json and do not reference chrome.downloads.",
+              "Do not rebuild/reload the MCP server or extension between this phase and the MCP image-writer phase: until the writer phase lands, saveImage would return raw base64 to the AI client, so the two phases ship together (no live session in between)."
+            ]
+          },
+          "after": {
+            "inputs": [
+              "discovery: the four Record<PageAction,…> parity maps must land atomically with PAGE_ACTIONS",
+              "discovery: hard-coded length/order tests in actions.unit.test.ts:36 and tool-catalog.unit.test.ts:111",
+              "DebuggerPorts.readImage and ImageReadResult from the previous phase (failure reasons element-not-found | not-image | not-loaded | tainted (canvas only) | unreadable (img only) | too-large; mimeType present only for canvas)",
+              "user decision (h18 REPLAN): <img> is saved as the bytes the page loaded, not re-encoded; width/height = naturalWidth/naturalHeight"
+            ],
+            "changes": [
+              "Append 'saveImage' after 'sendKeys' in PAGE_ACTIONS.",
+              "In types.ts, add SaveImageParams = { selector: string } (the wire command carries only the selector; page-actions.ts imports it type-only for the handler signature), add PageActionParams.saveImage, and add PageActionResults.saveImage = ImageReadResult.",
+              "In page-actions.ts, add a saveImage handler that validates selector as a non-empty string, resolves the sandbox tab with requireTabId, and returns debugger.readImage(tabId, selector). Register it in both the raw table and the guard()-wrapped return table, so a thrown error (for example a CDP timeout) becomes an { error } outcome.",
+              "In tool-catalog.ts, add the saveImage entry: inputSchema { selector: string, path: string (absolute), overwrite: boolean } with required ['selector','path'] and additionalProperties:false. The description says an <img> is saved as 'the image as the page loaded it': the exact resource file the page downloaded, not re-encoded and not necessarily the original upload's resolution. A <canvas> is saved as PNG. width/height are the natural (or canvas) pixel size. The description also states that the result is only {path, bytes, width, height, mimeType}, the 25 MB limit and the overwrite refusal, and it names every failure reason: element-not-found, not-image, not-loaded, tainted (canvas only), unreadable (img resource could not be read), too-large, plus relative path and existing file.",
+              "Bump actions.unit.test.ts to length 23 with saveImage last, bump tool-catalog.unit.test.ts listTools() to 23 with required.get('saveImage') equal to ['selector','path'], and add page-actions.unit.test.ts cases for a missing or empty selector, a delegated readImage result, and a thrown readImage becoming { error }.",
+              "Do not touch extension/manifest.json and do not reference chrome.downloads.",
+              "Do not rebuild/reload the MCP server or extension between this phase and the MCP image-writer phase: until the writer phase lands, saveImage would return raw base64 to the AI client, so the two phases ship together (no live session in between)."
+            ]
+          }
+        }
+      ],
+      "notes": "Amended by h18 REPLAN 2026-11-18 (contract wording for the getResourceContent route; see amendments). | Base dirty at start (uncommitted h18 phases 0-1 + memory): .mcp.json, docs/roadmaps/nimvarya/*.md, src/extension/debugger-ports.ts, src/extension/debugger-ports.unit.test.ts, src/extension/page-actions.unit.test.ts, src/extension/service-worker.unit.test.ts, src/protocol/types.ts, docs/probes/. | Implemented: src/protocol/actions.ts, src/protocol/actions.unit.test.ts, src/protocol/types.ts (already dirty; +SaveImageParams, +params/results keys), src/extension/page-actions.ts, src/extension/page-actions.unit.test.ts (already dirty; +saveImage describe block), src/mcp/tool-catalog.ts, src/mcp/tool-catalog.unit.test.ts. saveImage is the 23rd page action: resolveSaveImageParams keeps only a non-empty selector, the guard()-wrapped handler returns captureDebugger.readImage(requireTabId(), selector) unchanged; catalog entry {selector, path, overwrite?} strict, description per amended contract. npm run verify green (24 files/437 tests). | Graded by subagent: 9/10/10/10, all 10s carried above-the-bar evidence (no demotions). Compensation known: revert the PAGE_ACTIONS entry with all parity keys and test bumps together; not invoked.",
+      "startedAt": "2026-11-18T16:15:56Z",
+      "baseRef": "1859fb5a529ad4eb868e4637c8fb26949513968e",
+      "baseDirty": true,
+      "unplannedFiles": [],
+      "completedAt": "2026-11-18T16:19:19Z",
+      "gradeResult": {
+        "phaseId": "add-saveimage-page-action-parity",
+        "dimensionScores": [
+          {
+            "dimensionId": "action-list-23-saveimage-last",
+            "score": 9,
+            "pass": true,
+            "evidence": "Both test files pass; actions.unit.test.ts asserts the full ordered 23-tuple plus [21]=sendKeys and last=saveImage; tool-catalog test asserts length 23, slice(-2)=['sendKeys','saveImage'], required saveImage=['selector','path']. Not 10: catalog test checks only last two names."
+          },
+          {
+            "dimensionId": "catalog-schema-strict",
+            "score": 10,
+            "pass": true,
+            "evidence": "Strict schema (selector/path string, overwrite boolean, required ['selector','path'], additionalProperties false); description names result fields, 25 MB, absolute, overwrite, all six reasons incl. unreadable. Above 9: test pins each property type and loops over all six reasons."
+          },
+          {
+            "dimensionId": "handler-validates-and-wraps-errors",
+            "score": 10,
+            "pass": true,
+            "evidence": "page-actions.ts handler validates via resolveSaveImageParams, uses requireTabId, registered as guard(raw.saveImage). Tests cover undefined/''/42 with readImage and requireTabId 0 calls, identity delegation, CDP timeout -> {error}. Above 9: also asserts tab never resolved on bad input and failed read passes through as result."
+          },
+          {
+            "dimensionId": "wire-and-permission-minimal",
+            "score": 10,
+            "pass": true,
+            "evidence": "SaveImageParams = {selector} only; manifest unchanged; no chrome.downloads. Above 9: test sends path/overwrite and asserts readImage called with exactly (7,'img')."
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": [
+        "npm run verify (tsc --noEmit, eslint --max-warnings 0, vitest run; covers repoGuards g1+g2): pass"
+      ]
+    },
+    {
+      "phaseId": "add-mcp-image-writer-and-saveimage-branch",
+      "status": "done",
+      "attempts": 1,
+      "compensationInvoked": false,
+      "amendments": [
+        {
+          "at": "2026-11-18T16:10:13Z",
+          "by": "replan",
+          "reason": "The server branch's guard, tests and docs must handle the reader's new 'unreadable' reason and a success payload that has no page-reported mimeType for <img> (Page.getResourceContent returns none). The sniffed type is then the only source for img. TOOLS.md must also use the 'as the page loaded it' wording.",
+          "grounding": "Discovery finding 'dimensions/mime helpers': getResourceContent returns no mimeType, so mimeType comes from magic-byte sniffing. Discovery finding 'protocol types': add an 'unreadable' reason. User decision (1): 'the image as the page loaded it'. Binding decision h18: mimeType sniffed from magic bytes.",
+          "before": {
+            "changes": [
+              "Create src/mcp/image-writer.ts with writeImageFile(path, bytes, overwrite) using node:fs/promises open with flag 'wx' (or 'w' only when overwrite is true). It returns { written: true, bytes } or a refusal { written: false, reason: 'exists' | 'parent-missing' | 'io-error', message } and never creates directories. Also add sniffMimeType(bytes) for PNG, JPEG, WebP and GIF magic numbers.",
+              "In image-writer.unit.test.ts, use fs.mkdtemp to test: a fresh write; an existing file without overwrite is refused with its bytes and mtime unchanged; overwrite:true replaces the file; a missing parent directory gives 'parent-missing'; each sniffed format; unknown bytes.",
+              "Add imageWriter to McpServerDeps and wire the real writer in main.ts (defaultMcpMainDeps/runMcpServer).",
+              "In server.ts, add a toolName === 'saveImage' branch. Reject a non-string or non-absolute path (path.isAbsolute) with isError before calling the client. Send only { selector }. Narrow the response with a private isImageReadResult guard. Map read:false to an isError JSON result carrying the reason (plus size and limit for too-large). Decode base64 with Buffer.from, let the sniffed MIME type win over the page-reported type, write through the writer, map a refusal to isError, and on success return text JSON with exactly {path, bytes, width, height, mimeType}, with no image block and no base64.",
+              "In server.unit.test.ts, use a fake writer and a fake client to test: relative path rejected and client never called; path/overwrite stripped from the forwarded params; success result keys exactly equal to the five fields; bytes equal to the decoded length; every read failure reason; 'exists' refusal; sniffed type overriding the page type.",
+              "Change 'twenty-two' to 'twenty-three' in README.md and docs/TOOLS.md, add saveImage to TOOLS.md's name list, and add a '## saveImage' section to TOOLS.md describing parameters, result and failure outcomes.",
+              "Add a one-line link in README.md to docs/VERIFICATION.md for live-verification records (the saveImage section itself is added by the live-verify phase)."
+            ]
+          },
+          "after": {
+            "changes": [
+              "Create src/mcp/image-writer.ts with writeImageFile(path, bytes, overwrite) using node:fs/promises open with flag 'wx' (or 'w' only when overwrite is true). It returns { written: true, bytes } or a refusal { written: false, reason: 'exists' | 'parent-missing' | 'io-error', message } and never creates directories. Also add sniffMimeType(bytes) for PNG, JPEG, WebP and GIF magic numbers.",
+              "In image-writer.unit.test.ts, use fs.mkdtemp to test: a fresh write; an existing file without overwrite is refused with its bytes and mtime unchanged; overwrite:true replaces the file; a missing parent directory gives 'parent-missing'; each sniffed format; unknown bytes.",
+              "Add imageWriter to McpServerDeps and wire the real writer in main.ts (defaultMcpMainDeps/runMcpServer).",
+              "In server.ts, add a toolName === 'saveImage' branch. Reject a non-string or non-absolute path (path.isAbsolute) with isError before calling the client. Send only { selector }. Narrow the response with a private isImageReadResult guard that accepts the six read failure reasons (element-not-found, not-image, not-loaded, tainted, unreadable, too-large) and a success whose mimeType is optional (an <img> read via Page.getResourceContent carries none). Map read:false to an isError JSON result carrying the reason (plus size and limit for too-large). Decode base64 with Buffer.from and set mimeType from sniffMimeType. The sniffed type always wins. If sniffing finds no known format, use the page-reported type when one exists, otherwise 'application/octet-stream'. Write through the writer, map a refusal to isError, and on success return text JSON with exactly {path, bytes, width, height, mimeType}, with no image block and no base64.",
+              "In server.unit.test.ts, use a fake writer and a fake client to test: relative path rejected and client never called; path/overwrite stripped from the forwarded params; success result keys exactly equal to the five fields; bytes equal to the decoded length; every read failure reason including 'unreadable'; 'exists' refusal; sniffed type overriding the page type; an img success with no page mimeType getting its type from the sniffed WebP bytes.",
+              "Change 'twenty-two' to 'twenty-three' in README.md and docs/TOOLS.md, add saveImage to TOOLS.md's name list, and add a '## saveImage' section to TOOLS.md. The section describes parameters, the result and failure outcomes, and states that an <img> is saved as 'the image as the page loaded it' (the downloaded resource file, not re-encoded, not necessarily the original upload's resolution), that a <canvas> is saved as PNG, that 'tainted' applies to canvas only, and that 'unreadable' means the img's loaded resource could not be read.",
+              "Add a one-line link in README.md to docs/VERIFICATION.md for live-verification records (the saveImage section itself is added by the live-verify phase)."
+            ]
+          }
+        }
+      ],
+      "notes": "Amended by h18 REPLAN 2026-11-18 (contract wording for the getResourceContent route; see amendments). | Base dirty at start: .mcp.json docs/roadmaps/nimvarya/blockers.md docs/roadmaps/nimvarya/decisions.md docs/roadmaps/nimvarya/discoveries.md docs/roadmaps/nimvarya/state.md src/extension/debugger-ports.ts src/extension/debugger-ports.unit.test.ts src/extension/page-actions.ts src/extension/page-actions.unit.test.ts src/extension/service-worker.unit.test.ts src/mcp/tool-catalog.ts src/mcp/tool-catalog.unit.test.ts src/protocol/actions.ts src/protocol/actions.unit.test.ts src/protocol/types.ts docs/probes/ docs/roadmaps/nimvarya/horizons/horizon-18-save-image-to-disk-roadmap.json docs/roadmaps/nimvarya/horizons/horizon-18-save-image-to-disk-roadmap.md docs/roadmaps/nimvarya/horizons/horizon-18-save-image-to-disk-roadmap.rev0.json docs/roadmaps/nimvarya/horizons/horizon-18-save-image-to-disk-roadmap.status.json docs/roadmaps/nimvarya/horizons/horizon-18-save-image-to-disk-roadmap.status.last_good.json  | Implemented: src/mcp/image-writer.ts (new: writeImageFile 'wx'/'w' exclusive create, EEXIST→exists, ENOENT/ENOTDIR→parent-missing, else io-error, unlinks a partial file it created; sniffMimeType PNG/JPEG/GIF/WebP), src/mcp/image-writer.unit.test.ts (new, mkdtemp; includes concurrent-write test), src/mcp/server.ts (McpServerDeps.imageWriter; handleSaveImage: isAbsolute gate before client, forwards only {selector}, isImageReadResult guard, failures as isError JSON {saved:false, reason,...}; success exactly {path,bytes,width,height,mimeType}, mime = sniffed ?? page ?? application/octet-stream), src/mcp/server.unit.test.ts, src/mcp/main.ts (runMcpServer wires writeImageFile), README.md + docs/TOOLS.md (twenty-three, saveImage in name list, section headed '## `saveImage`' with backticks to match the file's other tool headings). README already linked docs/VERIFICATION.md (line ~91), so no new link was added. A prettier run briefly requoted one unrelated tool-catalog.ts string; reverted, tool-catalog.ts not touched by this phase. unplannedFiles: none. | Compensation known: revert server branch, McpServerDeps.imageWriter, main.ts wiring, image-writer files; not needed.",
+      "startedAt": "2026-11-18T16:20:46Z",
+      "baseRef": "1859fb5a529ad4eb868e4637c8fb26949513968e",
+      "baseDirty": true,
+      "unplannedFiles": [],
+      "completedAt": "2026-11-18T16:24:48Z",
+      "gradeResult": {
+        "phaseId": "add-mcp-image-writer-and-saveimage-branch",
+        "dimensionScores": [
+          {
+            "dimensionId": "exclusive-create-no-clobber",
+            "score": 10,
+            "pass": true,
+            "evidence": "open(path, overwrite?'w':'wx'), no existence check; EEXIST→exists distinct from io-error; bytes+mtime unchanged test. 10 over 9: concurrent Promise.all test yields exactly one written + one exists, and a partial file is unlinked on write failure."
+          },
+          {
+            "dimensionId": "path-gate-before-transfer",
+            "score": 10,
+            "pass": true,
+            "evidence": "isAbsolute gate before sendCommand; only {selector} forwarded. 10 over 9: it.each covers 'out.png', '', '~/x.png', 42, undefined with zero client and writer calls, plus deep-equality of forwarded params."
+          },
+          {
+            "dimensionId": "result-contract-exact",
+            "score": 10,
+            "pass": true,
+            "evidence": "Result built explicitly with five keys, bytes from decoded Buffer; tests check key set, single text block, no base64. 10 over 9: writer test asserts stat size == bytes; PNG labelled image/jpeg → image/png; fallback chain tested."
+          },
+          {
+            "dimensionId": "failure-outcomes-distinct",
+            "score": 10,
+            "pass": true,
+            "evidence": "Guard accepts all six reasons; each failure is isError JSON with its reason; too-large carries size and limit 26214400. 10 over 9: table covers every read reason and every writer refusal with zero writes, plus unexpected-payload, {error} and rejected send."
+          },
+          {
+            "dimensionId": "fs-behind-writer-seam",
+            "score": 10,
+            "pass": true,
+            "evidence": "node:fs only in image-writer.ts; server.ts uses deps.imageWriter; main.ts wires writeImageFile; no node: imports in extension/protocol. 10 over 9: all server saveImage tests use a vi.fn fake writer and touch no disk."
+          },
+          {
+            "dimensionId": "user-docs-reflect-23-tools",
+            "score": 9,
+            "pass": true,
+            "evidence": "twenty-three in both files; one '## `saveImage`' heading (backtick style of the file); params, five fields, all failure reasons, binding wording present; README links VERIFICATION.md. Not 10: example result but no example call."
+          }
+        ],
+        "overallPass": true
+      },
+      "gateRun": [
+        "npm run verify (tsc --noEmit, eslint . --max-warnings 0 [g1], vitest run [g2]): pass"
+      ]
+    },
+    {
+      "phaseId": "live-verify-saveimage-on-gemini",
+      "status": "awaiting-verification",
+      "attempts": 3,
+      "compensationInvoked": false,
+      "amendments": [
+        {
+          "at": "2026-11-18T16:10:13Z",
+          "by": "replan",
+          "reason": "This phase is the first live run of Page.getResourceContent on Gemini, so it must target the https (lh3) copy whose currentSrc is the resource the <img> itself loaded, record what the revoked blob: copy returns, and check the saved file against the page-loaded resource, not the original upload.",
+          "grounding": "Probe report 'Selector'/'Src scheme': two copies, https lh3 (=s1024-rw) and a revoked blob:. Probe 'Real image size': displayed resource 101620 bytes image/webp 1024x559. Discovery finding 'getResourceContent on blob:/fetch-initiated resources' (unknown; live check needed). User decisions (1) and (2).",
+          "before": {
+            "inputs": [
+              "EXTERNAL: Live signed-in Chrome with the rebuilt nimvarya extension, the relay, and a fresh Claude Code MCP session",
+              "EXTERNAL: a gemini.google.com conversation in the sandbox tab showing a generated image",
+              "docs/probes/save-image-gemini-probe.md (selector and src scheme)"
+            ],
+            "changes": [
+              "Rebuild, reload the extension, and start a fresh Claude Code MCP session so the 23-tool catalog is live (this avoids the stale-catalog and stale-service-worker stall seen in h7/h9/h11).",
+              "Put the sandbox tab on gemini.google.com showing a generated image, and call saveImage with the probe's selector and an absolute path in a temp directory. Record the returned {path, bytes, width, height, mimeType} and the call duration.",
+              "Check the file from the shell: stat size equals bytes, the `file` command type or magic number matches mimeType, and the decoded pixel dimensions (sips -g pixelWidth -g pixelHeight) equal width/height and the in-page naturalWidth/naturalHeight from evaluatePage.",
+              "Call saveImage again with the same path and no overwrite. Confirm it is refused and that the file's size and mtime are unchanged. Also confirm a relative path is rejected.",
+              "Call saveImage once with a selector that matches nothing and once on a non-image element (e.g. a div) on the same Gemini page; record that each returns its own distinct isError reason ('element-not-found', 'not-image') and writes no file.",
+              "Run grep -rn 'downloads' extension/manifest.json src (excluding tests). Confirm there are no hits and that the manifest permissions list is unchanged.",
+              "Add a dated '## `saveImage` on gemini.google.com (YYYY-MM-DD)' section to docs/VERIFICATION.md with the selector, src scheme, returned fields, shell checks and the refusal result.",
+              "If any check fails (for example a timeout on a near-cap image), leave the phase blocked as MANUAL_CHROME_CHECK_PENDING and record the failure rather than marking it done."
+            ]
+          },
+          "after": {
+            "inputs": [
+              "EXTERNAL: Live signed-in Chrome with the rebuilt nimvarya extension, the relay, and a fresh Claude Code MCP session",
+              "EXTERNAL: a gemini.google.com conversation in the sandbox tab showing a generated image",
+              "docs/probes/save-image-gemini-probe.md (selectors for the https and blob: copies, src schemes, displayed-resource size 101620 bytes image/webp 1024x559)",
+              "user decision (h18 REPLAN): an <img> is saved as the resource the page loaded, read via CDP Page.getResourceContent; an unreadable resource returns 'unreadable'"
+            ],
+            "changes": [
+              "Rebuild, reload the extension, and start a fresh Claude Code MCP session so the 23-tool catalog is live (this avoids the stale-catalog and stale-service-worker stall seen in h7/h9/h11).",
+              "Put the sandbox tab on gemini.google.com showing a generated image. Call saveImage with the https-copy selector `generated-image single-image img.image[src^=\"https:\"]` (whose currentSrc is the lh3 resource the <img> itself loaded) and an absolute path in a temp directory. Record the returned {path, bytes, width, height, mimeType} and the call duration. This is the first live run of Page.getResourceContent.",
+              "Check the file from the shell: stat size equals bytes, the `file` command type or magic number matches mimeType, and the decoded pixel dimensions (sips -g pixelWidth -g pixelHeight) equal width/height and the in-page naturalWidth/naturalHeight from evaluatePage. On the probe conversation, expect the displayed resource: about 101620 bytes, image/webp, 1024x559.",
+              "Call saveImage on the blob: copy (`generated-image single-image img.image[src^=\"blob:\"]`) with a second absolute path. Record the outcome. 'unreadable' (revoked blob:) is an accepted, defined result that writes no file. A success must pass the same shell checks.",
+              "Call saveImage again with the first path and no overwrite. Confirm it is refused and that the file's size and mtime are unchanged. Also confirm a relative path is rejected.",
+              "Call saveImage once with a selector that matches nothing and once on a non-image element (e.g. a div) on the same Gemini page; record that each returns its own distinct isError reason ('element-not-found', 'not-image') and writes no file.",
+              "Run grep -rn 'downloads' extension/manifest.json src (excluding tests). Confirm there are no hits and that the manifest permissions list is unchanged.",
+              "Add a dated '## `saveImage` on gemini.google.com (YYYY-MM-DD)' section to docs/VERIFICATION.md. It records the selectors, the src schemes, the read route (Page.getResourceContent for img), the returned fields, the shell checks, the blob:-copy outcome and the refusal result.",
+              "If any check fails, leave the phase blocked as MANUAL_CHROME_CHECK_PENDING and record the failure rather than marking it done. This includes 'unreadable' on the https copy (getResourceContent could not read the img's own resource) and a timeout on a near-cap image. An 'unreadable' on the https copy is replan evidence about the read route."
+            ]
+          }
+        }
+      ],
+      "notes": "Amended by h18 REPLAN 2026-11-18 (contract wording for the getResourceContent route; see amendments). | 2026-11-18T16:30:18Z execute attempt 1: blocked before any live call; tree already dirty with uncommitted h18 phase 1-4 work (src/*, docs/*); no files changed by this attempt. | 2026-11-18T16:31:55Z execute --retry attempt 2 started in a fresh session (saveImage present in catalog). | 2026-11-18T16:37:13Z attempt 2: blocked again; relay stale (see failures). No VERIFICATION.md change. | 2026-11-18T16:41:21Z execute --retry attempt 3 started; relay restarted by user (pid 36565, 18:40) | 2026-11-18T16:43:23Z attempt 3: all live checks passed on the probe conversation; files changed by this attempt: docs/VERIFICATION.md (new dated saveImage section), docs/roadmaps/nimvarya/discoveries.md (1 line). Contract deviation (no amendment budget left, horizon at 3/3): Gemini no longer renders an https lh3 <img> copy, so the https-copy step ran on the first blob: img; the blob: step ran on the second blob: img and succeeded (revoked blob read via getResourceContent). Recorded in VERIFICATION.md.",
+      "startedAt": "2026-11-18T16:41:21Z",
+      "baseRef": "1859fb5a529ad4eb868e4637c8fb26949513968e",
+      "baseDirty": true,
+      "failures": [
+        {
+          "at": "2026-11-18T16:30:18Z",
+          "attempt": 1,
+          "by": "execute",
+          "kind": "gate",
+          "detail": "live MCP tool list lacks saveImage (stale catalog); live checks not run"
+        },
+        {
+          "at": "2026-11-18T16:33:30Z",
+          "attempt": 2,
+          "by": "execute",
+          "kind": "gate",
+          "detail": "fresh MCP catalog has saveImage, but both live calls (https copy, and a selector matching nothing) timed out at 30000ms: the loaded extension predates saveImage and bridge-client drops unknown actions silently"
+        },
+        {
+          "at": "2026-11-18T16:37:13Z",
+          "attempt": 2,
+          "by": "execute",
+          "kind": "gate",
+          "detail": "after extension reload, saveImage still timed out (https copy and a selector matching nothing): relay pid 5222 (tsx src/relay/main.ts, started 2026-11-13) runs pre-saveImage guards; isBridgeMessage→isCommand drops the action. Restart was denied by the auto-mode classifier."
+        },
+        {
+          "at": "2026-11-18T16:45:02Z",
+          "attempt": 3,
+          "by": "execute",
+          "kind": "grade",
+          "dimensionIds": [
+            "fresh-session-and-honest-status"
+          ],
+          "detail": "fresh-session-and-honest-status 8 < minScore 9: VERIFICATION.md uncommitted (git log date Oct 2 < heading 2026-11-18); main call duration not measured (only a 261 ms bracket on the 2nd save). Others: 9,9,9,10."
+        }
+      ],
+      "gateRun": [
+        "npm run verify: pass",
+        "npm run lint (g1): pass"
+      ]
+    }
+  ]
+}

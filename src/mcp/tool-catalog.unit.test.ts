@@ -59,6 +59,7 @@ describe("listTools", () => {
     expect(required.get("scrollPage")).toEqual([]);
     expect(required.get("waitFor")).toEqual(["mode"]);
     expect(required.get("sendKeys")).toEqual([]);
+    expect(required.get("saveImage")).toEqual(["selector", "path"]);
   });
 
   it("gives captureTab a strict schema with an optional mode enum (viewport|element|full-page) and an optional string elementRef, no required fields", () => {
@@ -107,8 +108,46 @@ describe("listTools", () => {
     }
   });
 
-  it("advertises exactly twenty-two tools", () => {
-    expect(listTools()).toHaveLength(22);
+  it("advertises exactly twenty-three tools, ending with sendKeys then saveImage", () => {
+    const names = listTools().map((t) => t.name);
+    expect(names).toHaveLength(23);
+    expect(names.slice(-2)).toEqual(["sendKeys", "saveImage"]);
+  });
+
+  it("gives saveImage a strict schema: selector and absolute path required, boolean overwrite optional", () => {
+    const schema = listTools().find((t) => t.name === "saveImage")?.inputSchema;
+    expect(schema?.type).toBe("object");
+    expect(schema?.additionalProperties).toBe(false);
+    expect(schema?.required).toEqual(["selector", "path"]);
+    const props = schema?.properties as Record<string, Record<string, unknown>>;
+    expect(Object.keys(props).sort()).toEqual([
+      "overwrite",
+      "path",
+      "selector",
+    ]);
+    expect(props.selector?.type).toBe("string");
+    expect(props.path?.type).toBe("string");
+    expect(String(props.path?.description)).toMatch(/absolute/i);
+    expect(props.overwrite?.type).toBe("boolean");
+  });
+
+  it("describes every saveImage outcome: the result fields, the 25 MB limit, the overwrite refusal and each failure reason", () => {
+    const description =
+      listTools().find((t) => t.name === "saveImage")?.description ?? "";
+    expect(description).toContain("{ path, bytes, width, height, mimeType }");
+    expect(description).toContain("25 MB");
+    expect(description).toMatch(/absolute/);
+    expect(description).toMatch(/overwrite/);
+    for (const reason of [
+      "element-not-found",
+      "not-image",
+      "not-loaded",
+      "tainted",
+      "unreadable",
+      "too-large",
+    ]) {
+      expect(description).toContain(reason);
+    }
   });
 
   it("gives sendKeys a strict schema whose key enum is exactly the keys the extension can press", () => {

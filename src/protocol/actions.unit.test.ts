@@ -28,12 +28,15 @@ describe("PAGE_ACTIONS", () => {
       "waitFor",
       "closeSandboxTab",
       "sendKeys",
+      "saveImage",
     ]);
   });
 
   it("has no duplicates and no extra members", () => {
     expect(new Set(PAGE_ACTIONS).size).toBe(PAGE_ACTIONS.length);
-    expect(PAGE_ACTIONS.length).toBe(22);
+    expect(PAGE_ACTIONS.length).toBe(23);
+    expect(PAGE_ACTIONS[21]).toBe("sendKeys");
+    expect(PAGE_ACTIONS.at(-1)).toBe("saveImage");
   });
 });
 

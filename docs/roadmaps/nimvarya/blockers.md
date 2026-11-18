@@ -81,3 +81,5 @@
 - 2026-09-04 | horizon 17 | Now that horizon 17's phase 0 measured real console vs. network JSON.stringify(entries) sizes, are those two figures close enough that the two separate constants — see horizon-17 roadmap.md
 - 2026-09-04 | horizon 17 | For the read tools specifically (which already have a since/limit/nextSince cursor protocol, unlike executeScript/evaluatePage which have none), is the flat — see horizon-17 roadmap.md
 - 2026-09-04 | horizon 17 | What are the final, as-landed byte-ceiling constant values and MAX_READ_LIMIT-vs-ceiling relationship — i.e. under what realistic entry count/content mix does a caller actually hit — see horizon-17 roadmap.md
+- 2026-11-18 | horizon 18 | does Page.getResourceContent(main frame, currentSrc) return Gemini lh3 img bytes, and what for a revoked blob:? untested until the live-verify phase
+- 2026-11-18 | horizon 18 | should the relay reject unknown actions with an explicit error instead of dropping them, so a stale relay is visible at once rather than as a timeout?

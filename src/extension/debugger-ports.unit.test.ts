@@ -1056,4 +1056,301 @@ describe("chromeCaptureDebuggerPorts", () => {
       expect(downs).toHaveLength(SEND_KEY_NAMES.length);
     });
   });
+
+  describe("readImage", () => {
+    const LIMIT = 25 * 1024 * 1024;
+    const IMG_SRC = "https://lh3.googleusercontent.com/abc=s1024-rw";
+    const loadedImg = {
+      kind: "img",
+      complete: true,
+      currentSrc: IMG_SRC,
+      naturalWidth: 1024,
+      naturalHeight: 559,
+    };
+    const frameTree = {
+      frameTree: {
+        frame: { id: "MAIN" },
+        childFrames: [{ frame: { id: "CHILD" } }],
+      },
+    };
+
+    interface ImageStubOptions {
+      readonly probeReply?: unknown;
+      readonly probe?: unknown;
+      readonly frameTreeReply?: unknown;
+      readonly resource?: unknown;
+      readonly canvas?: unknown;
+    }
+
+    function installImageStub(options: ImageStubOptions): StubControls {
+      return installStubDebugger((_target, method, params) => {
+        switch (method) {
+          case "Runtime.evaluate": {
+            const { expression } = params as { expression: string };
+            if (expression.includes("toBlob")) {
+              return Promise.resolve({ result: { value: options.canvas } });
+            }
+            return Promise.resolve(
+              options.probeReply ?? { result: { value: options.probe } },
+            );
+          }
+          case "Page.enable":
+            return Promise.resolve({});
+          case "Page.getFrameTree":
+            return Promise.resolve(options.frameTreeReply ?? frameTree);
+          case "Page.getResourceContent":
+            return options.resource instanceof Error
+              ? Promise.reject(options.resource)
+              : Promise.resolve(options.resource);
+          default:
+            return Promise.reject(new Error(`unexpected ${method}`));
+        }
+      });
+    }
+
+    function methods(spy: ReturnType<typeof vi.fn>): string[] {
+      return spy.mock.calls.map((call) => String(call[1]));
+    }
+
+    function base64OfDecodedLength(bytes: number): string {
+      const remainder = bytes % 3;
+      const padding = remainder === 0 ? "" : remainder === 1 ? "==" : "=";
+      const length = Math.ceil(bytes / 3) * 4;
+      return "A".repeat(length - padding.length) + padding;
+    }
+
+    it("reads an img's loaded resource with Page.getResourceContent on the main frame at currentSrc", async () => {
+      const { attachSpy, detachSpy, sendCommandSpy } = installImageStub({
+        probe: loadedImg,
+        resource: { content: PNG_B64, base64Encoded: true },
+      });
+
+      const result = await chromeCaptureDebuggerPorts().readImage(7, "img.x");
+
+      expect(result).toEqual({
+        read: true,
+        base64: PNG_B64,
+        width: 1024,
+        height: 559,
+        byteLength: 16,
+      });
+      expect(result).not.toHaveProperty("mimeType");
+      expect(methods(sendCommandSpy)).toEqual([
+        "Runtime.evaluate",
+        "Page.enable",
+        "Page.getFrameTree",
+        "Page.getResourceContent",
+      ]);
+      expect(sendCommandSpy).toHaveBeenCalledWith(
+        { tabId: 7 },
+        "Page.getResourceContent",
+        { frameId: "MAIN", url: IMG_SRC },
+      );
+      const probeExpression = (
+        sendCommandSpy.mock.calls[0]?.[2] as { expression: string }
+      ).expression;
+      expect(probeExpression).not.toMatch(/fetch\(|toBlob|drawImage/);
+      expect(attachSpy).toHaveBeenCalledTimes(1);
+      expect(detachSpy).toHaveBeenCalledWith({ tabId: 7 });
+    });
+
+    it("embeds the selector in the page expression only as a JSON string literal", async () => {
+      const { detachSpy, sendCommandSpy } = installImageStub({
+        probe: { kind: "missing" },
+      });
+      const selector = `a"]');alert(1);//\\</script>`;
+
+      await chromeCaptureDebuggerPorts().readImage(7, selector);
+
+      const expression = (
+        sendCommandSpy.mock.calls[0]?.[2] as { expression: string }
+      ).expression;
+      expect(expression).toContain(
+        `document.querySelector(${JSON.stringify(selector)})`,
+      );
+      expect(expression.replace(JSON.stringify(selector), "")).not.toContain(
+        selector,
+      );
+      expect(detachSpy).toHaveBeenCalledWith({ tabId: 7 });
+    });
+
+    it.each([
+      ["element-not-found", { kind: "missing" }],
+      ["not-image", { kind: "other" }],
+      ["not-loaded", { ...loadedImg, complete: false }],
+      ["not-loaded", { ...loadedImg, naturalWidth: 0 }],
+      ["not-loaded", { ...loadedImg, currentSrc: "" }],
+      ["not-loaded", { kind: "canvas", width: 0, height: 10 }],
+    ])(
+      "resolves %s from the element probe without reading any bytes",
+      async (reason, probe) => {
+        const { detachSpy, sendCommandSpy } = installImageStub({ probe });
+
+        const result = await chromeCaptureDebuggerPorts().readImage(7, "#x");
+
+        expect(result).toEqual({ read: false, reason });
+        expect(methods(sendCommandSpy)).toEqual(["Runtime.evaluate"]);
+        expect(detachSpy).toHaveBeenCalledWith({ tabId: 7 });
+      },
+    );
+
+    it.each([
+      ["a CDP error", new Error("No resource with given URL found")],
+      ["empty content", { content: "", base64Encoded: true }],
+      ["a text resource", { content: "<svg/>", base64Encoded: false }],
+    ])(
+      "resolves unreadable when getResourceContent gives %s",
+      async (_label, resource) => {
+        const { detachSpy } = installImageStub({ probe: loadedImg, resource });
+
+        const result = await chromeCaptureDebuggerPorts().readImage(7, "img");
+
+        expect(result).toEqual({ read: false, reason: "unreadable" });
+        expect(detachSpy).toHaveBeenCalledWith({ tabId: 7 });
+      },
+    );
+
+    it("accepts an img of exactly 25 MB and refuses one byte more, counting base64 padding", async () => {
+      const atLimit = base64OfDecodedLength(LIMIT);
+      expect(atLimit.endsWith("==")).toBe(true);
+      const { detachSpy: firstDetach } = installImageStub({
+        probe: loadedImg,
+        resource: { content: atLimit, base64Encoded: true },
+      });
+      const ok = await chromeCaptureDebuggerPorts().readImage(7, "img");
+      expect(ok).toMatchObject({ read: true, byteLength: LIMIT });
+      expect(firstDetach).toHaveBeenCalledWith({ tabId: 7 });
+
+      const overLimit = base64OfDecodedLength(LIMIT + 1);
+      expect(overLimit.endsWith("=") && !overLimit.endsWith("==")).toBe(true);
+      const { detachSpy } = installImageStub({
+        probe: loadedImg,
+        resource: { content: overLimit, base64Encoded: true },
+      });
+      const refused = await chromeCaptureDebuggerPorts().readImage(7, "img");
+      expect(refused).toEqual({
+        read: false,
+        reason: "too-large",
+        size: LIMIT + 1,
+        limit: LIMIT,
+      });
+      expect(refused).not.toHaveProperty("base64");
+      expect(detachSpy).toHaveBeenCalledWith({ tabId: 7 });
+    });
+
+    it("exports a canvas as PNG through toBlob with the cap checked in the page before encoding", async () => {
+      const { detachSpy, sendCommandSpy } = installImageStub({
+        probe: { kind: "canvas", width: 300, height: 150 },
+        canvas: { kind: "png", base64: PNG_B64, size: 16 },
+      });
+
+      const result = await chromeCaptureDebuggerPorts().readImage(7, "canvas");
+
+      expect(result).toEqual({
+        read: true,
+        base64: PNG_B64,
+        mimeType: "image/png",
+        width: 300,
+        height: 150,
+        byteLength: 16,
+      });
+      expect(methods(sendCommandSpy)).toEqual([
+        "Runtime.evaluate",
+        "Runtime.evaluate",
+      ]);
+      const exportExpression = (
+        sendCommandSpy.mock.calls[1]?.[2] as { expression: string }
+      ).expression;
+      expect(exportExpression).toContain(`blob.size > ${LIMIT}`);
+      expect(exportExpression.indexOf(`blob.size > ${LIMIT}`)).toBeLessThan(
+        exportExpression.indexOf("readAsDataURL"),
+      );
+      expect(detachSpy).toHaveBeenCalledWith({ tabId: 7 });
+    });
+
+    it.each([
+      ["tainted", { kind: "tainted" }, { read: false, reason: "tainted" }],
+      ["not-loaded", { kind: "empty" }, { read: false, reason: "not-loaded" }],
+      [
+        "too-large",
+        { kind: "too-large", size: LIMIT + 1 },
+        { read: false, reason: "too-large", size: LIMIT + 1, limit: LIMIT },
+      ],
+    ])(
+      "maps a canvas export of kind %s to its own outcome",
+      async (_reason, canvas, expected) => {
+        const { detachSpy } = installImageStub({
+          probe: { kind: "canvas", width: 300, height: 150 },
+          canvas,
+        });
+
+        const result = await chromeCaptureDebuggerPorts().readImage(7, "c");
+
+        expect(result).toEqual(expected);
+        expect(result).not.toHaveProperty("base64");
+        expect(detachSpy).toHaveBeenCalledWith({ tabId: 7 });
+      },
+    );
+
+    it.each<[string, ImageStubOptions, RegExp]>([
+      [
+        "a probe value with no kind",
+        { probe: { found: true } },
+        /image probe\) returned a malformed value/,
+      ],
+      [
+        "a probe that threw in the page",
+        { probeReply: { exceptionDetails: { text: "Uncaught" } } },
+        /image probe\) threw in page: Uncaught/,
+      ],
+      [
+        "a frame tree with no main frame id",
+        { probe: loadedImg, frameTreeReply: { frameTree: { frame: {} } } },
+        /Page\.getFrameTree returned no main frame id/,
+      ],
+      [
+        "a resource whose content is not a string",
+        { probe: loadedImg, resource: { content: 42, base64Encoded: true } },
+        /Page\.getResourceContent returned a malformed result/,
+      ],
+      [
+        "a canvas export with no base64",
+        {
+          probe: { kind: "canvas", width: 3, height: 3 },
+          canvas: { kind: "png", size: 10 },
+        },
+        /canvas export\) returned a malformed value/,
+      ],
+    ])("rejects and detaches on %s", async (_label, options, message) => {
+      const { detachSpy } = installImageStub(options);
+
+      await expect(
+        chromeCaptureDebuggerPorts().readImage(7, "img"),
+      ).rejects.toThrow(message);
+      expect(detachSpy).toHaveBeenCalledWith({ tabId: 7 });
+    });
+
+    it("gives up after the session timeout with the reading-image label and still detaches", async () => {
+      vi.useFakeTimers();
+      try {
+        const hang = new Promise<unknown>(() => undefined);
+        const { detachSpy, sendCommandSpy } = installStubDebugger(() => hang);
+        const pending = chromeCaptureDebuggerPorts().readImage(7, "img");
+        for (let i = 0; i < 10 && sendCommandSpy.mock.calls.length === 0; i++) {
+          await Promise.resolve();
+        }
+        expect(sendCommandSpy).toHaveBeenCalled();
+
+        const assertion = expect(pending).rejects.toThrow(
+          /timed out after \d+ms while reading image/,
+        );
+        vi.advanceTimersByTime(20000);
+        await assertion;
+
+        expect(detachSpy).toHaveBeenCalledWith({ tabId: 7 });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });

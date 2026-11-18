@@ -1,18 +1,19 @@
 # Tool reference
 
-Full behavioral reference for the twenty-two page-action tools the `nimvarya` MCP
+Full behavioral reference for the twenty-three page-action tools the `nimvarya` MCP
 server exposes. For the high-level pitch and setup, see the [README](../README.md).
 For dated verification traces (live-Chrome runs proving this behavior), see
 [`VERIFICATION.md`](VERIFICATION.md).
 
-The stdio MCP server advertises the twenty-two page actions as discrete tools —
+The stdio MCP server advertises the twenty-three page actions as discrete tools —
 `ping`, `navigateTo`, `getPageText`, `readPage`, `findElement`, `clickElement`,
 `typeText`, `captureTab`, `readConsoleMessages`, `readNetworkRequests`,
 `executeScript`, `evaluatePage`, `navigateBack`, `navigateForward`,
 `reloadTab`, `clickAt`, `hover`, `getTabState`, `scrollPage`, `waitFor`,
-`closeSandboxTab`, `sendKeys` —
+`closeSandboxTab`, `sendKeys`, `saveImage` —
 one clearly-described tool each (no `ext_command` umbrella tool, no enum arg).
-`captureTab` returns an MCP image block; every other tool returns text; a
+`captureTab` returns an MCP image block; every other tool returns text
+(`saveImage` writes its image to disk and returns only text); a
 relay/extension failure comes back as an `isError` result, never a thrown
 transport error.
 
@@ -288,6 +289,71 @@ the MCP layer as `isError: true` with `{ tooLarge: true, actualBytes,
 limitBytes }`, so a caller can tell "too large to return" apart from a genuine
 failure. No console/network entries are returned in that case — retry with a
 smaller `limit`.
+
+## `saveImage`
+
+`saveImage` saves the image shown by an `<img>` or `<canvas>` in the sandbox
+tab to a file on the machine running the MCP server. It does not use the
+browser's download prompt or the `downloads` permission, and the image itself
+never reaches the calling model: the extension reads the bytes, the relay
+carries them to the MCP server, and the MCP server writes the file.
+
+Parameters:
+
+- **`selector`** (required) — CSS selector of the `<img>` or `<canvas>`; the
+  first match is used. This is the only parameter sent to the extension.
+- **`path`** (required) — absolute path of the file to write, including its
+  name, e.g. `/Users/me/Pictures/cat.png`. Its folder must already exist;
+  missing folders are never created.
+- **`overwrite`** (optional, default `false`) — replace a file that already
+  exists at `path`. Without it, the file is created exclusively (open flag
+  `wx`), so an existing file is refused untouched, even when another writer
+  creates it at the same moment.
+
+What gets saved:
+
+- An **`<img>`** is saved as **the image as the page loaded it**: the exact
+  resource file the page downloaded (read through CDP
+  `Page.getResourceContent`), not re-encoded, and not necessarily the original
+  upload's resolution.
+- A **`<canvas>`** is saved as PNG.
+
+On success the result is one text block with exactly these fields:
+
+```json
+{
+  "path": "/Users/me/Pictures/cat.png",
+  "bytes": 482113,
+  "width": 1024,
+  "height": 1024,
+  "mimeType": "image/png"
+}
+```
+
+`bytes` is the size of the file written. `width`/`height` are the natural (or
+canvas backing-store) pixel size, not the CSS size. `mimeType` comes from the
+file's own magic number (PNG, JPEG, GIF or WebP); if the bytes are none of
+these it falls back to the type the page reported, and then to
+`application/octet-stream`.
+
+Every failure is an `isError: true` JSON text block,
+`{ "saved": false, "reason": ... }`, and nothing is written:
+
+| `reason` | Meaning |
+|---|---|
+| `path-not-absolute` | `path` is missing, not a string, or relative (`out.png`, `~/x.png`). Refused before the extension is asked for anything. |
+| `element-not-found` | No element matches `selector`. |
+| `not-image` | The element is not an `<img>` or `<canvas>`. |
+| `not-loaded` | The `<img>` has not finished loading. |
+| `tainted` | `<canvas>` only: it holds cross-origin pixels the browser will not export. |
+| `unreadable` | The browser could not hand back the `<img>`'s loaded resource. |
+| `too-large` | The image is over 25 MB; carries `size` and `limit` (26214400) in bytes. |
+| `exists` | A file is already at `path` and `overwrite` is not `true`; it is left unchanged. |
+| `parent-missing` | The folder in `path` does not exist. |
+| `io-error` | Any other write failure (e.g. `path` is a directory, no permission); carries `message`. |
+
+The writer failures (`exists`, `parent-missing`, `io-error`) also carry `path`
+and the system `message`.
 
 ## MCP registration
 

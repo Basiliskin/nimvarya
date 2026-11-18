@@ -190,6 +190,15 @@ export interface SendKeysParams {
   readonly delayMs?: number;
 }
 
+/**
+ * `saveImage` reads the `<img>` or `<canvas>` matching `selector` in the
+ * sandbox tab. The destination path stays on the MCP server and is never sent
+ * to the extension.
+ */
+export interface SaveImageParams {
+  readonly selector: string;
+}
+
 /** The three conditions `waitFor` can block on. Modes are mutually exclusive. */
 export type WaitForMode = "selector-present" | "network-idle" | "fixed-delay";
 
@@ -247,6 +256,7 @@ export interface PageActionParams {
   readonly waitFor: WaitForParams;
   readonly closeSandboxTab: CloseSandboxTabParams;
   readonly sendKeys: SendKeysParams;
+  readonly saveImage: SaveImageParams;
 }
 
 // --- Per-action result types --------------------------------------------------
@@ -391,6 +401,46 @@ export interface CaptureTabFailureResult {
  * unhandled hang.
  */
 export type CaptureTabResult = CaptureTabImageResult | CaptureTabFailureResult;
+
+/**
+ * The bytes of one `<img>` or `<canvas>`, base64-encoded. For an `<img>` they
+ * are the resource file the page loaded, unchanged, and `mimeType` is absent
+ * (CDP does not report one, so the reader of the bytes sniffs it); for a
+ * `<canvas>` they are a PNG and `mimeType` is `image/png`. `width`/`height` are
+ * the natural (or canvas backing-store) pixel size, not the CSS size.
+ */
+export interface ImageReadSuccess {
+  readonly read: true;
+  readonly base64: string;
+  readonly mimeType?: string;
+  readonly width: number;
+  readonly height: number;
+  readonly byteLength: number;
+}
+
+/**
+ * Why an image could not be read. `tainted` applies to a cross-origin
+ * `<canvas>` only; `unreadable` means the browser could not hand back the
+ * `<img>`'s loaded resource.
+ */
+export type ImageReadFailureReason =
+  | "element-not-found"
+  | "not-image"
+  | "not-loaded"
+  | "tainted"
+  | "unreadable"
+  | "too-large";
+
+export interface ImageReadFailure {
+  readonly read: false;
+  readonly reason: ImageReadFailureReason;
+  /** For `reason: "too-large"` — the decoded byte count. */
+  readonly size?: number;
+  /** For `reason: "too-large"` — the decoded byte ceiling. */
+  readonly limit?: number;
+}
+
+export type ImageReadResult = ImageReadSuccess | ImageReadFailure;
 
 /**
  * The non-destructive window read returned by a capture-read action. Mirrors
@@ -563,6 +613,7 @@ export interface PageActionResults {
   readonly waitFor: WaitForResult;
   readonly closeSandboxTab: CloseSandboxTabResult;
   readonly sendKeys: SendKeysResult;
+  readonly saveImage: ImageReadResult;
 }
 
 // --- Frames ------------------------------------------------------------------

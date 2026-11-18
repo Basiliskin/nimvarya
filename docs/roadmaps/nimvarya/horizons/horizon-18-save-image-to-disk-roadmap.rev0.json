@@ -1,0 +1,868 @@
+{
+  "task": "Add a saveImage tool: given a selector for an <img> (or canvas) in the sandbox tab, read its full-resolution bytes in the page via CDP (works for blob: URLs), send them through the relay, and have the MCP server write them to an absolute path the caller gives; return only {path, bytes, width, height, mimeType}. No downloads permission. Live-verify by saving a generated image from gemini.google.com.",
+  "analysis": {
+    "objective": "Add a saveImage page action (the 23rd PAGE_ACTIONS entry) that reads the full-resolution bytes of an <img> or <canvas> picked by a selector in the sandbox tab — in the page via CDP, including blob: sources — carries them through the relay, and has the MCP server write them to a caller-given absolute path, returning only {path, bytes, width, height, mimeType}; the vision's next slice: a standalone agent-agnostic Chrome bridge that can pull real artifacts out of a page, not just read it.",
+    "successDefinition": "Done means all hold: (1) a phase-0 live probe on gemini.google.com in the real signed-in Chrome via the sandbox tab records in discoveries.md which src scheme a generated image actually has (blob:, data:, or cross-origin https) and which in-page/CDP read route returns its bytes, and the reader is built on that recorded route; (2) saveImage is added across the full parity surface — PAGE_ACTIONS 22->23, types, param validation, extension handler, TOOL_CATALOG entry with an additionalProperties:false schema {selector, path, overwrite?}, MCP server branch, README, and the hard-coded action-list/length tests — with tsc, eslint (--max-warnings 0) and vitest green via npm run verify; (3) the MCP server, not the extension, writes the file: a non-absolute path is rejected, and an existing file without overwrite:true returns a clear refusal and is left byte- and mtime-untouched; (4) a successful call's MCP result contains only {path, bytes, width, height, mimeType} — no base64, no image content block — where bytes equals the on-disk file size, width/height are the image's natural (or canvas) pixel dimensions not CSS size, and mimeType matches the written bytes' magic number; (5) defined, non-throwing, distinct outcomes, each unit-tested, for: decoded bytes > 25 MB ('too large', nothing written, measured size + limit reported), selector matches nothing, element is not img/canvas, image not loaded / zero-size, tainted/unreadable source, relative path, existing file without overwrite; (6) manifest.json gains no 'downloads' permission (and no new permission at all) and chrome.downloads is never referenced; (7) live: in a fresh MCP session, saveImage on a Gemini-generated image in the sandbox tab writes a file to an absolute path whose byte count, decoded dimensions and magic-number type match the returned fields and whose dimensions match the in-page naturalWidth/naturalHeight, a second call to the same path without overwrite is refused, and the results are recorded in a dated section of docs/VERIFICATION.md, linked from README — the horizon's last phase stays blocked MANUAL_CHROME_CHECK_PENDING until this passes.",
+    "assumptions": [
+      "The repo root /Users/dimitrykatz/workspace/nimvarya is the package; memory paths under tools/chrome-bridge/ map 1:1 to the same files at the root (src/{protocol,extension,relay,controller,mcp}, extension/manifest.json).",
+      "PAGE_ACTIONS currently has 22 entries (sendKeys and the console-level filter landed outside the roadmap), so saveImage is the 23rd; per the h1 decision it is a discrete new tool, not a captureTab mode.",
+      "The read runs in the sandbox tab via CDP Runtime.evaluate (returnByValue + awaitPromise, inside the existing per-command withDebuggerSession, under the 15s CDP cap) — the route the h9 decision lifted the Runtime.evaluate ban for; an in-page fetch(src) of a blob: URL or a draw-to-canvas + toBlob works in the page's own origin; the phase-0 probe confirms which route Gemini needs.",
+      "Bytes travel base64-encoded inside the existing command-response frame; the 25 MB decoded cap is ~33.4 MB of base64, well under ws's default 100 MiB maxPayload (relay.ts constructs WebSocketServer with no maxPayload override), so no new relay frame kind is needed.",
+      "The 25 MB check runs in-page/extension-side before the base64 payload crosses the relay, so an oversized payload is never moved (matching the h12 in-page bounding decision).",
+      "The MCP server process can write to any absolute path the OS user can write; a missing parent directory is a defined error, not silently created.",
+      "For a canvas, the saved bytes are the canvas re-encoded as PNG (toBlob) and 'full resolution' means its backing-store width/height; for an img, the bytes are the original resource bytes, not re-encoded.",
+      "The 30s controller DEFAULT_TIMEOUT_MS and the 15s CDP cap suffice for a single generated image of <= 25 MB on localhost.",
+      "Verification is via Claude Code only (h4 decision); the gemini.google.com check needs the user's real signed-in Chrome session and a generated image already present or produced in the sandbox tab.",
+      "confirmed: an existing file at the target path is refused unless overwrite:true (user, Step 0)",
+      "confirmed: horizon opens with a live probe on gemini.google.com (user, Step 0)",
+      "confirmed: 25 MB decoded cap = 25*1024*1024 bytes with a non-throwing too-large outcome (user, Step 0)",
+      "confirmed: the MCP server strips path/overwrite so the extension sees only {selector}; a missing parent directory is an error; the sniffed magic-number MIME type wins; canvas saved as PNG (user, Stage 3.4)",
+      "confirmed: live evidence goes to docs/VERIFICATION.md with a README link; the registration and writer phases ship together with no MCP reload between them (user, Stage 3.4)"
+    ],
+    "risks": [
+      "The phase-0 probe may find the Gemini image is a cross-origin https (e.g. googleusercontent) URL rather than blob:, so an in-page fetch/canvas read hits CORS or a tainted canvas, forcing a different route (CDP Network.getResponseBody / Page.getResourceContent) that changes the design — which is why the probe comes first.",
+      "The sandbox tab is deliberately unfocused with a suspended render pass (h10/h13): a lazy-loaded or not-yet-decoded image may report naturalWidth 0 or have no fetched bytes, and a canvas may be blank; a focus-emulation workaround (h15) could be needed, widening scope.",
+      "chrome.scripting sees chrome-error://chromewebdata in the sandbox tab after navigation (h16 discovery): any reader relying on ISOLATED-world executeScript rather than CDP Runtime.evaluate will fail on Gemini.",
+      "Up to ~33 MB of base64 through Runtime.evaluate returnByValue, the MV3 service worker, and JSON serialization in relay and controller may be slow or memory-heavy and exceed the 15s CDP cap or 30s controller timeout; chunked transfer is out of scope, so near-cap images may time out rather than return 'too large'.",
+      "Writing to a caller-supplied path is a file-write primitive: without the absolute-path check, overwrite-off-by-default, and a race-safe existence check (exclusive-create open flag rather than check-then-write), a caller could clobber arbitrary files — this invariant must not be traded for convenience.",
+      "mcp/server.ts special-cases tools by toolName (captureTab image, oversize isError); adding a branch that does filesystem I/O there mixes side effects into the presentation layer unless it sits behind a small writer seam.",
+      "Fixed tests hard-code the ordered action list and length (actions.unit.test.ts, tool-catalog.unit.test.ts) and must move in lockstep with PAGE_ACTIONS or verify fails.",
+      "Live verification can stall on a stale MCP catalog / service worker after a rebuild (h7/h9/h11 pattern), requiring a fresh MCP session and extension reload before the final phase can close.",
+      "Gemini's DOM and image delivery are third-party and may change, and image generation depends on account access; a stable selector for the generated image may need discovery during the probe."
+    ],
+    "outOfScope": [
+      "chrome.downloads-based saving or adding the 'downloads' manifest permission — the user explicitly excluded it, and an MCP-side write avoids the permission.",
+      "Saving CSS background-images, <picture>/<source> srcset variant selection beyond the element's resolved currentSrc, <video> frames, or SVG elements — the task targets <img> and <canvas> only.",
+      "Bulk/multi-image save (all images matching a selector) — one element per call keeps the size cap and result contract simple.",
+      "Chunked/streamed transfer of image bytes over the relay or any new protocol frame kind — a single command-response fits under the 25 MB cap and ws's default maxPayload.",
+      "Format conversion, re-encoding, resizing or compression of <img> bytes — the requirement is original full-resolution bytes; only canvas is necessarily encoded (PNG).",
+      "Returning the image to the AI client as an MCP image content block or base64 — the result is explicitly only {path, bytes, width, height, mimeType}; captureTab already covers model-facing images.",
+      "Creating missing parent directories, path sandboxing or allow-lists beyond requiring an absolute path — the user chose a caller-given absolute path; directory policy is a separate decision.",
+      "Making the unfocused sandbox tab render (focus emulation) to force lazy images to load — a separate render-primitive question already tracked in blockers.",
+      "Live verification on sites other than gemini.google.com, or via Gemini CLI / Codex / Cursor — Claude Code only per the h4 decision, and the user named Gemini as the target.",
+      "The next-horizon brief's backlog (read-result constant consolidation, dead active-tab code removal, persistent CDP sessions, JPEG rung) — the user chose this task instead."
+    ],
+    "domainShape": "technical",
+    "domainShapeReason": "The objective is browser-bridge machinery — a CDP in-page byte read, relay transport, and an MCP-server file write — with no business entities or rules a domain expert would recognize.",
+    "ubiquitousLanguage": [
+      {
+        "term": "saveImage",
+        "meaning": "The new 23rd page action and MCP tool that saves one <img>/<canvas> from the sandbox tab to a caller-given absolute path and returns {path, bytes, width, height, mimeType}."
+      },
+      {
+        "term": "sandbox tab",
+        "meaning": "The extension's dedicated, deliberately unfocused Chrome tab that is the only target of every page action, including saveImage."
+      },
+      {
+        "term": "image source probe",
+        "meaning": "The phase-0 live check on gemini.google.com that records a generated image's real src scheme (blob:/data:/cross-origin https) and which read route returns its bytes."
+      },
+      {
+        "term": "in-page byte read",
+        "meaning": "Reading the element's full-resolution bytes inside the page via CDP Runtime.evaluate (fetch of the src or canvas toBlob), base64-encoded for transport."
+      },
+      {
+        "term": "image payload",
+        "meaning": "The base64 bytes plus mimeType and natural width/height carried from the extension through the relay to the MCP server in one command-response."
+      },
+      {
+        "term": "image writer",
+        "meaning": "The MCP-server-side component that validates the absolute path, applies the overwrite rule, writes the decoded bytes to disk and reports the written byte count."
+      },
+      {
+        "term": "overwrite guard",
+        "meaning": "The rule that an existing file at the target path is refused and left untouched unless the caller passes overwrite:true."
+      },
+      {
+        "term": "too-large outcome",
+        "meaning": "The defined non-throwing result returned when the decoded image exceeds 25 MB, carrying the measured size and the limit, with nothing written."
+      }
+    ]
+  },
+  "discoveryFindings": [
+    {
+      "area": "needs: PAGE_ACTIONS single source of truth",
+      "finding": "present — src/protocol/actions.ts has exactly 22 entries ending ...\"waitFor\",\"closeSandboxTab\",\"sendKeys\". saveImage would be the 23rd. isPageAction drives guards.isCommand and server.handleToolCall's unknown-tool rejection.",
+      "filePath": "/Users/dimitrykatz/workspace/nimvarya/src/protocol/actions.ts",
+      "implication": "Append \"saveImage\" after \"sendKeys\". listTools() follows tuple order, so the tool is advertised last."
+    },
+    {
+      "area": "guard g2: Record<PageAction,…> parity",
+      "finding": "present — four compile-time parity maps must all gain a saveImage key: PageActionParams and PageActionResults (src/protocol/types.ts), TOOL_CATALOG: Record<PageAction, ToolCatalogEntry> (src/mcp/tool-catalog.ts:168), and BOTH the `raw` table and the guard()-wrapped return table in pageActionHandlers (src/extension/page-actions.ts:985 and :1520-1541).",
+      "filePath": "/Users/dimitrykatz/workspace/nimvarya/src/extension/page-actions.ts",
+      "implication": "Ship these changes as one atomic phase together with the PAGE_ACTIONS edit, or tsc fails. The new handler must be wrapped in guard() in the returned table so a thrown error becomes an { error } outcome."
+    },
+    {
+      "area": "needs: hard-coded action-list/length tests",
+      "finding": "present — src/protocol/actions.unit.test.ts:36 has `expect(PAGE_ACTIONS.length).toBe(22)` plus an ordered list ending at \"sendKeys\" (line 30). src/mcp/tool-catalog.unit.test.ts:111 has `expect(listTools()).toHaveLength(22)` and a per-tool `required` map (lines 40-61). src/extension/command-dispatch.unit.test.ts loops over PAGE_ACTIONS, so it adapts automatically.",
+      "filePath": "/Users/dimitrykatz/workspace/nimvarya/src/mcp/tool-catalog.unit.test.ts",
+      "implication": "Bump both to 23, append saveImage to the ordered list, and add `required.get(\"saveImage\")` equal to [\"selector\",\"path\"] in the same phase as the PAGE_ACTIONS edit."
+    },
+    {
+      "area": "conflict: evaluatePage path cannot carry image bytes",
+      "finding": "present — the evaluatePage handler sends captureDebugger.evaluate() output through coerceExecuteScriptOutcome, which caps the result at MAX_EXECUTE_SCRIPT_RESULT_CHARS = 1_000_000 (page-actions.ts:63, :756-774). Separately, cdpEvalOutcome (debugger-ports.ts:762-815) JSON.stringify's the whole returned value into an `{ok,json}` string, so a ~33 MB base64 payload would be serialised a second time. Neither path can be reused for a 25 MB image.",
+      "filePath": "/Users/dimitrykatz/workspace/nimvarya/src/extension/debugger-ports.ts",
+      "implication": "Add a dedicated DebuggerPorts method (e.g. readImage(tabId, selector)) that runs its own Runtime.evaluate inside withDebuggerSession and narrows the reply into a typed payload: {base64, mimeType, width, height, byteLength} or a reason. Do not route it through evaluate()/coerceExecuteScriptOutcome. Add a new literal to withDebuggerSession's `label` union (currently \"capturing\"|\"capturing-full-page\"|\"evaluating\"|\"scrolling\"|\"sending keys\")."
+    },
+    {
+      "area": "needs: CDP Runtime.evaluate helper inside per-command session",
+      "finding": "present — debugger-ports.ts: CDP_COMMAND_TIMEOUT_MS = 15000. withDebuggerSession(tabId,label,run,timeoutMs) does attach → race(run, onDetach interruption, timeout) → always detach in finally. evaluateTab sends `Runtime.evaluate {expression, returnByValue:true, awaitPromise:true}` via chrome.debugger.sendCommand. A caller selector reaches the page only as a JSON.stringify'd literal inside the expression (see buildElementRectExpression at page-actions.ts:420 and the sendKeys focus expression at debugger-ports.ts:745).",
+      "filePath": "/Users/dimitrykatz/workspace/nimvarya/src/extension/debugger-ports.ts",
+      "implication": "Build the read expression with JSON.stringify(selector), never by string concatenation. One fetch/toBlob, the FileReader-to-base64 conversion and the size check must all finish within 15s. A near-cap image may hit the timeout; that shows up as a thrown 'chrome.debugger command timed out' message, which guard() turns into { error }."
+    },
+    {
+      "area": "needs: in-page 25 MB check before transfer",
+      "finding": "missing — no image-size constant exists. size-limits.ts provides checkSizeLimit(actualBytes, limitBytes) and buildOversizeResult → {tooLarge, actualBytes, limitBytes}, which are pure and tool-agnostic. captureTab instead uses its own `captured:false, reason:'too-large', size, limit` shape.",
+      "filePath": "/Users/dimitrykatz/workspace/nimvarya/src/extension/size-limits.ts",
+      "implication": "Put a MAX_SAVE_IMAGE_BYTES = 25*1024*1024 constant (or 25_000_000; decide which) next to the other caps in page-actions.ts. Measure blob.size in the page and return only {tooLarge, size} without base64 when it is over the cap. Reuse checkSizeLimit for the comparison. Use a discriminated `saved:false, reason:'too-large'|'element-not-found'|'not-image'|'not-loaded'|'tainted'` result modelled on CaptureTabFailureResult."
+    },
+    {
+      "area": "needs: transport frame size headroom",
+      "finding": "present — relay.ts:88 `new WebSocketServer({ host, port })` sets no maxPayload, so ws defaults to 100 MiB. The relay parses each frame (JSON.parse at relay.ts:62) and re-serialises it (JSON.stringify at :91), so the full payload is held in memory twice. The controller's Node ws client also uses the default. bridge-client.ts OUTBOX_LIMIT = 100 counts frames, not bytes, and only applies before the socket opens. guards.isCommandResponse accepts any `result` value.",
+      "filePath": "/Users/dimitrykatz/workspace/nimvarya/src/relay/relay.ts",
+      "implication": "No new frame kind or relay change is needed for ~33.4 MB of base64. Optionally add a relay unit test that a ~34 MB frame passes. Do not lower maxPayload."
+    },
+    {
+      "area": "needs: controller command timeout",
+      "finding": "present — controller-client.ts:38 DEFAULT_TIMEOUT_MS = 30_000, overridable per call through `sendCommand(action, params, {timeoutMs})`. The MCP adapter in src/mcp/main.ts:49 calls client.sendCommand(action, params) without options, and the CommandSender interface (server.ts) has no options parameter.",
+      "filePath": "/Users/dimitrykatz/workspace/nimvarya/src/controller/controller-client.ts",
+      "implication": "30s is more than the 15s CDP cap, so the extension times out first. No change is required unless the probe shows otherwise. Widening CommandSender for a per-tool timeout would touch main.ts and server.unit.test fakes."
+    },
+    {
+      "area": "conflict: no filesystem I/O exists in MCP layer",
+      "finding": "present (confirmed absent) — no non-test file under src imports node:fs, fs/promises or node:path. server.ts is a pure mapper: handleToolCall(deps, toolName, args), where McpServerDeps = { client: CommandSender }. tsconfig has types ['node'] and lib ES2022+DOM, so node:fs typings are available.",
+      "filePath": "/Users/dimitrykatz/workspace/nimvarya/src/mcp/server.ts",
+      "implication": "The natural seam is a new `ImageWriter` port on McpServerDeps (e.g. writeExclusive(path, bytes, overwrite) → {written, bytes} | refusal) with a real node:fs/promises implementation in a new src/mcp/image-writer.ts. Use open flag 'wx' for exclusive create and 'w' only when overwrite:true. Wire it in main.ts defaultMcpMainDeps/runMcpServer. server.unit.test injects a fake writer, so the server needs no real disk access."
+    },
+    {
+      "area": "needs: MCP server toolName branch + isError pattern",
+      "finding": "present — handleToolCall rejects unknown tools, returns isError text for response.error, and has a captureTab branch (image block on success, isError JSON on failure) plus OVERSIZE_RESULT_TOOL_NAMES gated on isOversizeResult. Narrowing uses `(result as {x?: unknown}).x` structural checks.",
+      "filePath": "/Users/dimitrykatz/workspace/nimvarya/src/mcp/server.ts",
+      "implication": "Add a `toolName === \"saveImage\"` branch before the generic return. It should: (1) validate that args.path is a string and path.isAbsolute, and return an isError text before calling the client if not; (2) optionally pre-check existence without overwrite, but the race-safe check must still be 'wx' at write time; (3) narrow the payload, decode base64, write via the writer seam, and verify the magic number against mimeType; (4) return only JSON {path, bytes, width, height, mimeType}, with no image block. Failure outcomes go out as isError JSON text."
+    },
+    {
+      "area": "conflict: path is consumed MCP-side but Command params are forwarded verbatim",
+      "finding": "present — server.ts forwards `args` unchanged to client.sendCommand(toolName, args), and isCommand only checks that params is a record.",
+      "filePath": "/Users/dimitrykatz/workspace/nimvarya/src/mcp/server.ts",
+      "implication": "Decide whether SaveImageParams on the wire is just {selector} (strip path/overwrite before sending) or includes them (the extension ignores them). Stripping keeps the extension free of filesystem concerns and matches 'the MCP server, not the extension, writes the file'. Either way, the TOOL_CATALOG schema still advertises {selector, path, overwrite?} with additionalProperties:false."
+    },
+    {
+      "area": "needs: TOOL_CATALOG entry conventions",
+      "finding": "present — each entry is {description, inputSchema: JsonSchemaObject}, where additionalProperties:false is enforced by the type. Descriptions are long and state the return shape and failure modes (see sendKeys). The MCP layer must not import extension runtime code (SEND_KEYS_KEY_NAMES is duplicated for that reason, with a sync test), although server.ts imports `type OversizeResult` from extension/size-limits.",
+      "filePath": "/Users/dimitrykatz/workspace/nimvarya/src/mcp/tool-catalog.ts",
+      "implication": "Add saveImage with required ['selector','path'] and overwrite: boolean. If the 25 MB limit is quoted in the description or used MCP-side, mirror the constant in protocol/ or mcp/ and import it type-only or as a duplicated constant, never as an extension runtime import."
+    },
+    {
+      "area": "needs: unit-test fake for debugger port",
+      "finding": "present — page-actions.unit.test.ts:137 fakeDebugger(overrides: Partial<DebuggerPorts>) builds a FULL DebuggerPorts base with vi.fn stubs. service-worker.unit.test.ts:~92 also hand-builds a full DebuggerPorts literal. debugger-ports.unit.test.ts stubs the `chrome` global through vi.stubGlobal, with installStubDebugger({sendCommand}) exposing attach/detach/sendCommand spies.",
+      "filePath": "/Users/dimitrykatz/workspace/nimvarya/src/extension/page-actions.unit.test.ts",
+      "implication": "Adding a DebuggerPorts method requires updating both full fakes (page-actions and service-worker tests) or tsc fails. Test the new port method in debugger-ports.unit.test.ts with a stubbed sendCommand returning Runtime.evaluate-shaped replies, and assert detach runs on every path."
+    },
+    {
+      "area": "guard g1: strictTypeChecked, no JSON.parse-as, no satisfies",
+      "finding": "present — eslint.config.mjs bans `JSON.parse(x) as T` and `satisfies` and requires separate type imports. Test files relax the unsafe-* rules only.",
+      "filePath": "/Users/dimitrykatz/workspace/nimvarya/eslint.config.mjs",
+      "implication": "Narrow the CDP reply and the command-response payload with hand-written guards (an isSaveImagePayload in protocol/ or server), never by casting. Buffer.from(base64,'base64') is fine. Keep the node:fs import in the MCP layer only; the extension bundle must not pull it in."
+    },
+    {
+      "area": "guard (missing from file): co-located unit test + exported-symbol importer rule",
+      "finding": "present as a written rule in README 'Conventions': every non-types.ts file under src/ has a co-located .unit.test.ts that names its exports, and every exported symbol must have an importer. vitest includes only src/**/*.unit.test.ts and *.int.test.ts.",
+      "filePath": "/Users/dimitrykatz/workspace/nimvarya/README.md",
+      "implication": "A new src/mcp/image-writer.ts needs src/mcp/image-writer.unit.test.ts. Writer tests may use a temp dir (fs.mkdtemp) and should verify the 'wx' refusal leaves the existing file's bytes and mtime unchanged. Do not export helpers that have no importer."
+    },
+    {
+      "area": "needs: no downloads permission",
+      "finding": "present — extension/manifest.json permissions are tabs, activeTab, scripting, storage, alarms, debugger, plus host_permissions <all_urls>. No 'downloads'. The debugger permission already covers Runtime.evaluate.",
+      "filePath": "/Users/dimitrykatz/workspace/nimvarya/extension/manifest.json",
+      "implication": "No manifest change is needed. A test or grep check that chrome.downloads is never referenced and the permissions list is unchanged would enforce success criterion (6)."
+    },
+    {
+      "area": "conflict: docs locations differ from task wording",
+      "finding": "present — README has no dated 'Verified' block. It says 'twenty-two page actions' (README.md ~line 27) and links to docs/TOOLS.md, which also says 'twenty-two' twice and enumerates the names at lines 1-15, and to docs/VERIFICATION.md, which holds the dated live-Chrome traces (e.g. '## `sendKeys` on a rich editor (2026-10-02)').",
+      "filePath": "/Users/dimitrykatz/workspace/nimvarya/docs/VERIFICATION.md",
+      "implication": "The docs phase must update README's count to twenty-three, update docs/TOOLS.md (count, name list, a new `## saveImage` section; the 'every other tool returns text' sentence stays accurate), and add a dated `## saveImage on gemini.google.com (YYYY-MM-DD)` section to docs/VERIFICATION.md rather than README."
+    },
+    {
+      "area": "needs: project memory files for phase-0 probe",
+      "finding": "present — docs/roadmaps/nimvarya/ contains decisions.md, discoveries.md, blockers.md, state.md, vision.md, next-horizon-brief.md and horizons/. decisions.md records the h9 Runtime.evaluate lift (returnByValue+awaitPromise on the sandbox tab). blockers.md records the unfocused-tab render suspension (h10/h12/h14) and that the AI-client image-block size limits were never measured.",
+      "filePath": "/Users/dimitrykatz/workspace/nimvarya/docs/roadmaps/nimvarya/discoveries.md",
+      "implication": "Record the phase-0 Gemini probe result (src scheme, read route, naturalWidth readiness in the unfocused tab) in discoveries.md. Returning no image block sidesteps the unmeasured client image-size blocker."
+    },
+    {
+      "area": "needs: CDP reply size through chrome.debugger",
+      "finding": "unknown — the repo has no evidence that chrome.debugger.sendCommand Runtime.evaluate returnByValue has been tested with a multi-MB string (the largest so far is a captureTab PNG, capped at 1.2M base64 chars by the ladder). The h13 probe showed large CDP work can exceed the 15s cap and wedge the session.",
+      "filePath": "/Users/dimitrykatz/workspace/nimvarya/docs/VERIFICATION.md",
+      "implication": "The phase-0 probe should also time a large (~10-25 MB) returnByValue string read in the sandbox tab. If it is slow or fails, fall back to the in-page cap or Runtime.callFunctionOn/IO.read chunking (chunking over the relay stays out of scope)."
+    },
+    {
+      "area": "needs: mime/magic-number + dimension source",
+      "finding": "missing — the only image decoding helper is readPngDimensions (page-actions.ts:485), which is PNG-only and lives on the extension side. Nothing on the MCP side sniffs magic numbers.",
+      "filePath": "/Users/dimitrykatz/workspace/nimvarya/src/extension/page-actions.ts",
+      "implication": "Take width/height from the in-page naturalWidth/naturalHeight (img) or canvas.width/height. Add a small pure MCP-side sniffMimeType(bytes) covering PNG, JPEG, WebP and GIF, and reconcile it with the page-reported blob.type, letting the sniffed type win (or rejecting a mismatch). Unit-test it alongside the writer."
+    }
+  ],
+  "repoGuards": [
+    {
+      "id": "g1",
+      "mechanism": "lint-rule",
+      "source": "eslint.config.mjs",
+      "trigger": "on lint (npm run lint = eslint . --max-warnings 0)",
+      "effect": "blocks",
+      "enforces": "typescript-eslint strictTypeChecked with zero warnings: no explicit any, no non-null assertions outside tests, separate type-only imports, `JSON.parse(x) as T` banned (parse to unknown then narrow with a guard), `satisfies` banned",
+      "paths": [],
+      "command": "eslint . --max-warnings 0"
+    },
+    {
+      "id": "g2",
+      "mechanism": "written-rule",
+      "source": "package.json scripts.verify",
+      "trigger": "npm run verify",
+      "effect": "requires",
+      "enforces": "tsc --noEmit, eslint and vitest run must all pass; PAGE_ACTIONS parity is enforced at compile time by Record<PageAction, …> maps in src/mcp/tool-catalog.ts and the extension handler table",
+      "paths": [],
+      "command": "npm run verify"
+    }
+  ],
+  "requiredMaterials": [
+    {
+      "name": "Live signed-in Chrome with the rebuilt nimvarya extension, the relay, and a fresh Claude Code MCP session",
+      "kind": "tool",
+      "whyNeeded": "Phases 0 (probe) and 4 (live verify) run real tool calls against the sandbox tab; a stale MCP catalog/service worker has stalled past live phases (h7/h9/h11).",
+      "acquisitionNote": "User loads/reloads the unpacked extension from dist, starts the relay, and restarts Claude Code so the nimvarya MCP server connects (it failed to connect in the planning session)."
+    },
+    {
+      "name": "A gemini.google.com conversation showing a Gemini-generated image in the sandbox tab",
+      "kind": "credential",
+      "whyNeeded": "Phases 0 and 4 read and save a real generated image; image generation needs an account with access.",
+      "acquisitionNote": "User signs in to Gemini in that Chrome profile and generates (or opens) a conversation with a generated image; the sandbox tab is navigated there."
+    }
+  ],
+  "phases": [
+    {
+      "id": "probe-gemini-image-read-route",
+      "order": 0,
+      "name": "Probe Gemini image source and byte-read route",
+      "goal": "Find out, on a real Gemini-generated image open in the sandbox tab, which src scheme the image uses (blob:, data: or cross-origin https), which in-page read route returns its full-resolution bytes, and whether the image is loaded and decoded in the unfocused sandbox tab. Write the answer down as a probe report whose verdict either confirms the in-page fetch route that the reader phase plans to use or names the route it must use instead.",
+      "rationale": "saveImage reads the image bytes inside the page through CDP Runtime.evaluate (CDP is the Chrome DevTools Protocol, which the extension already drives via chrome.debugger). That only works if an in-page fetch(src) or canvas toBlob can reach the bytes. A cross-origin https image hits CORS, and a canvas drawn from it becomes 'tainted', meaning the browser refuses to export its pixels. In that case the reader needs a different CDP route (Page.getResourceContent or Network.getResponseBody), so this has to be known before the reader is built. Horizons 13 and 15 opened with the same kind of probe.",
+      "filesAffected": [
+        "docs/probes/save-image-gemini-probe.md",
+        "docs/roadmaps/nimvarya/discoveries.md"
+      ],
+      "changes": [
+        "In the user's signed-in Chrome, with a fresh MCP session through Claude Code, put the sandbox tab on a gemini.google.com conversation that shows a generated image, and find a stable CSS selector for that image with the existing snapshot/query tools.",
+        "With the existing evaluatePage tool (it caps results at 1,000,000 characters, so return only small values), record: the element's tagName, src/currentSrc scheme and origin, complete, naturalWidth/naturalHeight versus its CSS size, and document.visibilityState.",
+        "With evaluatePage, try the in-page fetch route: await fetch(currentSrc) then blob(). Record ok/error, blob.size, blob.type, and the time taken for fetch plus FileReader base64 conversion. Return only lengths and timings, never the bytes.",
+        "With evaluatePage, try the canvas route (draw the img to a canvas, then toBlob). Record whether it throws a SecurityError (tainted) and the resulting size and type.",
+        "Record the real Gemini image's blob.size and its base64 length (return only the numbers). Under the 'Large-return timing' heading, state plainly that only a ~900,000-character return can be measured with the existing evaluatePage tool (1,000,000-character cap) and that no probe code is added; if the real base64 length is well over 1 MB, record that the real-size CDP transfer is untested until the live phase, where a timeout surfaces as the guard()-mapped { error } outcome.",
+        "Measure how long CDP returnByValue takes to carry a large string by having evaluatePage return a string of about 900,000 characters, and record the round-trip time. Note in the report that the full ~33 MB base64 transfer is only measured in the live-verification phase.",
+        "Write docs/probes/save-image-gemini-probe.md with fixed headings: Date, Selector, Src scheme, Loaded in unfocused tab, Fetch route, Canvas route, Real image size, Large-return timing. End it with exactly one line 'VERDICT: PROCEED in-page-fetch' or 'VERDICT: REPLAN <route and reason>'.",
+        "Add one dated line to docs/roadmaps/nimvarya/discoveries.md that summarises the verdict and links the probe report."
+      ],
+      "boundedContext": "extension CDP in-page read (sandbox tab)",
+      "layer": "infrastructure",
+      "blastRadius": "small",
+      "inputs": [
+        "EXTERNAL: Live signed-in Chrome with the rebuilt nimvarya extension, the relay, and a fresh Claude Code MCP session",
+        "EXTERNAL: a gemini.google.com conversation in the sandbox tab that already shows a Gemini-generated image",
+        "discovery: evaluatePage 1,000,000-character result cap and the untested multi-MB returnByValue size through chrome.debugger",
+        "decisions.md h9: Runtime.evaluate (returnByValue + awaitPromise) allowed on the sandbox tab"
+      ],
+      "expectedResult": "docs/probes/save-image-gemini-probe.md exists with all eight headings filled from live measurements and exactly one line matching ^VERDICT: (PROCEED in-page-fetch|REPLAN .+)$, checkable by grep.",
+      "dependsOn": [],
+      "guardNotes": [
+        "g1: no source code changes; nothing for eslint to check",
+        "g2: no source code changes; npm run verify stays green unchanged"
+      ],
+      "rubric": [
+        {
+          "id": "single-grep-checkable-verdict",
+          "label": "Exactly one machine-checkable verdict",
+          "ruleStatement": "The probe report ends in exactly one verdict line that a script can parse, and a REPLAN verdict names a concrete CDP route. 10 = one verdict line, last line of the file, and a REPLAN names the exact CDP method plus the measured reason; 8 = one valid verdict line; minScore 7 allows a valid verdict with a terse reason.",
+          "passCriteria": [
+            "Run `grep -cE '^VERDICT: (PROCEED in-page-fetch|REPLAN .+)$' docs/probes/save-image-gemini-probe.md`. It prints exactly 1.",
+            "Run `grep -c '^VERDICT' docs/probes/save-image-gemini-probe.md`. It prints exactly 1, so there is no draft or second verdict line.",
+            "If the verdict is REPLAN, the same line names a CDP method such as `Page.getResourceContent` or `Network.getResponseBody`, not just 'use another route'."
+          ],
+          "failureExamples": [
+            "The report ends with 'Verdict: proceed with fetch'. The case and wording differ, so the grep prints 0.",
+            "Two VERDICT lines are left in: an early 'REPLAN' and a later 'PROCEED in-page-fetch' added after a retry.",
+            "'VERDICT: REPLAN CORS' names no route, so the reader phase cannot act on it."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "live-measurements-recorded",
+          "label": "Every heading holds a live measured value",
+          "ruleStatement": "All eight fixed headings are present and each holds a concrete measured value (scheme, booleans, byte counts, pixel sizes, millisecond timings), not a placeholder or a guess. 10 = every value includes units and the raw evaluatePage return it came from; 8 = all eight filled with concrete numbers; minScore 7.",
+          "passCriteria": [
+            "For each heading Date, Selector, Src scheme, Loaded in unfocused tab, Fetch route, Canvas route, Real image size, Large-return timing, run `grep -c '<heading>' docs/probes/save-image-gemini-probe.md`. Each prints at least 1.",
+            "Run `grep -nE 'TBD|TODO|\\?\\?\\?' docs/probes/save-image-gemini-probe.md`. It prints nothing.",
+            "The 'Real image size' section states blob.size in bytes and the base64 length as integers, and the image's naturalWidth x naturalHeight next to its CSS size.",
+            "The 'Loaded in unfocused tab' section records `complete`, `naturalWidth` and `document.visibilityState` values as read from the page."
+          ],
+          "failureExamples": [
+            "'Src scheme: blob (probably)' is written from the DOM inspector without recording the actual currentSrc origin.",
+            "The Fetch route says 'works' with no blob.size, blob.type or timing.",
+            "The image is measured in a focused, foreground tab, so 'Loaded in unfocused tab' reports visibilityState 'visible', which says nothing about the sandbox tab."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "verdict-follows-evidence",
+          "label": "The verdict is consistent with the recorded routes",
+          "ruleStatement": "The verdict is the one the recorded measurements support. PROCEED needs a successful fetch with a nonzero blob.size in an unfocused tab; a CORS or fetch error, a tainted canvas, or a not-loaded image forces REPLAN. 10 = the report also states the fallback route it would use if the fetch had failed and why; 8 = the verdict matches the evidence; minScore 8 because a wrong verdict sends the reader phase down the wrong path.",
+          "passCriteria": [
+            "If the 'Fetch route' section records an error, a CORS failure or blob.size 0, the verdict line starts with `VERDICT: REPLAN`.",
+            "If the verdict is `PROCEED in-page-fetch`, the 'Fetch route' section records ok=true, a blob.size greater than 0 and a blob.type starting with `image/`.",
+            "If the verdict is PROCEED, the 'Loaded in unfocused tab' section shows complete=true and naturalWidth greater than 0 with visibilityState 'hidden'."
+          ],
+          "failureExamples": [
+            "The fetch succeeded on a googleusercontent https URL only because the tab was focused at the time. The verdict says PROCEED, but the unfocused-tab section shows naturalWidth 0.",
+            "The canvas route threw a SecurityError and the fetch route was never tried, yet the verdict says PROCEED in-page-fetch."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "transfer-timing-vs-cdp-cap",
+          "label": "Large-return timing measured against the 15 s cap",
+          "ruleStatement": "The report measures how long a large returnByValue string takes to come back and compares it with the 15 s CDP cap, so a transfer problem shows up before the reader is built. 10 = it records both the roughly 900,000-character round trip and a real-size (image base64 length) round trip in ms, each next to 15000 ms; 8 = the roughly 900,000-character timing recorded in ms with the cap stated; minScore 7.",
+          "passCriteria": [
+            "The 'Large-return timing' section contains a character count of at least 900000 and a round-trip duration in ms (check with `grep -nE '[0-9]+ ?ms' docs/probes/save-image-gemini-probe.md`).",
+            "If the recorded base64 length is over 1,000,000, the section also records a timing for a return of about that length, or explicitly states why it could not be measured.",
+            "The section states whether each measured time is below 15000 ms."
+          ],
+          "failureExamples": [
+            "The timing is measured with a 10,000-character string and extrapolated linearly to 33 MB, with no real large return.",
+            "Only the evaluatePage wall-clock time is reported, and it includes a page navigation, so it does not isolate the transfer."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "probe-leaves-no-code-or-bytes",
+          "label": "The probe changes no code and stores no image bytes",
+          "ruleStatement": "The probe is read-only with respect to the codebase, and the report holds only lengths and timings, never image bytes. 10 = no source diff and no line in the report longer than 500 characters; 8 = no source diff and no embedded base64; minScore 8.",
+          "passCriteria": [
+            "Run `git diff --name-only HEAD -- src extension package.json`. It prints nothing.",
+            "Run `awk 'length > 2000' docs/probes/save-image-gemini-probe.md`. It prints nothing (no pasted base64 or data: URL).",
+            "Run `grep -c 'data:image' docs/probes/save-image-gemini-probe.md`. It prints 0, or the matches are only a scheme name with no payload."
+          ],
+          "failureExamples": [
+            "A temporary chrome.debugger probe helper is added to src/extension for timing and left behind.",
+            "The fetch return is pasted into the report including a truncated base64 sample that is thousands of characters long."
+          ],
+          "minScore": 8
+        }
+      ],
+      "healerHint": "Most likely failure: the measurements were taken with the sandbox tab focused, or the fetch error was ignored, so the verdict does not match the unfocused-tab evidence. Re-run the evaluatePage checks with the tab in the background, then rewrite the single VERDICT line from those numbers."
+    },
+    {
+      "id": "add-image-reader-debugger-port",
+      "order": 1,
+      "name": "Add in-page image byte reader to debugger ports",
+      "goal": "Give the extension's DebuggerPorts a readImage(tabId, selector) method. It runs one dedicated Runtime.evaluate inside the existing per-command debugger session, reads the selected <img> or <canvas> in full resolution in the page using the route the probe confirmed, enforces the 25 MB cap in the page before any bytes leave it, and returns a typed image read result.",
+      "rationale": "The existing evaluate path cannot carry image bytes. It caps output at 1,000,000 characters (coerceExecuteScriptOutcome), and cdpEvalOutcome JSON-serialises the whole value a second time, so a ~33 MB base64 payload needs its own narrow CDP method. Checking the size in the page means an oversized image is never moved through the relay.",
+      "filesAffected": [
+        "src/extension/debugger-ports.ts",
+        "src/protocol/types.ts",
+        "src/extension/debugger-ports.unit.test.ts",
+        "src/extension/page-actions.unit.test.ts",
+        "src/extension/service-worker.unit.test.ts"
+      ],
+      "changes": [
+        "In src/protocol/types.ts, add the ImageReadResult discriminated union: success is { read: true, base64, mimeType, width, height, byteLength }; failure is { read: false, reason: 'element-not-found' | 'not-image' | 'not-loaded' | 'tainted' | 'too-large', size?, limit? }. Do not add any Record<PageAction,…> key yet.",
+        "In debugger-ports.ts, add readImage(tabId, selector): Promise<ImageReadResult> to the DebuggerPorts interface and its chrome.debugger implementation. Run it through withDebuggerSession under the 15 s CDP cap, and add 'reading image' to the session label union.",
+        "Build the in-page expression with JSON.stringify(selector), never by string concatenation. For <img>, use the probe's route (by default await fetch(currentSrc).blob()) and take width/height from naturalWidth/naturalHeight. For <canvas>, use toBlob('image/png') and canvas.width/height. Convert to base64 with FileReader. Return reason 'not-loaded' when the image is not complete or has zero size, and 'tainted' on a SecurityError or a failed fetch.",
+        "Add a module-private MAX_SAVE_IMAGE_BYTES = 25 * 1024 * 1024. Compare blob.size against it in the page. When it is over, return { read: false, reason: 'too-large', size, limit } with no base64.",
+        "Narrow the Runtime.evaluate reply with a hand-written guard (no JSON.parse-as, no casts) into ImageReadResult. A malformed reply throws a clear Error.",
+        "Add a readImage stub to both full DebuggerPorts fakes (page-actions.unit.test.ts fakeDebugger and the literal in service-worker.unit.test.ts).",
+        "In debugger-ports.unit.test.ts, use installStubDebugger with Runtime.evaluate-shaped replies to test the success, every failure reason, a malformed reply and a timeout. Assert that detach runs on every path and that the selector reaches the expression only JSON-encoded."
+      ],
+      "boundedContext": "extension debugger ports (CDP)",
+      "layer": "infrastructure",
+      "blastRadius": "medium",
+      "inputs": [
+        "docs/probes/save-image-gemini-probe.md verdict (the read route to use)",
+        "discovery: withDebuggerSession, the 15 s CDP_COMMAND_TIMEOUT_MS and the evaluate/coerce 1 MB conflict",
+        "discovery: DebuggerPorts fakes in the page-actions and service-worker tests"
+      ],
+      "expectedResult": "debugger-ports.unit.test.ts has passing readImage cases for success, all five failure reasons, a malformed reply and a timeout, with npm run verify green.",
+      "dependsOn": [
+        "probe-gemini-image-read-route"
+      ],
+      "guardNotes": [
+        "g1: the CDP reply is parsed to unknown and narrowed with a hand-written guard; type-only imports for ImageReadResult; no satisfies; no non-null assertions",
+        "g2: both full DebuggerPorts fakes gain readImage in this phase so tsc --noEmit stays green; PAGE_ACTIONS is untouched (still 22)"
+      ],
+      "compensation": "Revert the readImage method, its label and the ImageReadResult type. No consumers exist until the next phase.",
+      "rubric": [
+        {
+          "id": "selector-json-encoded",
+          "label": "Selector injection safety",
+          "ruleStatement": "The selector reaches the Runtime.evaluate expression only through JSON.stringify, so no selector value can break out of its string literal. 10 = a unit test with a hostile selector (quotes, backtick, `${`, `</script>`, newline) asserts the expression contains exactly JSON.stringify(selector) and parses as valid JS; 8 = a test asserts the JSON-encoded selector appears in the expression; minScore 8.",
+          "passCriteria": [
+            "In src/extension/debugger-ports.ts, the readImage expression builder uses `JSON.stringify(selector)`. Run `grep -n 'JSON.stringify(selector)' src/extension/debugger-ports.ts` and it matches inside readImage.",
+            "Run `grep -nE \"[\\x60'\\\"]\\s*\\+\\s*selector|\\$\\{selector\\}\" src/extension/debugger-ports.ts`. It finds no raw interpolation of selector.",
+            "debugger-ports.unit.test.ts has a readImage case whose selector contains a double quote and a backtick, and it asserts that the captured Runtime.evaluate `expression` includes `JSON.stringify(thatSelector)`."
+          ],
+          "failureExamples": [
+            "The selector is put in a template literal as document.querySelector('${selector}'). It works for '#img' but breaks on a selector like `img[alt=\"it's\"]`.",
+            "JSON.stringify is used, but the test only uses the selector 'img', so an interpolation regression would still pass."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "in-page-size-cap-before-encode",
+          "label": "25 MB cap enforced in the page before any bytes leave it",
+          "ruleStatement": "blob.size is compared with MAX_SAVE_IMAGE_BYTES (25*1024*1024) inside the page expression before FileReader base64 conversion, and the too-large reply carries size and limit but no base64. 10 = boundary tests at exactly the limit (allowed) and the limit+1 (too-large), plus a check that the too-large reply has no base64 key; 8 = the in-page check is placed before encoding and a too-large test asserts size/limit and no base64; minScore 8.",
+          "passCriteria": [
+            "Run `grep -n 'MAX_SAVE_IMAGE_BYTES' src/extension/debugger-ports.ts`. It shows a constant equal to `25 * 1024 * 1024` that is interpolated into the in-page expression.",
+            "In the generated expression, the size comparison appears before `readAsDataURL`/`FileReader` (checked by a unit test that asserts the index of the size check is lower than the index of FileReader in the captured expression, or by reading the expression builder).",
+            "A unit test feeds a `{read:false, reason:'too-large', size, limit}` reply and asserts the result has `size`, `limit === 26214400` and no `base64` property."
+          ],
+          "failureExamples": [
+            "The cap is checked in the service worker after Runtime.evaluate returns, so a 30 MB base64 string has already crossed CDP before it is rejected.",
+            "The cap is checked against base64.length instead of blob.size, so images between about 18.75 MB and 25 MB are wrongly reported as too large."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "reply-guard-rejects-malformed",
+          "label": "Hand-written guard narrows every reply shape",
+          "ruleStatement": "The Runtime.evaluate result value is narrowed into ImageReadResult by a hand-written guard that accepts only the documented shapes, and anything else throws a clear Error. 10 = tests cover every one of the five failure reasons, success, and at least three distinct malformed shapes (an unknown reason string, read:true missing base64, width that is not a number); 8 = all five reasons, success, and one malformed reply tested; minScore 7.",
+          "passCriteria": [
+            "debugger-ports.unit.test.ts has one readImage test each for reason 'element-not-found', 'not-image', 'not-loaded', 'tainted' and 'too-large', and one for success. Run `npx vitest run src/extension/debugger-ports.unit.test.ts -t readImage` and all pass.",
+            "There is a test where the reply is `{read:true, mimeType:'image/png', width:1, height:1}` (no base64) or `{read:false, reason:'bogus'}`, and it asserts readImage rejects with an Error whose message mentions readImage or the image reply.",
+            "Run `grep -nE 'as ImageReadResult|as unknown as' src/extension/debugger-ports.ts`. It prints nothing."
+          ],
+          "failureExamples": [
+            "The guard only checks `typeof value.read === 'boolean'`, so `{read:false, reason:'bogus'}` passes through typed as a valid failure.",
+            "A CDP exceptionDetails reply (the page threw) is passed to the guard and comes back as 'tainted' instead of being surfaced as an error."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "session-detached-every-path",
+          "label": "Debugger session detaches on success, failure and timeout",
+          "ruleStatement": "readImage runs in withDebuggerSession under the 15 s CDP cap with label 'reading image', and the debugger detaches on every exit path. 10 = detach is asserted on success, each failure reason, a malformed reply and a timeout (using fake timers that advance to 15000 ms); 8 = detach asserted on success, one failure, malformed and timeout; minScore 8.",
+          "passCriteria": [
+            "Run `grep -n \"'reading image'\" src/extension/debugger-ports.ts`. It matches both the label union and the readImage call.",
+            "The readImage timeout test advances fake timers past CDP_COMMAND_TIMEOUT_MS, asserts readImage rejects, and asserts the stub debugger's detach was called once.",
+            "The success and malformed-reply tests each assert one attach and one detach call on the stub debugger."
+          ],
+          "failureExamples": [
+            "readImage calls chrome.debugger.sendCommand directly outside withDebuggerSession. It works in tests, but a malformed reply leaves the tab attached and the next command fails with 'Another debugger is already attached'.",
+            "The timeout test uses a real 15 s wait and is skipped or flaky, so detach after a timeout is never actually asserted."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "natural-dimensions-and-probe-route",
+          "label": "Reads natural pixel size via the probe-confirmed route",
+          "ruleStatement": "For <img>, width and height come from naturalWidth/naturalHeight and the bytes come from the route named in the probe verdict; for <canvas>, from canvas.width/height and toBlob('image/png'). CSS-size APIs are never used. 10 = canvas and img branches are both exercised by tests that assert the expression references the right properties, and the route matches the probe verdict exactly; 8 = the expression uses natural/canvas dimensions and the verdict's route; minScore 7.",
+          "passCriteria": [
+            "Run `grep -nE 'naturalWidth|naturalHeight' src/extension/debugger-ports.ts`. It matches inside the readImage expression.",
+            "Run `grep -nE 'clientWidth|offsetWidth|getBoundingClientRect' src/extension/debugger-ports.ts`. It finds no use inside the readImage expression.",
+            "Run `grep -n \"toBlob\" src/extension/debugger-ports.ts`. It matches with 'image/png' for the canvas branch.",
+            "If `grep '^VERDICT' docs/probes/save-image-gemini-probe.md` says PROCEED in-page-fetch, the expression uses `fetch(` on currentSrc; if it says REPLAN, the expression or CDP calls use the route that line names."
+          ],
+          "failureExamples": [
+            "width uses img.width, which is the rendered CSS size on Gemini's thumbnail grid, so a 2048px image reports 512.",
+            "The probe said REPLAN Page.getResourceContent but the reader still uses fetch(currentSrc), which passes unit tests and fails with CORS on the real site."
+          ],
+          "minScore": 7
+        }
+      ],
+      "healerHint": "Most likely failure: readImage passes its happy-path tests but the size check runs after FileReader encoding or the selector is interpolated raw. Move the blob.size comparison before encoding, build the expression only with JSON.stringify(selector), and add the hostile-selector and limit+1 tests."
+    },
+    {
+      "id": "add-saveimage-page-action-parity",
+      "order": 2,
+      "name": "Add saveImage tool to protocol, extension and catalog",
+      "goal": "Make saveImage the 23rd page action in one atomic change: the PAGE_ACTIONS entry, the PageActionParams/PageActionResults types, the guard()-wrapped extension handler that calls debugger.readImage on the sandbox tab, the TOOL_CATALOG entry with schema {selector, path, overwrite?}, and the hard-coded action-list and length tests.",
+      "rationale": "PAGE_ACTIONS is the single source of truth, and four compile-time Record<PageAction,…> maps (PageActionParams, PageActionResults, TOOL_CATALOG, and both the raw and guard()-wrapped handler tables in page-actions.ts) must gain a saveImage key in the same change as the PAGE_ACTIONS edit, or tsc fails. That is why this is one phase even though it touches the protocol, extension and catalog files.",
+      "filesAffected": [
+        "src/protocol/actions.ts",
+        "src/protocol/actions.unit.test.ts",
+        "src/protocol/types.ts",
+        "src/extension/page-actions.ts",
+        "src/extension/page-actions.unit.test.ts",
+        "src/mcp/tool-catalog.ts",
+        "src/mcp/tool-catalog.unit.test.ts"
+      ],
+      "changes": [
+        "Append 'saveImage' after 'sendKeys' in PAGE_ACTIONS.",
+        "In types.ts, add SaveImageParams = { selector: string } (the wire command carries only the selector; page-actions.ts imports it type-only for the handler signature), add PageActionParams.saveImage, and add PageActionResults.saveImage = ImageReadResult.",
+        "In page-actions.ts, add a saveImage handler that validates selector as a non-empty string, resolves the sandbox tab with requireTabId, and returns debugger.readImage(tabId, selector). Register it in both the raw table and the guard()-wrapped return table, so a thrown error (for example a CDP timeout) becomes an { error } outcome.",
+        "In tool-catalog.ts, add the saveImage entry: inputSchema { selector: string, path: string (absolute), overwrite: boolean } with required ['selector','path'] and additionalProperties:false. The description states the result is only {path, bytes, width, height, mimeType}, the 25 MB limit, the overwrite refusal and every failure reason.",
+        "Bump actions.unit.test.ts to length 23 with saveImage last, bump tool-catalog.unit.test.ts listTools() to 23 with required.get('saveImage') equal to ['selector','path'], and add page-actions.unit.test.ts cases for a missing or empty selector, a delegated readImage result, and a thrown readImage becoming { error }.",
+        "Do not touch extension/manifest.json and do not reference chrome.downloads.",
+        "Do not rebuild/reload the MCP server or extension between this phase and the MCP image-writer phase: until the writer phase lands, saveImage would return raw base64 to the AI client, so the two phases ship together (no live session in between)."
+      ],
+      "boundedContext": "page-action parity surface (protocol + extension handler + tool catalog)",
+      "layer": "cross-cutting",
+      "blastRadius": "medium",
+      "inputs": [
+        "discovery: the four Record<PageAction,…> parity maps must land atomically with PAGE_ACTIONS",
+        "discovery: hard-coded length/order tests in actions.unit.test.ts:36 and tool-catalog.unit.test.ts:111",
+        "DebuggerPorts.readImage and ImageReadResult from the previous phase"
+      ],
+      "expectedResult": "PAGE_ACTIONS has 23 entries ending in 'saveImage', and npm run verify is green with the updated actions, tool-catalog and page-actions unit tests.",
+      "dependsOn": [
+        "add-image-reader-debugger-port"
+      ],
+      "guardNotes": [
+        "g2: PAGE_ACTIONS and all four Record<PageAction,…> maps change in this one phase, so tsc --noEmit never sees a missing key",
+        "g1: params are validated with structural checks, not casts; type-only imports for SaveImageParams and ImageReadResult"
+      ],
+      "compensation": "Revert the PAGE_ACTIONS entry together with all parity-map keys and test bumps in one commit. The tool catalog then advertises 22 tools again.",
+      "rubric": [
+        {
+          "id": "action-list-23-saveimage-last",
+          "label": "PAGE_ACTIONS and catalog list exactly 23 with saveImage last",
+          "ruleStatement": "PAGE_ACTIONS has 23 entries, 'saveImage' is directly after 'sendKeys' at the end, and the hard-coded order/length tests and listTools() agree. 10 = the tests assert the full ordered array, not just the length; 8 = length 23 and saveImage last asserted in both test files; minScore 8.",
+          "passCriteria": [
+            "Run `npx vitest run src/protocol/actions.unit.test.ts src/mcp/tool-catalog.unit.test.ts`. It passes.",
+            "In src/protocol/actions.unit.test.ts, an assertion expects a length of 23 and the last element to be 'saveImage', with 'sendKeys' at index 21.",
+            "In src/mcp/tool-catalog.unit.test.ts, listTools() is asserted to return 23 tools and the saveImage tool's required equals ['selector','path']."
+          ],
+          "failureExamples": [
+            "saveImage is inserted alphabetically in the middle of PAGE_ACTIONS. tsc passes, but the ordered-list test is changed to match and the catalog order seen by clients shifts.",
+            "The test length is bumped to 23 but the assertion still checks the old last element via a slice, so it never actually confirms saveImage."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "catalog-schema-strict",
+          "label": "Strict saveImage input schema and complete description",
+          "ruleStatement": "The TOOL_CATALOG saveImage inputSchema allows only selector (string), path (string, absolute) and overwrite (boolean), with required ['selector','path'] and additionalProperties:false. The description names the result fields, the 25 MB limit, the overwrite refusal and every failure reason. 10 = a test asserts the exact property key set and additionalProperties false, and the description names all seven outcomes; 8 = schema exact and description lists the reasons; minScore 7.",
+          "passCriteria": [
+            "A tool-catalog unit test asserts `Object.keys(saveImage.inputSchema.properties).sort()` equals ['overwrite','path','selector'] and `additionalProperties === false`.",
+            "Run `grep -A40 'saveImage' src/mcp/tool-catalog.ts | grep -oE 'element-not-found|not-image|not-loaded|tainted|too-large|25 ?MB|overwrite' | sort -u`. Every one of those terms appears.",
+            "The saveImage description mentions `{path, bytes, width, height, mimeType}` and the word 'absolute' for path."
+          ],
+          "failureExamples": [
+            "overwrite is declared as type 'string' because it is copied from another tool, so the client sends 'true' and the server's boolean check silently treats it as false.",
+            "additionalProperties is omitted, so a caller's typo 'paths' is accepted and path is reported missing only later in the server."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "handler-validates-and-wraps-errors",
+          "label": "Extension handler validates selector, targets the sandbox and wraps throws",
+          "ruleStatement": "The saveImage handler rejects a missing, empty or non-string selector without calling readImage, resolves the tab with requireTabId (the sandbox tab), returns readImage's result unchanged, and is registered in the guard()-wrapped table so a thrown error becomes {error}. 10 = tests cover missing, empty, non-string selector, delegation identity, and a thrown CDP timeout, each asserting readImage's call count; 8 = missing/empty, delegation and thrown-to-error tested; minScore 8.",
+          "passCriteria": [
+            "Run `npx vitest run src/extension/page-actions.unit.test.ts -t saveImage`. It passes, with cases for selector undefined, '' and a non-string (for example 42), each asserting the fake readImage was called 0 times.",
+            "A test makes the fake readImage reject with `new Error('CDP timeout')` and asserts the dispatched outcome is `{ error: ... }` containing that message, not a rejected promise.",
+            "Run `grep -n 'saveImage' src/extension/page-actions.ts`. It shows the handler using `requireTabId` and appearing in both the raw table and the guard()-wrapped table."
+          ],
+          "failureExamples": [
+            "The handler is added to the raw table only. tsc passes because a later spread covers the key, but a thrown readImage escapes as an unhandled rejection in the service worker.",
+            "Selector validation uses `typeof selector === 'string'` only, so '' reaches the page and comes back as 'element-not-found' instead of a param error."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "wire-and-permission-minimal",
+          "label": "Wire command carries only selector and no permission is added",
+          "ruleStatement": "SaveImageParams on the extension wire is exactly {selector: string}, and this phase leaves extension/manifest.json untouched and never references chrome.downloads. 10 = additionally a test shows that extra keys (path/overwrite) sent to the extension handler are ignored, not used; 8 = type and manifest checks pass; minScore 8.",
+          "passCriteria": [
+            "Run `grep -n 'SaveImageParams' src/protocol/types.ts`. The type declares only `selector: string`.",
+            "Run `git diff --exit-code HEAD~1 -- extension/manifest.json` (or the diff against the phase's base commit). It exits 0.",
+            "Run `grep -rn 'chrome.downloads' src extension`. It prints nothing."
+          ],
+          "failureExamples": [
+            "SaveImageParams includes path and overwrite \"for completeness\", which invites the extension to write files and puts the caller's filesystem path into page-side logs.",
+            "'downloads' is added to manifest permissions while experimenting with a fallback and left in."
+          ],
+          "minScore": 8
+        }
+      ],
+      "healerHint": "Most likely failure: a parity key is added only to the raw handler table or a test is bumped by length but not by order. Register saveImage in both raw and guard()-wrapped tables and assert the full ordered PAGE_ACTIONS array ending ['sendKeys','saveImage']."
+    },
+    {
+      "id": "add-mcp-image-writer-and-saveimage-branch",
+      "order": 3,
+      "name": "Add MCP image writer and saveImage server branch",
+      "goal": "Make the MCP server, not the extension, write the image to disk. A new image writer (src/mcp/image-writer.ts) does an exclusive-create write and sniffs the MIME type from the file's magic number. A saveImage branch in handleToolCall checks that the path is absolute, strips path and overwrite before forwarding {selector}, narrows the image read result, writes the bytes, and returns only {path, bytes, width, height, mimeType}.",
+      "rationale": "Writing to a caller-given path is a file-write primitive, so the absolute-path check, overwrite-off-by-default, and a race-safe exclusive create (open flag 'wx' rather than check-then-write) must all live in one tested place. No src file does filesystem I/O today. A small writer injected through McpServerDeps keeps node:fs out of the pure server mapper and lets server tests use a fake. The writer and the branch are one small slice of one subsystem (the MCP server) across layers, and nothing else consumes the writer.",
+      "filesAffected": [
+        "src/mcp/image-writer.ts",
+        "src/mcp/image-writer.unit.test.ts",
+        "src/mcp/server.ts",
+        "src/mcp/server.unit.test.ts",
+        "src/mcp/main.ts",
+        "README.md",
+        "docs/TOOLS.md"
+      ],
+      "changes": [
+        "Create src/mcp/image-writer.ts with writeImageFile(path, bytes, overwrite) using node:fs/promises open with flag 'wx' (or 'w' only when overwrite is true). It returns { written: true, bytes } or a refusal { written: false, reason: 'exists' | 'parent-missing' | 'io-error', message } and never creates directories. Also add sniffMimeType(bytes) for PNG, JPEG, WebP and GIF magic numbers.",
+        "In image-writer.unit.test.ts, use fs.mkdtemp to test: a fresh write; an existing file without overwrite is refused with its bytes and mtime unchanged; overwrite:true replaces the file; a missing parent directory gives 'parent-missing'; each sniffed format; unknown bytes.",
+        "Add imageWriter to McpServerDeps and wire the real writer in main.ts (defaultMcpMainDeps/runMcpServer).",
+        "In server.ts, add a toolName === 'saveImage' branch. Reject a non-string or non-absolute path (path.isAbsolute) with isError before calling the client. Send only { selector }. Narrow the response with a private isImageReadResult guard. Map read:false to an isError JSON result carrying the reason (plus size and limit for too-large). Decode base64 with Buffer.from, let the sniffed MIME type win over the page-reported type, write through the writer, map a refusal to isError, and on success return text JSON with exactly {path, bytes, width, height, mimeType}, with no image block and no base64.",
+        "In server.unit.test.ts, use a fake writer and a fake client to test: relative path rejected and client never called; path/overwrite stripped from the forwarded params; success result keys exactly equal to the five fields; bytes equal to the decoded length; every read failure reason; 'exists' refusal; sniffed type overriding the page type.",
+        "Change 'twenty-two' to 'twenty-three' in README.md and docs/TOOLS.md, add saveImage to TOOLS.md's name list, and add a '## saveImage' section to TOOLS.md describing parameters, result and failure outcomes.",
+        "Add a one-line link in README.md to docs/VERIFICATION.md for live-verification records (the saveImage section itself is added by the live-verify phase)."
+      ],
+      "boundedContext": "MCP server (tool-call mapping and file output)",
+      "layer": "cross-cutting",
+      "blastRadius": "medium",
+      "inputs": [
+        "discovery: no fs I/O in the MCP layer; ImageWriter seam on McpServerDeps; 'wx' exclusive create",
+        "discovery: server.ts forwards args verbatim; strip path/overwrite so the extension sees only {selector}",
+        "planner assumptions: a missing parent directory is an error; the sniffed MIME type wins",
+        "saveImage page action and ImageReadResult from the previous phases"
+      ],
+      "expectedResult": "npm run verify is green with new passing image-writer.unit.test.ts and server.unit.test.ts saveImage cases, including the overwrite refusal that leaves the existing file's bytes and mtime unchanged. README.md and docs/TOOLS.md say twenty-three tools and docs/TOOLS.md has a '## saveImage' section.",
+      "dependsOn": [
+        "add-saveimage-page-action-parity"
+      ],
+      "guardNotes": [
+        "g1: the command-response payload is narrowed with a hand-written isImageReadResult guard (no JSON.parse-as, no satisfies); type-only imports; node:fs is imported only under src/mcp so the extension bundle never pulls it in",
+        "g2: README 'Conventions' rule — the new image-writer.ts ships with a co-located image-writer.unit.test.ts, and every exported symbol (writeImageFile, sniffMimeType) has a non-test importer in server.ts or main.ts; tsc, eslint and vitest stay green through npm run verify"
+      ],
+      "compensation": "Revert the server branch, the McpServerDeps field, main.ts wiring and the new image-writer files. Files already written to disk by test calls live in mkdtemp directories and need no cleanup.",
+      "rubric": [
+        {
+          "id": "exclusive-create-no-clobber",
+          "label": "Race-safe exclusive create, overwrite off by default",
+          "ruleStatement": "writeImageFile opens with flag 'wx' unless overwrite is true, never checks existence before writing, and an existing file without overwrite comes back as 'exists' with its bytes and mtime unchanged. 10 = also a concurrency test where two simultaneous non-overwrite writes to one path produce exactly one written and one 'exists'; 8 = the 'wx' flag plus a test asserting unchanged bytes and mtime; minScore 9 because this is the file-write safety primitive.",
+          "passCriteria": [
+            "Run `grep -n \"'wx'\" src/mcp/image-writer.ts`. It matches the default open flag.",
+            "Run `grep -nE 'existsSync|access\\(|stat\\(' src/mcp/image-writer.ts`. It finds no existence check before the open.",
+            "image-writer.unit.test.ts writes a file in an fs.mkdtemp dir, calls writeImageFile on it with overwrite false, and asserts reason 'exists', identical file contents (Buffer.equals) and an identical mtimeMs from fs.stat before and after.",
+            "A test with overwrite:true asserts the file contents now equal the new bytes."
+          ],
+          "failureExamples": [
+            "The writer does `if (await exists(p)) return refusal; await writeFile(p, ...)`. All tests pass, but a concurrent write in between is silently clobbered.",
+            "'wx' is used, but the EEXIST error is mapped to 'io-error', so callers cannot tell a refusal from a disk failure."
+          ],
+          "minScore": 9
+        },
+        {
+          "id": "path-gate-before-transfer",
+          "label": "Absolute-path gate runs before the client call and only selector is forwarded",
+          "ruleStatement": "The saveImage branch rejects a non-string or non-absolute path with isError before calling the extension client, so no image bytes are moved for a bad path. The forwarded params are exactly {selector}. 10 = tests cover relative, '', '~/x' and non-string paths, each with client call count 0, plus a deep-equality check of the forwarded params; 8 = relative path rejected with zero client calls and forwarded params checked; minScore 9.",
+          "passCriteria": [
+            "server.unit.test.ts calls saveImage with path 'out.png' and asserts isError true and the fake client's call count is 0.",
+            "A server test asserts the fake client received params deep-equal to `{ selector: '#img' }` when called with `{selector:'#img', path:'/tmp/x.png', overwrite:true}`.",
+            "Run `grep -n 'isAbsolute' src/mcp/server.ts`. It matches inside the saveImage branch, before the client call."
+          ],
+          "failureExamples": [
+            "The path is validated after the client returns, so a relative path still makes the extension read and transfer up to 33 MB of base64 before it is rejected.",
+            "args is forwarded verbatim, so path and overwrite reach the extension, where the strict param check could reject them or they could be logged."
+          ],
+          "minScore": 9
+        },
+        {
+          "id": "result-contract-exact",
+          "label": "Success result is exactly {path, bytes, width, height, mimeType}",
+          "ruleStatement": "A successful call returns one text content block whose JSON has exactly the five keys, with bytes equal to the decoded length, the sniffed MIME type overriding the page-reported one, and no image block or base64 anywhere. 10 = also a writer test proving bytes equals fs.stat size on disk, and a server test where the page says image/jpeg but the bytes are PNG; 8 = exact key set, bytes equal to decoded length, no image block; minScore 8.",
+          "passCriteria": [
+            "A server test asserts `Object.keys(JSON.parse(result.content[0].text)).sort()` equals ['bytes','height','mimeType','path','width'] and `result.content.length === 1` with type 'text'.",
+            "The same test asserts `bytes === Buffer.from(base64, 'base64').length` and that the result text does not contain the base64 string.",
+            "A test supplies PNG magic bytes with page mimeType 'image/jpeg' and asserts the result mimeType is 'image/png'.",
+            "image-writer.unit.test.ts has sniffMimeType cases for PNG, JPEG, WebP and GIF magic numbers and one for unknown bytes."
+          ],
+          "failureExamples": [
+            "The success result spreads the whole ImageReadResult minus base64, so `read: true` and `byteLength` leak into the contract.",
+            "bytes is taken from the page's byteLength rather than the decoded Buffer, so a truncated transfer reports a size that does not match the file."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "failure-outcomes-distinct",
+          "label": "Each failure is a distinct non-throwing isError result",
+          "ruleStatement": "Every read failure reason and every writer refusal maps to an isError result that names its own reason, too-large carries size and limit, and no case throws out of handleToolCall. 10 = a table-driven test covers all five read reasons plus exists, parent-missing and io-error, and asserts that nothing was written for each read failure; 8 = all read reasons plus 'exists' tested as isError with their reason; minScore 8.",
+          "passCriteria": [
+            "Run `npx vitest run src/mcp/server.unit.test.ts -t saveImage`. It passes, with one case each for 'element-not-found', 'not-image', 'not-loaded', 'tainted' and 'too-large', each asserting isError true, the reason text in the content, and the fake writer called 0 times.",
+            "The too-large case asserts the result text contains both the size and the limit 26214400.",
+            "A case where the fake writer returns `{written:false, reason:'exists'}` asserts isError true with 'exists' in the text.",
+            "image-writer.unit.test.ts writes to `<mkdtemp>/missing/x.png` and asserts reason 'parent-missing', and that the directory `missing` still does not exist."
+          ],
+          "failureExamples": [
+            "All read failures collapse into one 'could not read image' message, so the live phase cannot tell element-not-found from not-image.",
+            "The writer calls mkdir({recursive:true}) to be helpful, so 'parent-missing' never happens and arbitrary directories are created."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "fs-behind-writer-seam",
+          "label": "Filesystem I/O lives only in the injected writer",
+          "ruleStatement": "node:fs is imported only by src/mcp/image-writer.ts (and wired in main.ts), server.ts reaches it only through McpServerDeps.imageWriter, and nothing under src/extension or src/protocol imports node modules. 10 = server tests use only a fake writer and touch no real disk; 8 = the import checks below pass; minScore 7.",
+          "passCriteria": [
+            "Run `grep -rln \"from 'node:fs\" src`. The only non-test result is src/mcp/image-writer.ts.",
+            "Run `grep -n 'imageWriter' src/mcp/server.ts src/mcp/main.ts`. It shows the McpServerDeps field in server.ts and the real writer wired in main.ts.",
+            "Run `grep -rn \"node:\" src/extension src/protocol --include='*.ts' | grep -v unit.test`. It prints nothing."
+          ],
+          "failureExamples": [
+            "server.ts imports writeFile directly for the saveImage branch, so server tests write to the real /tmp and the seam exists only on paper.",
+            "sniffMimeType is placed in src/protocol and imports Buffer from node:buffer, which pulls a node module into the extension bundle."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "user-docs-reflect-23-tools",
+          "label": "README and TOOLS.md describe the 23-tool surface",
+          "ruleStatement": "The user-facing docs say twenty-three tools, list saveImage, and document its parameters, result and every failure outcome. 10 = the TOOLS.md section also gives an example call and result; 8 = the counts and section are present with all outcomes; minScore 7.",
+          "passCriteria": [
+            "Run `grep -c 'twenty-two' README.md docs/TOOLS.md`. It prints 0 for both.",
+            "Run `grep -n '## saveImage' docs/TOOLS.md`. It matches once.",
+            "The TOOLS.md saveImage section names selector, path, overwrite, the five result fields, and each of too-large, element-not-found, not-image, not-loaded, tainted, relative path and existing file.",
+            "Run `grep -n 'VERIFICATION.md' README.md`. It includes a link to docs/VERIFICATION.md."
+          ],
+          "failureExamples": [
+            "README says twenty-three, but TOOLS.md's opening sentence still says twenty-two because only one occurrence was replaced.",
+            "The TOOLS.md section documents the success result but leaves out the failure outcomes."
+          ],
+          "minScore": 7
+        }
+      ],
+      "healerHint": "Most likely failure: the writer checks existence before writing, or the path gate runs after the client call. Switch to a single open(path, overwrite ? 'w' : 'wx') with EEXIST mapped to 'exists', and move the isAbsolute check above the client call with a zero-call-count test."
+    },
+    {
+      "id": "live-verify-saveimage-on-gemini",
+      "order": 4,
+      "name": "Test saveImage live on a Gemini image",
+      "goal": "In a fresh MCP session through Claude Code, save a Gemini-generated image from the sandbox tab to an absolute path. Confirm that the file's byte count, decoded dimensions and magic-number type match the returned fields and the in-page naturalWidth/naturalHeight, that a second call without overwrite is refused, and that the manifest gained no permission. Record the trace in docs/VERIFICATION.md.",
+      "rationale": "Unit tests cannot prove that a real multi-MB image survives CDP returnByValue, the MV3 service worker and the relay within the 15 s CDP and 30 s controller timeouts. The project's binding rule is that a live-Chrome phase stays blocked as MANUAL_CHROME_CHECK_PENDING until the check passes in a fresh MCP session verified through Claude Code.",
+      "filesAffected": [
+        "docs/VERIFICATION.md"
+      ],
+      "changes": [
+        "Rebuild, reload the extension, and start a fresh Claude Code MCP session so the 23-tool catalog is live (this avoids the stale-catalog and stale-service-worker stall seen in h7/h9/h11).",
+        "Put the sandbox tab on gemini.google.com showing a generated image, and call saveImage with the probe's selector and an absolute path in a temp directory. Record the returned {path, bytes, width, height, mimeType} and the call duration.",
+        "Check the file from the shell: stat size equals bytes, the `file` command type or magic number matches mimeType, and the decoded pixel dimensions (sips -g pixelWidth -g pixelHeight) equal width/height and the in-page naturalWidth/naturalHeight from evaluatePage.",
+        "Call saveImage again with the same path and no overwrite. Confirm it is refused and that the file's size and mtime are unchanged. Also confirm a relative path is rejected.",
+        "Call saveImage once with a selector that matches nothing and once on a non-image element (e.g. a div) on the same Gemini page; record that each returns its own distinct isError reason ('element-not-found', 'not-image') and writes no file.",
+        "Run grep -rn 'downloads' extension/manifest.json src (excluding tests). Confirm there are no hits and that the manifest permissions list is unchanged.",
+        "Add a dated '## `saveImage` on gemini.google.com (YYYY-MM-DD)' section to docs/VERIFICATION.md with the selector, src scheme, returned fields, shell checks and the refusal result.",
+        "If any check fails (for example a timeout on a near-cap image), leave the phase blocked as MANUAL_CHROME_CHECK_PENDING and record the failure rather than marking it done."
+      ],
+      "boundedContext": "end-to-end bridge (live Chrome via MCP)",
+      "layer": "interface",
+      "blastRadius": "small",
+      "inputs": [
+        "EXTERNAL: Live signed-in Chrome with the rebuilt nimvarya extension, the relay, and a fresh Claude Code MCP session",
+        "EXTERNAL: a gemini.google.com conversation in the sandbox tab showing a generated image",
+        "docs/probes/save-image-gemini-probe.md (selector and src scheme)"
+      ],
+      "expectedResult": "docs/VERIFICATION.md contains a dated '## `saveImage` on gemini.google.com' section recording matching size, dimensions and MIME type, the refused second write, and the distinct element-not-found and not-image failures. Until that section exists with passing checks, the phase stays blocked as MANUAL_CHROME_CHECK_PENDING.",
+      "dependsOn": [
+        "add-mcp-image-writer-and-saveimage-branch",
+        "probe-gemini-image-read-route"
+      ],
+      "guardNotes": [
+        "g1: only docs change; no lint impact",
+        "g2: npm run verify is re-run before the live session and must already be green; no source changes in this phase"
+      ],
+      "rubric": [
+        {
+          "id": "file-matches-returned-fields",
+          "label": "The on-disk file matches every returned field",
+          "ruleStatement": "The dated VERIFICATION.md section records the returned {path, bytes, width, height, mimeType} next to shell output proving the file at path has that byte count, magic-number type and pixel size, and that the size equals the in-page naturalWidth/naturalHeight. 10 = all three shell commands' raw output is pasted and the file still exists and re-checks the same way; 8 = all three checks recorded and matching; minScore 8.",
+          "passCriteria": [
+            "Run `grep -nE '^## `saveImage` on gemini.google.com \\([0-9]{4}-[0-9]{2}-[0-9]{2}\\)' docs/VERIFICATION.md`. It matches once.",
+            "The section shows `stat -f%z <path>` output equal to the returned bytes.",
+            "The section shows `file --mime-type <path>` (or a magic-number hexdump) output equal to the returned mimeType.",
+            "The section shows `sips -g pixelWidth -g pixelHeight <path>` output equal to the returned width/height and to the naturalWidth/naturalHeight that evaluatePage returned for the same selector.",
+            "The returned path is absolute (starts with `/`)."
+          ],
+          "failureExamples": [
+            "width/height match sips, but naturalWidth was never read, and Gemini was showing a downscaled preview element, so 'full resolution' is not proven.",
+            "bytes is compared with `ls -lh` output ('2.1M'), which cannot show an exact byte match."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "live-overwrite-and-path-refusal",
+          "label": "Second write refused live and file untouched; relative path rejected",
+          "ruleStatement": "A second saveImage to the same path without overwrite returns an isError 'exists' refusal, with stat size and mtime identical before and after, and a relative path is rejected. 10 = the stat lines before and after are pasted verbatim with the call durations; 8 = the refusal text plus matching before/after size and mtime; minScore 8.",
+          "passCriteria": [
+            "The section contains the refusal result text including 'exists' for the second call.",
+            "The section shows `stat -f '%z %m' <path>` output from before and after the second call, and the two lines are identical.",
+            "The section shows a call with a relative path (for example 'gemini.png') returning isError, with no file created at `$PWD/gemini.png` (`test ! -e` output or `ls` showing absence)."
+          ],
+          "failureExamples": [
+            "The second call uses a slightly different filename by mistake, so it succeeds and 'refusal confirmed' is written from the unit tests instead.",
+            "mtime is checked with `ls -l`, which has minute resolution, so a rewrite within the same minute would go unnoticed."
+          ],
+          "minScore": 8
+        },
+        {
+          "id": "live-distinct-failures-no-write",
+          "label": "element-not-found and not-image are distinct live and write nothing",
+          "ruleStatement": "On the same Gemini page, a selector matching nothing returns 'element-not-found' and a selector on a non-image element returns 'not-image', each as isError with no file created. 10 = the target directory listing before and after both calls is pasted; 8 = both distinct reasons recorded and no file present; minScore 7.",
+          "passCriteria": [
+            "The section records an isError result containing 'element-not-found' for a selector that matches nothing.",
+            "The section records an isError result containing 'not-image' for a selector on a div or other non-img/canvas element.",
+            "The section shows `ls <tempdir>` output after these calls listing only the one successfully saved file."
+          ],
+          "failureExamples": [
+            "The non-image selector picks a <picture> wrapper that contains an img, and the result is recorded as 'not-image' without noting the element's tagName, so it is unclear whether the right case was exercised.",
+            "Both failure calls use paths in a different directory than the one listed, so 'no file written' is not actually shown."
+          ],
+          "minScore": 7
+        },
+        {
+          "id": "no-permission-drift",
+          "label": "Manifest unchanged and no downloads reference",
+          "ruleStatement": "The shipped extension requests no new permission and the source never references downloads. 10 = the section pastes the grep output and the manifest permissions array; 8 = both commands below come back clean at verification time; minScore 9.",
+          "passCriteria": [
+            "Run `grep -rn 'downloads' extension/manifest.json src --exclude='*.test.ts'`. It prints nothing.",
+            "Run `git diff 1859fb5 (HEAD when horizon 18 was planned) -- extension/manifest.json`. It prints nothing.",
+            "The VERIFICATION.md section records the result of the grep above."
+          ],
+          "failureExamples": [
+            "The grep is run only on src, so a 'downloads' permission added to manifest.json during a debugging detour is missed."
+          ],
+          "minScore": 9
+        },
+        {
+          "id": "fresh-session-and-honest-status",
+          "label": "Fresh MCP session evidence and blocked-not-faked outcome",
+          "ruleStatement": "The live run happens in a fresh MCP session on the rebuilt extension, shown by the live tool list containing saveImage as the 23rd tool and a recorded call duration below the 30 s controller timeout. If any check fails, the phase stays blocked as MANUAL_CHROME_CHECK_PENDING with the failure recorded instead of being marked done. 10 = the duration of every call is recorded and the section names the extension build commit; 8 = the 23-tool evidence and success duration are recorded and the status matches the outcome; minScore 9.",
+          "passCriteria": [
+            "The section records that the live MCP tool list had 23 tools including saveImage (for example the tools/list count or the tool name as seen in Claude Code).",
+            "The section records the successful call's duration in ms or s, and it is below 30000 ms.",
+            "Run `git log -1 --format=%cd docs/VERIFICATION.md` and compare the dated heading. The heading date is on or before the commit date.",
+            "If any passCriteria above fails, the roadmap phase status for live-verify-saveimage-on-gemini is MANUAL_CHROME_CHECK_PENDING, not done."
+          ],
+          "failureExamples": [
+            "The section is written from a session started before the rebuild. saveImage is missing from the tool list, the results are copied from unit tests, and the phase is marked done.",
+            "A near-cap image times out at 15 s, but a smaller image is substituted and the timeout is not recorded."
+          ],
+          "minScore": 9
+        }
+      ],
+      "healerHint": "Most likely failure: the run happens against a stale MCP catalog or service worker, so saveImage is missing or times out. Rebuild, reload the extension, start a new Claude Code session, confirm 23 tools before calling, and leave the phase MANUAL_CHROME_CHECK_PENDING if any shell check still disagrees."
+    }
+  ],
+  "successCriteria": [
+    "Done means all hold: (1) a phase-0 live probe on gemini.google.com in the real signed-in Chrome via the sandbox tab records in discoveries.md which src scheme a generated image actually has (blob:, data:, or cross-origin https) and which in-page/CDP read route returns its bytes, and the reader is built on that recorded route; (2) saveImage is added across the full parity surface — PAGE_ACTIONS 22->23, types, param validation, extension handler, TOOL_CATALOG entry with an additionalProperties:false schema {selector, path, overwrite?}, MCP server branch, README, and the hard-coded action-list/length tests — with tsc, eslint (--max-warnings 0) and vitest green via npm run verify; (3) the MCP server, not the extension, writes the file: a non-absolute path is rejected, and an existing file without overwrite:true returns a clear refusal and is left byte- and mtime-untouched; (4) a successful call's MCP result contains only {path, bytes, width, height, mimeType} — no base64, no image content block — where bytes equals the on-disk file size, width/height are the image's natural (or canvas) pixel dimensions not CSS size, and mimeType matches the written bytes' magic number; (5) defined, non-throwing, distinct outcomes, each unit-tested, for: decoded bytes > 25 MB ('too large', nothing written, measured size + limit reported), selector matches nothing, element is not img/canvas, image not loaded / zero-size, tainted/unreadable source, relative path, existing file without overwrite; (6) manifest.json gains no 'downloads' permission (and no new permission at all) and chrome.downloads is never referenced; (7) live: in a fresh MCP session, saveImage on a Gemini-generated image in the sandbox tab writes a file to an absolute path whose byte count, decoded dimensions and magic-number type match the returned fields and whose dimensions match the in-page naturalWidth/naturalHeight, a second call to the same path without overwrite is refused, and the results are recorded in a dated section of docs/VERIFICATION.md, linked from README — the horizon's last phase stays blocked MANUAL_CHROME_CHECK_PENDING until this passes.",
+    "Probe Gemini image source and byte-read route: docs/probes/save-image-gemini-probe.md exists with all eight headings filled from live measurements and exactly one line matching ^VERDICT: (PROCEED in-page-fetch|REPLAN .+)$, checkable by grep.",
+    "Add in-page image byte reader to debugger ports: debugger-ports.unit.test.ts has passing readImage cases for success, all five failure reasons, a malformed reply and a timeout, with npm run verify green.",
+    "Add saveImage tool to protocol, extension and catalog: PAGE_ACTIONS has 23 entries ending in 'saveImage', and npm run verify is green with the updated actions, tool-catalog and page-actions unit tests.",
+    "Add MCP image writer and saveImage server branch: npm run verify is green with new passing image-writer.unit.test.ts and server.unit.test.ts saveImage cases, including the overwrite refusal that leaves the existing file's bytes and mtime unchanged. README.md and docs/TOOLS.md say twenty-three tools and docs/TOOLS.md has a '## saveImage' section.",
+    "Test saveImage live on a Gemini image: docs/VERIFICATION.md contains a dated '## `saveImage` on gemini.google.com' section recording matching size, dimensions and MIME type, the refused second write, and the distinct element-not-found and not-image failures. Until that section exists with passing checks, the phase stays blocked as MANUAL_CHROME_CHECK_PENDING."
+  ],
+  "deferred": [
+    "chrome.downloads-based saving or adding the 'downloads' manifest permission — the user explicitly excluded it, and an MCP-side write avoids the permission. (out of scope)",
+    "Saving CSS background-images, <picture>/<source> srcset variant selection beyond the element's resolved currentSrc, <video> frames, or SVG elements — the task targets <img> and <canvas> only. (out of scope)",
+    "Bulk/multi-image save (all images matching a selector) — one element per call keeps the size cap and result contract simple. (out of scope)",
+    "Chunked/streamed transfer of image bytes over the relay or any new protocol frame kind — a single command-response fits under the 25 MB cap and ws's default maxPayload. (out of scope)",
+    "Format conversion, re-encoding, resizing or compression of <img> bytes — the requirement is original full-resolution bytes; only canvas is necessarily encoded (PNG). (out of scope)",
+    "Returning the image to the AI client as an MCP image content block or base64 — the result is explicitly only {path, bytes, width, height, mimeType}; captureTab already covers model-facing images. (out of scope)",
+    "Creating missing parent directories, path sandboxing or allow-lists beyond requiring an absolute path — the user chose a caller-given absolute path; directory policy is a separate decision. (out of scope)",
+    "Making the unfocused sandbox tab render (focus emulation) to force lazy images to load — a separate render-primitive question already tracked in blockers. (out of scope)",
+    "Live verification on sites other than gemini.google.com, or via Gemini CLI / Codex / Cursor — Claude Code only per the h4 decision, and the user named Gemini as the target. (out of scope)",
+    "The next-horizon brief's backlog (read-result constant consolidation, dead active-tab code removal, persistent CDP sessions, JPEG rung) — the user chose this task instead. (out of scope)",
+    "Manifest/permission regression unit test (asserting no 'downloads' permission and no chrome.downloads reference) — fails gate 2 (needed now): criterion 6 is checked by a grep in the live-verify phase and nothing in this horizon touches the manifest",
+    "Relay unit test that a ~34 MB frame passes ws's default maxPayload — fails gate 2: relay.ts is unchanged and the live Gemini save exercises the real frame path",
+    "Per-tool controller timeout (widening CommandSender with timeoutMs in main.ts and server fakes) — fails gate 1 (asked for): the 30 s controller default already exceeds the 15 s CDP cap, so revisit only if the probe or live run shows the controller timing out first",
+    "Chunked transfer (Runtime.callFunctionOn/IO.read or a new relay frame kind) for near-cap images — fails gate 1: explicitly out of scope; a near-cap timeout is accepted as a guard()-mapped { error }",
+    "Focus emulation so lazy images load in the unfocused sandbox tab — fails gate 1: out of scope and tracked in blockers.md; such images return the defined 'not-loaded' outcome instead",
+    "Shared MAX_SAVE_IMAGE_BYTES constant in src/protocol for the MCP side to re-check — fails gate 3 (speculative abstraction): the cap is enforced once, in the page, and the catalog description quotes '25 MB' as text",
+    "Separate phase for README/TOOLS.md count and doc updates — fails gate 4 (ceremony): folded as steps into the MCP server phase per the prerequisites"
+  ],
+  "revision": 0
+}

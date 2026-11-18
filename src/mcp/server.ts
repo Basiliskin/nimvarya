@@ -23,11 +23,18 @@
  *    large to return" from a genuine error (which surfaces via `response.error`);
  *  - an `{ error }` reply or a transport failure (relay down, timeout) →
  *    `isError: true` with a readable message naming the action;
+ *  - `saveImage` → the image bytes are written to disk HERE, never returned:
+ *    success is a `text` block with exactly `{ path, bytes, width, height,
+ *    mimeType }`; a non-absolute `path` is refused before the client is
+ *    called, and every read failure or write refusal is `isError: true` JSON
+ *    naming its `reason`;
  *  - an unknown tool name → `isError: true` WITHOUT touching the client.
  *
  * The SDK's low-level `Server` is used (not the high-level `McpServer`) to match
  * boky's `extension-mcp.mjs` wiring.
  */
+
+import { isAbsolute } from "node:path";
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
@@ -42,10 +49,14 @@ import type { PageAction } from "../protocol/actions.js";
 import type {
   CaptureTabImageResult,
   CommandResponse,
+  ImageReadFailureReason,
+  ImageReadResult,
 } from "../protocol/types.js";
 
 import type { OversizeResult } from "../extension/size-limits.js";
 
+import { sniffMimeType } from "./image-writer.js";
+import type { ImageWriter } from "./image-writer.js";
 import { listTools } from "./tool-catalog.js";
 
 /** The MCP server identity advertised to clients. */
@@ -84,6 +95,7 @@ export interface CommandSender {
 
 export interface McpServerDeps {
   readonly client: CommandSender;
+  readonly imageWriter: ImageWriter;
 }
 
 function textResult(text: string, isError = false): CallToolResult {
@@ -170,6 +182,91 @@ function isOversizeResult(result: unknown): result is OversizeResult {
   );
 }
 
+const IMAGE_READ_FAILURE_REASONS: ReadonlySet<string> =
+  new Set<ImageReadFailureReason>([
+    "element-not-found",
+    "not-image",
+    "not-loaded",
+    "tainted",
+    "unreadable",
+    "too-large",
+  ]);
+
+function isImageReadResult(result: unknown): result is ImageReadResult {
+  if (typeof result !== "object" || result === null) return false;
+  const r = result as Record<string, unknown>;
+  if (r.read === false) {
+    return (
+      typeof r.reason === "string" && IMAGE_READ_FAILURE_REASONS.has(r.reason)
+    );
+  }
+  return (
+    r.read === true &&
+    typeof r.base64 === "string" &&
+    (r.mimeType === undefined || typeof r.mimeType === "string") &&
+    typeof r.width === "number" &&
+    typeof r.height === "number"
+  );
+}
+
+function saveImageFailure(
+  reason: string,
+  detail: Readonly<Record<string, unknown>>,
+): CallToolResult {
+  return textResult(
+    JSON.stringify({ saved: false, reason, ...detail }, null, 2),
+    true,
+  );
+}
+
+/**
+ * The path is checked before the extension is asked for anything, so a bad
+ * path never costs an image transfer; only `selector` crosses the wire.
+ */
+async function handleSaveImage(
+  deps: McpServerDeps,
+  args: Readonly<Record<string, unknown>>,
+): Promise<CallToolResult> {
+  const { path } = args;
+  if (typeof path !== "string" || !isAbsolute(path)) {
+    return saveImageFailure("path-not-absolute", {
+      message:
+        "`path` must be an absolute file path, e.g. /Users/me/Pictures/cat.png",
+    });
+  }
+  const response = await deps.client.sendCommand("saveImage", {
+    selector: args.selector,
+  });
+  if (response.error !== undefined) {
+    return textResult(`nimvarya "saveImage" failed: ${response.error}`, true);
+  }
+  const read = response.result;
+  if (!isImageReadResult(read)) {
+    return textResult(
+      `nimvarya "saveImage" failed: unexpected result ${JSON.stringify(read)}`,
+      true,
+    );
+  }
+  if (!read.read) {
+    const { reason, size, limit } = read;
+    return saveImageFailure(reason, { size, limit });
+  }
+  const bytes = Buffer.from(read.base64, "base64");
+  const outcome = await deps.imageWriter(path, bytes, args.overwrite === true);
+  if (!outcome.written) {
+    return saveImageFailure(outcome.reason, { path, message: outcome.message });
+  }
+  const result = {
+    path,
+    bytes: bytes.length,
+    width: read.width,
+    height: read.height,
+    mimeType:
+      sniffMimeType(bytes) ?? read.mimeType ?? "application/octet-stream",
+  };
+  return textResult(JSON.stringify(result, null, 2));
+}
+
 /**
  * Handle one `tools/call`. Exported so the mapping can be unit-tested directly
  * with a fake `CommandSender`, without spinning up a transport.
@@ -183,6 +280,7 @@ export async function handleToolCall(
     return textResult(`Unknown tool: ${toolName}`, true);
   }
   try {
+    if (toolName === "saveImage") return await handleSaveImage(deps, args);
     const response = await deps.client.sendCommand(toolName, args);
     if (response.error !== undefined) {
       return textResult(

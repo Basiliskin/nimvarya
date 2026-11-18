@@ -27,10 +27,14 @@
 
 /// <reference types="chrome" />
 
+import type { ImageReadResult } from "../protocol/types.js";
 import type { InPageScriptOutcome } from "./page-actions.js";
 
 /** The CDP protocol version `chrome.debugger.attach` requires. */
 const CDP_VERSION = "1.3";
+
+/** The most decoded bytes `readImage` will hand back; larger images are refused before they reach the relay. */
+const MAX_SAVE_IMAGE_BYTES = 25 * 1024 * 1024;
 
 /**
  * The max wall-clock for one CDP command session (attach → run → detach).
@@ -283,6 +287,17 @@ export interface DebuggerPorts {
    * rejects.
    */
   sendKeys(tabId: number, intent: SendKeysIntent): Promise<SendKeysOutcome>;
+
+  /**
+   * Read the bytes of the `<img>` or `<canvas>` matching `selector` in the
+   * given tab. An `<img>` is read with CDP `Page.getResourceContent`, which
+   * returns the resource file the page already loaded without going through
+   * page CORS; a `<canvas>` is exported in the page with `toBlob('image/png')`.
+   * Every page-content problem resolves to `{ read: false, reason }`, and an
+   * image over 25 MB is refused before its bytes leave this method. A malformed
+   * CDP reply, an attach failure or a timeout rejects.
+   */
+  readImage(tabId: number, selector: string): Promise<ImageReadResult>;
 }
 
 /**
@@ -325,7 +340,8 @@ export function chromeCaptureDebuggerPorts(): DebuggerPorts {
       | "capturing-full-page"
       | "evaluating"
       | "scrolling"
-      | "sending keys",
+      | "sending keys"
+      | "reading image",
     run: () => Promise<T>,
     timeoutMs = CDP_COMMAND_TIMEOUT_MS,
   ): Promise<T> {
@@ -732,13 +748,283 @@ export function chromeCaptureDebuggerPorts(): DebuggerPorts {
     return { focused, textInserted, keysPressed };
   }
 
+  async function readImage(
+    tabId: number,
+    selector: string,
+  ): Promise<ImageReadResult> {
+    return withDebuggerSession(tabId, "reading image", async () => {
+      const probe = parseImageProbe(
+        await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+          expression: imageProbeExpression(selector),
+          returnByValue: true,
+          awaitPromise: true,
+        }),
+      );
+      switch (probe.kind) {
+        case "missing":
+          return { read: false, reason: "element-not-found" };
+        case "other":
+          return { read: false, reason: "not-image" };
+        case "img":
+          return readImgResource(tabId, probe);
+        case "canvas":
+          return readCanvas(tabId, selector, probe);
+      }
+    });
+  }
+
+  async function readImgResource(
+    tabId: number,
+    probe: ImgProbe,
+  ): Promise<ImageReadResult> {
+    if (
+      !probe.complete ||
+      probe.currentSrc === "" ||
+      probe.naturalWidth <= 0 ||
+      probe.naturalHeight <= 0
+    ) {
+      return { read: false, reason: "not-loaded" };
+    }
+    await chrome.debugger.sendCommand({ tabId }, "Page.enable");
+    const frameId = parseMainFrameId(
+      await chrome.debugger.sendCommand({ tabId }, "Page.getFrameTree"),
+    );
+    let reply: unknown;
+    try {
+      reply = await chrome.debugger.sendCommand(
+        { tabId },
+        "Page.getResourceContent",
+        { frameId, url: probe.currentSrc },
+      );
+    } catch {
+      return { read: false, reason: "unreadable" };
+    }
+    const resource = parseResourceContent(reply);
+    if (!resource.base64Encoded || resource.content === "") {
+      return { read: false, reason: "unreadable" };
+    }
+    const byteLength = decodedBase64Length(resource.content);
+    if (byteLength > MAX_SAVE_IMAGE_BYTES) {
+      return {
+        read: false,
+        reason: "too-large",
+        size: byteLength,
+        limit: MAX_SAVE_IMAGE_BYTES,
+      };
+    }
+    return {
+      read: true,
+      base64: resource.content,
+      width: probe.naturalWidth,
+      height: probe.naturalHeight,
+      byteLength,
+    };
+  }
+
+  async function readCanvas(
+    tabId: number,
+    selector: string,
+    probe: CanvasProbe,
+  ): Promise<ImageReadResult> {
+    if (probe.width <= 0 || probe.height <= 0) {
+      return { read: false, reason: "not-loaded" };
+    }
+    const exported = parseCanvasExport(
+      await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+        expression: canvasExportExpression(selector),
+        returnByValue: true,
+        awaitPromise: true,
+      }),
+    );
+    switch (exported.kind) {
+      case "tainted":
+        return { read: false, reason: "tainted" };
+      case "empty":
+        return { read: false, reason: "not-loaded" };
+      case "too-large":
+        return {
+          read: false,
+          reason: "too-large",
+          size: exported.size,
+          limit: MAX_SAVE_IMAGE_BYTES,
+        };
+      case "png":
+        return {
+          read: true,
+          base64: exported.base64,
+          mimeType: "image/png",
+          width: probe.width,
+          height: probe.height,
+          byteLength: exported.size,
+        };
+    }
+  }
+
   return {
     captureScreenshot,
     captureFullPageScreenshot,
     evaluate,
     scroll,
     sendKeys,
+    readImage,
   };
+}
+
+interface ImgProbe {
+  readonly kind: "img";
+  readonly complete: boolean;
+  readonly currentSrc: string;
+  readonly naturalWidth: number;
+  readonly naturalHeight: number;
+}
+
+interface CanvasProbe {
+  readonly kind: "canvas";
+  readonly width: number;
+  readonly height: number;
+}
+
+type ImageProbe =
+  | { readonly kind: "missing" }
+  | { readonly kind: "other" }
+  | ImgProbe
+  | CanvasProbe;
+
+type CanvasExport =
+  | { readonly kind: "tainted" }
+  | { readonly kind: "empty" }
+  | { readonly kind: "too-large"; readonly size: number }
+  | { readonly kind: "png"; readonly base64: string; readonly size: number };
+
+/**
+ * The `Runtime.evaluate` expression that describes the element matching
+ * `selector`. The selector is embedded as a JSON string literal, so it is only
+ * ever data to `querySelector`; an invalid selector reads as "no element".
+ */
+function imageProbeExpression(selector: string): string {
+  return `(() => { let el; try { el = document.querySelector(${JSON.stringify(selector)}); } catch { el = null; } if (el === null) return { kind: "missing" }; if (el instanceof HTMLImageElement) return { kind: "img", complete: el.complete, currentSrc: el.currentSrc, naturalWidth: el.naturalWidth, naturalHeight: el.naturalHeight }; if (el instanceof HTMLCanvasElement) return { kind: "canvas", width: el.width, height: el.height }; return { kind: "other" }; })()`;
+}
+
+/**
+ * The `Runtime.evaluate` expression that exports the canvas matching
+ * `selector` as PNG base64. The size check runs on the blob before it is
+ * encoded, so an oversized canvas never crosses CDP. Only a `SecurityError`
+ * (a cross-origin, tainted canvas) is an outcome; any other throw surfaces as
+ * an exception.
+ */
+function canvasExportExpression(selector: string): string {
+  return `(async () => { const el = document.querySelector(${JSON.stringify(selector)}); if (!(el instanceof HTMLCanvasElement)) throw new Error("canvas no longer matches the selector"); let blob; try { blob = await new Promise((resolve, reject) => { try { el.toBlob(resolve, "image/png"); } catch (error) { reject(error); } }); } catch (error) { if (error instanceof DOMException && error.name === "SecurityError") return { kind: "tainted" }; throw error; } if (blob === null) return { kind: "empty" }; if (blob.size > ${MAX_SAVE_IMAGE_BYTES}) return { kind: "too-large", size: blob.size }; const dataUrl = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(reader.error); reader.readAsDataURL(blob); }); return { kind: "png", base64: dataUrl.slice(dataUrl.indexOf(",") + 1), size: blob.size }; })()`;
+}
+
+/** The `result.value` of a `Runtime.evaluate` reply, or a thrown error naming `stage`. */
+function evaluateValue(reply: unknown, stage: string): Record<string, unknown> {
+  if (!isRecord(reply)) {
+    throw new Error(`CDP Runtime.evaluate (${stage}) returned no result`);
+  }
+  const exceptionDetails = reply["exceptionDetails"];
+  if (isRecord(exceptionDetails)) {
+    const text = exceptionDetails["text"];
+    throw new Error(
+      `CDP Runtime.evaluate (${stage}) threw in page: ${typeof text === "string" ? text : "unknown error"}`,
+    );
+  }
+  const result = isRecord(reply["result"]) ? reply["result"] : undefined;
+  const value =
+    result !== undefined && isRecord(result["value"])
+      ? result["value"]
+      : undefined;
+  if (value === undefined) {
+    throw new Error(`CDP Runtime.evaluate (${stage}) returned no value`);
+  }
+  return value;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
+function parseImageProbe(reply: unknown): ImageProbe {
+  const value = evaluateValue(reply, "image probe");
+  const kind = value["kind"];
+  if (kind === "missing" || kind === "other") return { kind };
+  if (kind === "img") {
+    const complete = value["complete"];
+    const currentSrc = value["currentSrc"];
+    const naturalWidth = finiteNumber(value["naturalWidth"]);
+    const naturalHeight = finiteNumber(value["naturalHeight"]);
+    if (
+      typeof complete === "boolean" &&
+      typeof currentSrc === "string" &&
+      naturalWidth !== undefined &&
+      naturalHeight !== undefined
+    ) {
+      return { kind, complete, currentSrc, naturalWidth, naturalHeight };
+    }
+  }
+  if (kind === "canvas") {
+    const width = finiteNumber(value["width"]);
+    const height = finiteNumber(value["height"]);
+    if (width !== undefined && height !== undefined) {
+      return { kind, width, height };
+    }
+  }
+  throw new Error(
+    "CDP Runtime.evaluate (image probe) returned a malformed value",
+  );
+}
+
+function parseCanvasExport(reply: unknown): CanvasExport {
+  const value = evaluateValue(reply, "canvas export");
+  const kind = value["kind"];
+  if (kind === "tainted" || kind === "empty") return { kind };
+  const size = finiteNumber(value["size"]);
+  if (kind === "too-large" && size !== undefined) return { kind, size };
+  const base64 = value["base64"];
+  if (kind === "png" && size !== undefined && typeof base64 === "string") {
+    return { kind, base64, size };
+  }
+  throw new Error(
+    "CDP Runtime.evaluate (canvas export) returned a malformed value",
+  );
+}
+
+function parseMainFrameId(reply: unknown): string {
+  const frameTree =
+    isRecord(reply) && isRecord(reply["frameTree"])
+      ? reply["frameTree"]
+      : undefined;
+  const frame =
+    frameTree !== undefined && isRecord(frameTree["frame"])
+      ? frameTree["frame"]
+      : undefined;
+  const id = frame?.["id"];
+  if (typeof id !== "string" || id === "") {
+    throw new Error("CDP Page.getFrameTree returned no main frame id");
+  }
+  return id;
+}
+
+function parseResourceContent(reply: unknown): {
+  readonly content: string;
+  readonly base64Encoded: boolean;
+} {
+  if (!isRecord(reply)) {
+    throw new Error("CDP Page.getResourceContent returned no result");
+  }
+  const content = reply["content"];
+  const base64Encoded = reply["base64Encoded"];
+  if (typeof content !== "string" || typeof base64Encoded !== "boolean") {
+    throw new Error("CDP Page.getResourceContent returned a malformed result");
+  }
+  return { content, base64Encoded };
+}
+
+/** The number of bytes a padded base64 string decodes to. */
+function decodedBase64Length(base64: string): number {
+  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+  return Math.floor((base64.length * 3) / 4) - padding;
 }
 
 /**

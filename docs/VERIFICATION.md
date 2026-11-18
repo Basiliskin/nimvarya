@@ -439,6 +439,82 @@ plain text in the box and a synthetic Enter was ignored.
   `keysPressed: 2`; the first Enter chose the command, the second sent it, the
   message box emptied and the bot's reply appeared in the channel.
 
+## `saveImage` on gemini.google.com (2026-11-18)
+
+Run against real signed-in Chrome from a fresh Claude Code MCP session. The
+extension was rebuilt from the working tree on `1859fb5` (with the uncommitted
+saveImage work) and reloaded, and the relay was restarted at 18:40 (pid 36565).
+Two earlier attempts timed out at 30000 ms: one against the stale extension,
+and one against a relay started on 2026-11-13 whose guards dropped the unknown
+`saveImage` action. `npm run verify` was green before the run. The live tool
+list had 23 nimvarya tools, including `saveImage`.
+
+Page: the probe conversation `https://gemini.google.com/app/0a0bbd749434f8d8`.
+Gemini no longer renders an `https:` lh3 copy of the generated image. Both
+`generated-image single-image img.image` elements now have live-looking
+`blob:https://gemini.google.com/…` srcs, but the blobs are already revoked:
+an in-page `fetch(img.currentSrc)` fails with `TypeError: Failed to fetch`.
+The bytes behind them are the `fetch`-initiated lh3 resources (Resource Timing:
+`decodedBodySize` 101620 and 104192). `saveImage` reads each `<img>` through
+CDP `Page.getResourceContent`, so a revoked `blob:` src is not a problem.
+
+Saved image (selector `generated-image single-image img.image`, the first match,
+`naturalWidth × naturalHeight` from `evaluatePage` = 1024 × 559):
+
+```
+saveImage → { "path": "<scratch>/h18/gemini.webp", "bytes": 101620,
+              "width": 1024, "height": 559, "mimeType": "image/webp" }
+$ stat -f%z gemini.webp                         → 101620
+$ file --mime-type gemini.webp                  → image/webp
+$ xxd -l 16 gemini.webp                         → 5249 4646 ec8c 0100 5745 4250 5650 3820  RIFF....WEBPVP8
+$ sips -g pixelWidth -g pixelHeight gemini.webp → pixelWidth: 1024 / pixelHeight: 559
+```
+
+`<scratch>` is an absolute path under `/private/tmp/claude-501/…/scratchpad`,
+and `path` is returned absolute. The second image (selector
+`generated-image single-image img.image[src="blob:https://gemini.google.com/0c6b8281-…"]`,
+1024 × 559 in page) saved as `{ bytes: 104192, width: 1024, height: 559,
+mimeType: "image/webp" }`. stat, `file` and sips agree (104192 / image/webp /
+1024 × 559). Shell timestamps taken right before and after it, in the same
+tool batch, were 261 ms apart. The main selector was then timed on its own,
+saving to `gemini-timed.webp`. Separate shell calls before and after read
+`1795020305819` and `1795020312378`, so the call took at most 6559 ms. That
+upper bound includes the agent's own turn latency and is far under the
+30000 ms controller timeout. The result was the same `{ bytes: 101620, width:
+1024, height: 559, mimeType: "image/webp" }`, and `cmp` with `gemini.webp`
+reports the files identical. That save ran after the `ls` below, so the
+folder now also holds `gemini-timed.webp`.
+
+Refusals, on the same page:
+
+```
+$ stat -f '%z %m' gemini.webp   → 101620 1795020123      (before)
+saveImage same selector, same path, no overwrite
+  → isError { saved: false, reason: "exists", message: "EEXIST: file already exists, …" }
+$ stat -f '%z %m' gemini.webp   → 101620 1795020123      (after, identical)
+
+$ test ! -e $PWD/gemini.png     → absent before
+saveImage { path: "gemini.png" } → isError { reason: "path-not-absolute" }
+$ test ! -e $PWD/gemini.png     → absent after
+
+saveImage { selector: "#no-such-element-h18" }       → isError { reason: "element-not-found" }
+saveImage { selector: "generated-image single-image" } (tagName SINGLE-IMAGE, a wrapper around the img)
+                                                     → isError { reason: "not-image" }
+saveImage { selector: "div" } (tagName DIV)          → isError { reason: "not-image" }
+$ ls -A <scratch>/h18           → gemini-2.webp  gemini.webp
+```
+
+The failing calls targeted `missing.png`, `notimage.png` and `div.png` in the
+same folder. None was created; only the two successful saves are there.
+
+Permissions:
+
+```
+$ grep -rn 'downloads' extension/manifest.json src --exclude='*.test.ts'   → (no output, exit 1)
+$ git diff 1859fb5 -- extension/manifest.json                             → (no output)
+permissions: ["tabs","activeTab","scripting","storage","alarms","debugger"]
+```
+
 ## Manual smoke test
 
 1. `npm run relay` in one terminal.

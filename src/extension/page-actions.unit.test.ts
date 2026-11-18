@@ -28,6 +28,7 @@ import {
   resolveWaitForParams,
 } from "./page-actions.js";
 import type { InPageScriptOutcome } from "./page-actions.js";
+import type { ImageReadResult } from "../protocol/types.js";
 import type { ActiveTab, ChromePorts, TabIdentityWithWindow } from "./ports.js";
 import type { SandboxTabPorts } from "./sandbox-ports.js";
 
@@ -155,6 +156,9 @@ function fakeDebugger(overrides: Partial<DebuggerPorts> = {}): DebuggerPorts {
     ),
     sendKeys: vi.fn((): Promise<SendKeysOutcome> =>
       Promise.resolve({ focused: null, textInserted: false, keysPressed: 0 }),
+    ),
+    readImage: vi.fn((): Promise<ImageReadResult> =>
+      Promise.resolve({ read: false, reason: "element-not-found" }),
     ),
   };
   for (const [key, impl] of Object.entries(overrides)) {
@@ -3269,5 +3273,102 @@ describe("pageActionHandlers — only navigateTo may open the sandbox tab", () =
     expect(outcome).toHaveProperty("error");
     expect((outcome as { error: string }).error).toMatch(/navigateTo/);
     expect(vi.mocked(sandbox.resolveTabId)).not.toHaveBeenCalled();
+  });
+});
+
+describe("pageActionHandlers — saveImage", () => {
+  function saveImageHandler(
+    debuggerPorts: DebuggerPorts,
+    sandbox = fakeSandbox(),
+  ) {
+    return pageActionHandlers(fakePorts(), sandbox, debuggerPorts, fakeStore())
+      .saveImage;
+  }
+
+  it.each([
+    ["undefined", undefined],
+    ["empty", ""],
+    ["non-string", 42],
+  ])(
+    "refuses a %s selector without touching the tab or calling readImage",
+    async (_label, selector) => {
+      const sandbox = fakeSandbox();
+      const debuggerPorts = fakeDebugger();
+      const res = await saveImageHandler(debuggerPorts, sandbox)({ selector });
+      expect(res).toEqual({
+        error: "saveImage requires a non-empty selector string",
+      });
+      expect(vi.mocked(debuggerPorts.readImage)).toHaveBeenCalledTimes(0);
+      expect(vi.mocked(sandbox.requireTabId)).toHaveBeenCalledTimes(0);
+    },
+  );
+
+  it("refuses params that are not an object", async () => {
+    const debuggerPorts = fakeDebugger();
+    const res = await saveImageHandler(debuggerPorts)(undefined);
+    expect(res).toHaveProperty("error");
+    expect(vi.mocked(debuggerPorts.readImage)).toHaveBeenCalledTimes(0);
+  });
+
+  it("returns readImage's result unchanged, read from the sandbox tab", async () => {
+    const read: ImageReadResult = {
+      read: true,
+      base64: "iVBORw0KGgo=",
+      mimeType: "image/png",
+      width: 640,
+      height: 480,
+      byteLength: 8,
+    };
+    const debuggerPorts = fakeDebugger({
+      readImage: () => Promise.resolve(read),
+    });
+    const res = await saveImageHandler(debuggerPorts)({ selector: "img.hero" });
+    expect(res).toEqual({ result: read });
+    expect((res as { result: unknown }).result).toBe(read);
+    expect(vi.mocked(debuggerPorts.readImage)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(debuggerPorts.readImage)).toHaveBeenCalledWith(
+      7,
+      "img.hero",
+    );
+  });
+
+  it("passes a failed read through as a result, not an error", async () => {
+    const debuggerPorts = fakeDebugger({
+      readImage: () =>
+        Promise.resolve({
+          read: false,
+          reason: "too-large",
+          size: 30_000_000,
+          limit: 25 * 1024 * 1024,
+        }),
+    });
+    const res = await saveImageHandler(debuggerPorts)({ selector: "canvas" });
+    expect(res).toEqual({
+      result: {
+        read: false,
+        reason: "too-large",
+        size: 30_000_000,
+        limit: 25 * 1024 * 1024,
+      },
+    });
+  });
+
+  it("ignores path and overwrite; only the selector reaches readImage", async () => {
+    const debuggerPorts = fakeDebugger();
+    await saveImageHandler(debuggerPorts)({
+      selector: "img",
+      path: "/tmp/out.png",
+      overwrite: true,
+    });
+    expect(vi.mocked(debuggerPorts.readImage)).toHaveBeenCalledWith(7, "img");
+  });
+
+  it("turns a thrown readImage into an { error } outcome", async () => {
+    const debuggerPorts = fakeDebugger({
+      readImage: () => Promise.reject(new Error("CDP timeout")),
+    });
+    const res = await saveImageHandler(debuggerPorts)({ selector: "img" });
+    expect(res).toEqual({ error: "CDP timeout" });
+    expect(vi.mocked(debuggerPorts.readImage)).toHaveBeenCalledTimes(1);
   });
 });

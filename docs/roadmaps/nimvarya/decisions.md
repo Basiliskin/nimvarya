@@ -57,3 +57,9 @@
 - 2026-09-04 | horizon 16 | Byte-size caps for readConsoleMessages/readNetworkRequests are explicitly deferred out of this horizon at user request during Alignment Preview — see horizon-16 roadmap.md
 - 2026-09-04 | horizon 17 | Oversize readConsoleMessages/readNetworkRequests reads fully replace the result with buildOversizeResult (mirroring executeScript/evaluatePage), no entry-trimming — see horizon-17 roadmap.md
 - 2026-09-04 | horizon 17 | Live-measured on wikipedia (limit=500): console 500 entries = 76,671 chars; network 500 entries = 2,331,618 chars, under per-entry caps 8192/4096 — see horizon-17 roadmap.md
+- 2026-11-18 | horizon 18 | saveImage writes via the MCP server with exclusive create ('wx'); an existing file is refused unless overwrite:true; non-absolute paths rejected; no mkdir — because a caller-given path is a file-write primitive
+- 2026-11-18 | horizon 18 | saveImage image bytes are capped at 25*1024*1024 decoded bytes, checked in-page before encoding/transfer, returning a non-throwing too-large outcome — because the user chose 25 MB
+- 2026-11-18 | horizon 18 | saveImage reads via a dedicated DebuggerPorts.readImage Runtime.evaluate, not evaluatePage; the wire command carries only {selector} (MCP strips path/overwrite) — because evaluatePage caps at 1M chars
+- 2026-11-18 | horizon 18 | saveImage adds no manifest permission and never uses chrome.downloads; result is only {path, bytes, width, height, mimeType}, mimeType sniffed from magic bytes — because the user excluded downloads
+- 2026-11-18 | horizon 18 | saveImage saves an <img> as the bytes the page loaded (not original-upload resolution), width/height = natural size — because user chose it after the probe; Gemini-only full-res code is out
+- 2026-11-18 | horizon 18 | saveImage reads <img> only via CDP Page.getResourceContent (img cap checked in extension), canvas via toBlob evaluate; failure = unreadable — supersedes the h18 Runtime.evaluate read + in-page cap lines

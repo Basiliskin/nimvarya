@@ -17,6 +17,7 @@ import {
   createControllerClient,
   resolveBridgeUrl,
 } from "../controller/controller-client.js";
+import { writeImageFile } from "./image-writer.js";
 import { createMcpServer } from "./server.js";
 import type { CommandSender } from "./server.js";
 
@@ -68,6 +69,9 @@ export async function runMcpServer(
   const { sender, start } = deps.createSender();
   start();
   deps.logError(`connecting to relay at ${resolveBridgeUrl()}`);
-  const server = createMcpServer({ client: sender });
+  const server = createMcpServer({
+    client: sender,
+    imageWriter: writeImageFile,
+  });
   await deps.attachTransport(server);
 }

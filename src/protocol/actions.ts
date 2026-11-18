@@ -30,6 +30,7 @@ export const PAGE_ACTIONS = [
   "waitFor",
   "closeSandboxTab",
   "sendKeys",
+  "saveImage",
 ] as const;
 
 export type PageAction = (typeof PAGE_ACTIONS)[number];

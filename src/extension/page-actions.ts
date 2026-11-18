@@ -29,6 +29,7 @@ import type {
   CaptureTabMode,
   CaptureTabResult,
   FindElementMatch,
+  SaveImageParams,
 } from "../protocol/types.js";
 import { DEFAULT_READ_LIMIT, MAX_READ_LIMIT } from "./capture-buffer.js";
 import type { CaptureStore } from "./capture-store.js";
@@ -218,6 +219,21 @@ export function resolveSendKeysParams(
     ...(names.length > 0 ? { keys: names } : {}),
     ...(typeof delayMs === "number" ? { delayMs } : {}),
   };
+}
+
+/**
+ * Validate `saveImage` params down to the wire shape the extension uses. Any
+ * `path` / `overwrite` keys are dropped: the file is written by the MCP server,
+ * never by the extension.
+ */
+export function resolveSaveImageParams(
+  params: unknown,
+): SaveImageParams | { readonly error: string } {
+  const selector = isRecord(params) ? params["selector"] : undefined;
+  if (!nonEmptyString(selector)) {
+    return { error: "saveImage requires a non-empty selector string" };
+  }
+  return { selector };
 }
 
 /**
@@ -1463,6 +1479,15 @@ export function pageActionHandlers(
       };
     },
 
+    saveImage: async (params) => {
+      const parsed = resolveSaveImageParams(params);
+      if ("error" in parsed) return parsed;
+      const tabId = await sandboxTab.requireTabId();
+      return {
+        result: await captureDebugger.readImage(tabId, parsed.selector),
+      };
+    },
+
     waitFor: async (params) => {
       const parsed = resolveWaitForParams(params);
       if ("error" in parsed) return parsed;
@@ -1539,5 +1564,6 @@ export function pageActionHandlers(
     waitFor: guard(raw.waitFor),
     closeSandboxTab: guard(raw.closeSandboxTab),
     sendKeys: guard(raw.sendKeys),
+    saveImage: guard(raw.saveImage),
   };
 }

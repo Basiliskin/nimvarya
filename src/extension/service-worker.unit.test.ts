@@ -101,6 +101,8 @@ function fakeDebuggerPorts(): DebuggerPorts {
       }),
     sendKeys: () =>
       Promise.resolve({ focused: null, textInserted: false, keysPressed: 0 }),
+    readImage: () =>
+      Promise.resolve({ read: false, reason: "element-not-found" as const }),
   };
 }
 

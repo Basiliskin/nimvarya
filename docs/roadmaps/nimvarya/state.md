@@ -39,5 +39,8 @@
 - 2026-09-04 | horizon 15 | completed | 5/5 phases done; subagent-graded (no self-grades), 0 amendments, 0 overrides; live full-page verified 3024x10400 (dpr 2 exact) + composite-ceiling discovery — see horizon-15 roadmap.md
 - 2026-09-04 | horizon 16 | planned | 5 phases (shared oversize helper, executeScript/evaluatePage non-throwing, findElement constant fix, closeSandboxTab action, docs+live-verify); full path technical; gate — see horizon-16 roadmap.md
 - 2026-09-04 | horizon 16 | completed | 5/5 phases done, subagent-graded (no self-grades), 0 amendments/0 overrides; live oversize isError + close/recreate (tab 1799015698->1799015700) verified — see horizon-16 roadmap.md
-- 2026-09-04 | horizon 17 | planned | 4 phases (measure real sizes+record to decisions.md, add byte ceiling to reads, widen MCP isError branch, document catalog+README); full path technical; gate passed after 2 critic iterations, 1 major healed, 0 debt — see horizon-17 roadmap.md
+- 2026-09-04 | horizon 17 | planned | 4 phases (measure real sizes+record to decisions.md, add byte ceiling to reads, widen MCP isError branch, document catalog+README); full path technical; gate passed after 2 — see horizon-17 roadmap.md
 - 2026-09-05 | horizon 17 | completed | 4/4 phases done, subagent-graded (no self-grades), 0 amendments/0 overrides — see horizon-17 roadmap.md
+- 2026-11-18 | horizon 18 | planned | 5 phases (probe Gemini read route, readImage debugger port, saveImage parity 22->23, MCP image writer + server branch, live Gemini save); full path technical; gate passed 1 — see horizon-18 roadmap.md
+- 2026-11-18 | horizon 18 | replanned | revise-phases, 1 phase replaced + 3 amended — probe showed in-page fetch fails on Gemini; img now read via CDP Page.getResourceContent
+h18 phase 2 add-image-reader-debugger-port done 2026-11-18 (9/10/10/10/10): DebuggerPorts.readImage via Page.getResourceContent (img) / toBlob (canvas), 25MB cap; next: phase 3.

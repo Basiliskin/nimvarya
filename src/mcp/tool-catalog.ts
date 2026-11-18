@@ -447,6 +447,32 @@ export const TOOL_CATALOG: Record<PageAction, ToolCatalogEntry> = {
       "Close the dedicated sandbox tab (if one exists) and clear its persisted id, so the next page action lazily recreates a fresh tab. No-op-safe and never throws: returns `{ closed: true, hadTab: true }` when a live sandbox tab was closed, or `{ closed: false, hadTab: false }` when there is no sandbox tab, the stored id points to an already-closed tab, or it is called twice in a row. Scoped to exactly the sandbox tab — no other (non-sandbox) open tab is affected. Capture-buffer eviction for the closed tab is handled by the extension's existing tab-removed listener, not by this tool. Takes no arguments.",
     inputSchema: NO_ARGS,
   },
+  saveImage: {
+    description:
+      "Save the image shown by an `<img>` or `<canvas>` in the sandbox tab to a file on this machine, without the browser's download prompt and without sending the image to you. An `<img>` is saved as the image as the page loaded it: the exact resource file the page downloaded, not re-encoded, and not necessarily the original upload's resolution. A `<canvas>` is saved as PNG. Returns only `{ path, bytes, width, height, mimeType }`, where width/height are the natural (or canvas) pixel size and mimeType comes from the file's own bytes. Images over 25 MB are refused. An existing file is never replaced unless `overwrite` is true, and missing folders are not created. Fails with a reason: element-not-found (no element matches `selector`), not-image (the element is not an `<img>` or `<canvas>`), not-loaded (the `<img>` has not finished loading), tainted (`<canvas>` only: it holds cross-origin pixels the browser will not export), unreadable (the browser could not hand back the `<img>`'s loaded resource), too-large (over 25 MB), a `path` that is not absolute, or a file that already exists at `path` when `overwrite` is not true.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: {
+          type: "string",
+          description:
+            "CSS selector of the `<img>` or `<canvas>` to save; the first match is used.",
+        },
+        path: {
+          type: "string",
+          description:
+            "Absolute path of the file to write, including its name, e.g. /Users/me/Pictures/cat.png. Its folder must already exist.",
+        },
+        overwrite: {
+          type: "boolean",
+          description:
+            "Replace a file that already exists at `path`. Defaults to false, which refuses to touch an existing file.",
+        },
+      },
+      required: ["selector", "path"],
+      additionalProperties: false,
+    },
+  },
 };
 
 /**
